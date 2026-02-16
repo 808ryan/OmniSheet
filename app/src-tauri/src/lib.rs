@@ -9,18 +9,20 @@ use std::time::Duration;
 
 use state::AppState;
 use tauri::Manager;
+use tauri_plugin_log::{Target, TargetKind};
+use uuid::Uuid;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default();
-
-    if cfg!(debug_assertions) {
-        builder = builder.plugin(
-            tauri_plugin_log::Builder::default()
-                .level(log::LevelFilter::Info)
-                .build(),
-        );
-    }
+    let builder = tauri::Builder::default().plugin(
+        tauri_plugin_log::Builder::default()
+            .level(log::LevelFilter::Info)
+            .targets([
+                Target::new(TargetKind::Stdout),
+                Target::new(TargetKind::LogDir { file_name: None }),
+            ])
+            .build(),
+    );
 
     builder
         .setup(|app| {
@@ -28,10 +30,15 @@ pub fn run() {
             let http_client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(45))
                 .build()?;
+            let session_id = Uuid::new_v4().to_string();
+            let app_version = app.package_info().version.to_string();
 
             app.manage(AppState {
                 connection: std::sync::Mutex::new(connection),
                 http_client,
+                session_id,
+                app_version,
+                api_key_cache: std::sync::Mutex::new(None),
             });
 
             Ok(())
@@ -47,6 +54,10 @@ pub fn run() {
             commands::timeline_list_for_date,
             commands::timeline_update_entry,
             commands::interpret_text_message,
+            commands::diagnostics_record_frontend_event,
+            commands::diagnostics_list,
+            commands::diagnostics_copy_bundle,
+            commands::maintenance_repair_suspicious_entries,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

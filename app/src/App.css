@@ -59,7 +59,7 @@
 
 .app-nav {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border: 1px solid var(--outline);
   border-radius: 16px;
   background: var(--surface);
@@ -169,6 +169,11 @@ button.danger {
   color: #05603a;
 }
 
+.alert.warning {
+  background: #fff4e5;
+  color: #93370d;
+}
+
 .status-chip {
   border-radius: 999px;
   background: var(--accent-soft);
@@ -187,6 +192,21 @@ button.danger {
 
 .result-card p {
   margin: 0.3rem 0;
+}
+
+.capture-status.running {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.capture-status.success {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.capture-status.error {
+  border-color: #fca5a5;
+  background: #fef2f2;
 }
 
 .warning-row {
@@ -226,6 +246,12 @@ button.danger {
   justify-content: space-between;
   align-items: center;
   gap: 0.75rem;
+}
+
+.timeline-range {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
 }
 
 .timeline-controls {
@@ -277,6 +303,8 @@ button.danger {
   padding: 0.35rem 0.5rem;
   display: grid;
   gap: 0.2rem;
+  align-content: start;
+  overflow: hidden;
   box-shadow: 0 8px 12px rgba(0, 0, 0, 0.16);
   transform: translateY(0);
   transition: transform 140ms ease;
@@ -292,10 +320,21 @@ button.danger {
 
 .timeline-block strong {
   font-size: 0.78rem;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .timeline-block span {
   font-size: 0.75rem;
+}
+
+.timeline-block-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.95;
 }
 
 .timeline-editor {
@@ -393,6 +432,77 @@ button.danger {
 .row-actions button {
   padding: 0.35rem 0.5rem;
   font-size: 0.74rem;
+}
+
+.diagnostics-panel {
+  gap: 0.9rem;
+}
+
+.diagnostics-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.diagnostics-filters {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.diagnostics-filters .active-filter {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.diagnostics-list {
+  display: grid;
+  gap: 0.6rem;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
+.diag-event {
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  padding: 0.65rem;
+  background: #fafcff;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.diag-event.error {
+  border-color: #fda29b;
+  background: #fff6f5;
+}
+
+.diag-event.warning {
+  border-color: #fecd89;
+  background: #fffaeb;
+}
+
+.diag-event p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.diag-event pre {
+  margin: 0;
+  background: #edf2ff;
+  border-radius: 8px;
+  padding: 0.45rem;
+  overflow-x: auto;
+  font-size: 0.74rem;
+}
+
+.diagnostics-hint {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
 }
 
 .runtime-shell {
