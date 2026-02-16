@@ -8,11 +8,13 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement, Engagement,
-    EngagementUpsertInput, NormalizedEntry, TimelineEntry, Warning, WarningType,
+    Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
+    DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, TimelineEntry, Warning,
+    WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
+pub const DIAGNOSTICS_RETENTION_DAYS: i64 = 7;
 
 pub fn current_unix_timestamp() -> i64 {
     SystemTime::now()
@@ -33,6 +35,7 @@ pub fn init_database(app: &AppHandle) -> AppResult<Connection> {
     let db_path = app_data_dir.join("omnisheet.db");
     let connection = Connection::open(db_path)?;
     run_migrations(&connection)?;
+    prune_old_diagnostics(&connection, DIAGNOSTICS_RETENTION_DAYS)?;
     Ok(connection)
 }
 
@@ -115,6 +118,24 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
 
       CREATE INDEX IF NOT EXISTS idx_entry_warnings_entry_id ON entry_warnings(entry_id);
       CREATE INDEX IF NOT EXISTS idx_entry_warnings_warning_type ON entry_warnings(warning_type);
+
+      CREATE TABLE IF NOT EXISTS diagnostics_events (
+        id TEXT PRIMARY KEY,
+        timestamp INTEGER NOT NULL,
+        session_id TEXT NOT NULL,
+        correlation_id TEXT NOT NULL,
+        layer TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        command TEXT,
+        status TEXT NOT NULL,
+        duration_ms INTEGER,
+        message_text TEXT,
+        details_json TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_diagnostics_events_timestamp ON diagnostics_events(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_diagnostics_events_correlation ON diagnostics_events(correlation_id);
+      CREATE INDEX IF NOT EXISTS idx_diagnostics_events_status ON diagnostics_events(status);
     "#,
     )?;
 
@@ -670,6 +691,159 @@ pub fn resolve_code_ids(
     };
 
     Ok((engagement_id, activity_id))
+}
+
+pub fn prune_old_diagnostics(conn: &Connection, retention_days: i64) -> AppResult<()> {
+    let normalized_days = retention_days.max(1);
+    let cutoff_timestamp = current_unix_timestamp() - (normalized_days * 24 * 60 * 60);
+    conn.execute(
+        "DELETE FROM diagnostics_events WHERE timestamp < ?1",
+        params![cutoff_timestamp],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_diagnostics_event(
+    conn: &Connection,
+    session_id: &str,
+    correlation_id: &str,
+    layer: &str,
+    event_type: &str,
+    command: Option<&str>,
+    status: &str,
+    duration_ms: Option<i64>,
+    message_text: Option<&str>,
+    details_json: &str,
+) -> AppResult<DiagnosticsEvent> {
+    let event = DiagnosticsEvent {
+        id: Uuid::new_v4().to_string(),
+        timestamp: current_unix_timestamp(),
+        session_id: session_id.to_string(),
+        correlation_id: correlation_id.to_string(),
+        layer: layer.to_string(),
+        event_type: event_type.to_string(),
+        command: command.map(|value| value.to_string()),
+        status: status.to_string(),
+        duration_ms,
+        message_text: message_text.map(|value| value.trim().to_string()),
+        details_json: details_json.to_string(),
+    };
+
+    conn.execute(
+        r#"
+      INSERT INTO diagnostics_events (
+        id,
+        timestamp,
+        session_id,
+        correlation_id,
+        layer,
+        event_type,
+        command,
+        status,
+        duration_ms,
+        message_text,
+        details_json
+      )
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+    "#,
+        params![
+            event.id,
+            event.timestamp,
+            event.session_id,
+            event.correlation_id,
+            event.layer,
+            event.event_type,
+            event.command,
+            event.status,
+            event.duration_ms,
+            event.message_text,
+            event.details_json,
+        ],
+    )?;
+
+    Ok(event)
+}
+
+pub fn list_diagnostics_events(
+    conn: &Connection,
+    limit: i64,
+    filter: Option<&str>,
+) -> AppResult<Vec<DiagnosticsEvent>> {
+    let normalized_limit = limit.clamp(1, 500);
+
+    let (query, parameters): (&str, Vec<&dyn rusqlite::ToSql>) = match filter {
+        Some("errors") => (
+            r#"
+          SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
+          FROM diagnostics_events
+          WHERE status = 'error'
+          ORDER BY timestamp DESC
+          LIMIT ?1
+        "#,
+            vec![&normalized_limit],
+        ),
+        Some("warnings") => (
+            r#"
+          SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
+          FROM diagnostics_events
+          WHERE status = 'warning'
+          ORDER BY timestamp DESC
+          LIMIT ?1
+        "#,
+            vec![&normalized_limit],
+        ),
+        Some("capture") => (
+            r#"
+          SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
+          FROM diagnostics_events
+          WHERE command = 'interpret_text_message' OR event_type LIKE 'llm_%'
+          ORDER BY timestamp DESC
+          LIMIT ?1
+        "#,
+            vec![&normalized_limit],
+        ),
+        Some("settings") => (
+            r#"
+          SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
+          FROM diagnostics_events
+          WHERE command IN ('settings_get_status', 'settings_set_openai_key') OR event_type = 'key_save_verify'
+          ORDER BY timestamp DESC
+          LIMIT ?1
+        "#,
+            vec![&normalized_limit],
+        ),
+        _ => (
+            r#"
+          SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
+          FROM diagnostics_events
+          ORDER BY timestamp DESC
+          LIMIT ?1
+        "#,
+            vec![&normalized_limit],
+        ),
+    };
+
+    let mut statement = conn.prepare(query)?;
+    let events = statement
+        .query_map(parameters.as_slice(), |row| {
+            Ok(DiagnosticsEvent {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                session_id: row.get(2)?,
+                correlation_id: row.get(3)?,
+                layer: row.get(4)?,
+                event_type: row.get(5)?,
+                command: row.get(6)?,
+                status: row.get(7)?,
+                duration_ms: row.get(8)?,
+                message_text: row.get(9)?,
+                details_json: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(events)
 }
 
 fn parse_tags(tags_json: &str) -> Option<Vec<String>> {

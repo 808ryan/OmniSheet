@@ -11,6 +11,9 @@ pub async fn interpret_message(
     api_key: &str,
     raw_text: &str,
     client_timestamp_iso: &str,
+    client_local_date: &str,
+    client_local_time: &str,
+    client_utc_offset_minutes: i64,
     timezone: &str,
     code_context: &CodeContext,
 ) -> AppResult<LlmResponse> {
@@ -18,14 +21,14 @@ pub async fn interpret_message(
 You are OmniSheet, a timesheet interpretation assistant.
 Return strict JSON with this shape:
 {
-  "entries": [
+      "entries": [
     {
       "engagementCode": string | null,
       "activityCode": string | null,
       "date": "YYYY-MM-DD",
-      "startTime": "HH:MM",
-      "endTime": "HH:MM",
-      "durationMinutes": number,
+      "startTime": "HH:MM" | null,
+      "endTime": "HH:MM" | null,
+      "durationMinutes": number | null,
       "description": string,
       "confidence": number
     }
@@ -33,16 +36,22 @@ Return strict JSON with this shape:
 }
 
 Rules:
-- Infer start/end from natural language and timestamp.
+- Infer start/end from natural language and provided capture context.
+- If the message does NOT contain a concrete clock time, set startTime/endTime/durationMinutes to null.
+- Never default missing times to 00:00.
 - If uncertain, set lower confidence.
 - If no match exists, set engagementCode/activityCode to null.
 - Duration and times must be internally consistent.
+- Confidence must be in range 0.0 to 1.0.
 - Never include text outside JSON.
 "#;
 
     let user_prompt = json!({
       "message": raw_text,
       "clientTimestampIso": client_timestamp_iso,
+      "clientLocalDate": client_local_date,
+      "clientLocalTime": client_local_time,
+      "clientUtcOffsetMinutes": client_utc_offset_minutes,
       "timezone": timezone,
       "engagementActivityContext": code_context,
     });

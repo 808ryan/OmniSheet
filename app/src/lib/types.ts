@@ -53,6 +53,9 @@ export interface InterpretTextInput {
   rawText: string
   clientTimestampIso: string
   timezone: string
+  clientLocalDate: string
+  clientLocalTime: string
+  clientUtcOffsetMinutes: number
 }
 
 export interface Warning {
@@ -62,9 +65,11 @@ export interface Warning {
 }
 
 export interface InterpretResult {
+  correlationId: string
   rawMessageId: string
   createdEntryIds: string[]
   warnings: Warning[]
+  normalizationNotes: string[]
 }
 
 export interface TimelineEntry {
@@ -97,4 +102,59 @@ export interface TimelineUpdateInput {
 
 export interface SettingsStatus {
   hasOpenAiKey: boolean
+  storageHealth: 'ok' | 'unavailable' | 'read_error'
+  keySource: 'keyring' | 'session_cache' | 'none'
+  statusLevel: 'ok' | 'warning' | 'error'
+  lastError: string | null
+}
+
+export interface DiagnosticsListInput {
+  limit?: number
+  filter?: string
+}
+
+export interface DiagnosticsEvent {
+  id: string
+  timestamp: number
+  sessionId: string
+  correlationId: string
+  layer: string
+  eventType: string
+  command: string | null
+  status: string
+  durationMs: number | null
+  messageText: string | null
+  detailsJson: string
+}
+
+export interface DiagnosticsBundle {
+  text: string
+}
+
+export interface RepairSuspiciousEntriesInput {
+  limit?: number
+}
+
+export interface RepairSuspiciousEntriesResult {
+  scannedCount: number
+  repairedCount: number
+  repairedEntryIds: string[]
+}
+
+export interface DiagnosticsRecordInput {
+  correlationId: string
+  layer: string
+  eventType: string
+  command?: string
+  status: string
+  durationMs?: number
+  messageText?: string
+  detailsJson?: string
+}
+
+export interface AppCommandErrorShape {
+  code: string
+  command: string
+  correlationId: string
+  message: string
 }

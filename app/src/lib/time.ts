@@ -35,8 +35,9 @@ export function timeInputToMinute(value: string): number {
 }
 
 export function minuteToLabel(totalMinutes: number): string {
-  const hours24 = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
+  const normalizedMinutes = ((Math.floor(totalMinutes) % 1440) + 1440) % 1440
+  const hours24 = Math.floor(normalizedMinutes / 60)
+  const minutes = normalizedMinutes % 60
   const suffix = hours24 >= 12 ? 'PM' : 'AM'
   const hours12 = hours24 % 12 || 12
   return `${hours12}:${`${minutes}`.padStart(2, '0')} ${suffix}`
