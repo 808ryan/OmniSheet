@@ -1,0 +1,198 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyInput {
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsStatus {
+    pub has_open_ai_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Activity {
+    pub id: String,
+    pub engagement_id: String,
+    pub code: String,
+    pub name: String,
+    pub tags: Vec<String>,
+    pub is_active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Engagement {
+    pub id: String,
+    pub code: String,
+    pub name: String,
+    pub client: Option<String>,
+    pub tags: Vec<String>,
+    pub is_active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub activities: Vec<Activity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngagementUpsertInput {
+    pub id: Option<String>,
+    pub code: String,
+    pub name: String,
+    pub client: Option<String>,
+    pub tags: Vec<String>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityUpsertInput {
+    pub id: Option<String>,
+    pub engagement_id: String,
+    pub code: String,
+    pub name: String,
+    pub tags: Vec<String>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdInput {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DateInput {
+    pub date: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterpretTextInput {
+    pub raw_text: String,
+    pub client_timestamp_iso: String,
+    pub timezone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterpretResult {
+    pub raw_message_id: String,
+    pub created_entry_ids: Vec<String>,
+    pub warnings: Vec<Warning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningType {
+    LowConfidence,
+    Overlap,
+    Unmatched,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Warning {
+    pub warning_type: WarningType,
+    pub entry_id: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineEntry {
+    pub id: String,
+    pub date: String,
+    pub start_minute: i64,
+    pub end_minute: i64,
+    pub duration_minutes: i64,
+    pub description: String,
+    pub source: String,
+    pub confidence: f64,
+    pub engagement_id: Option<String>,
+    pub activity_id: Option<String>,
+    pub engagement_code: Option<String>,
+    pub engagement_name: Option<String>,
+    pub activity_code: Option<String>,
+    pub activity_name: Option<String>,
+    pub warning_flags: Vec<WarningType>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineUpdateInput {
+    pub id: String,
+    pub engagement_id: Option<String>,
+    pub activity_id: Option<String>,
+    pub date: String,
+    pub start_minute: i64,
+    pub end_minute: i64,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdResult {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeContext {
+    pub engagements: Vec<ContextEngagement>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextEngagement {
+    pub code: String,
+    pub name: String,
+    pub tags: Vec<String>,
+    pub activities: Vec<ContextActivity>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextActivity {
+    pub code: String,
+    pub name: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmResponse {
+    pub entries: Vec<LlmEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmEntry {
+    pub engagement_code: Option<String>,
+    pub activity_code: Option<String>,
+    pub date: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub duration_minutes: Option<i64>,
+    pub description: Option<String>,
+    pub confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NormalizedEntry {
+    pub date: String,
+    pub start_minute: i64,
+    pub end_minute: i64,
+    pub duration_minutes: i64,
+    pub description: String,
+    pub confidence: f64,
+    pub engagement_code: Option<String>,
+    pub activity_code: Option<String>,
+}
