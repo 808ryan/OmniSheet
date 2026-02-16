@@ -1,4 +1,6 @@
+# =====================
 # Logs
+# =====================
 logs
 *.log
 npm-debug.log*
@@ -7,18 +9,52 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+# =====================
+# Node / Frontend
+# =====================
+node_modules/
+dist/
+dist-ssr/
+.vite/
 *.local
 
-# Editor directories and files
+# npm cache accidentally created earlier
+.npm-cache/
+
+# =====================
+# Environment / Secrets
+# =====================
+.env
+.env.*
+*.env
+
+# =====================
+# Editor / OS
+# =====================
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# =====================
+# Claude / AI local config
+# =====================
+.claude/settings.local.json
+
+# =====================
+# Tauri / Rust
+# =====================
+app/src-tauri/target/
+**/Cargo.lock
+
+# =====================
+# Build artifacts
+# =====================
+build/
+coverage/
