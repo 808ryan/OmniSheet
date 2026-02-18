@@ -1128,15 +1128,17 @@ pub fn maintenance_repair_suspicious_entries(
                 continue;
             }
 
-            let Some(reference_timestamp) = Local.timestamp_opt(candidate.message_timestamp, 0).single() else {
+            let Some(reference_timestamp) =
+                Local.timestamp_opt(candidate.message_timestamp, 0).single()
+            else {
                 continue;
             };
 
             let temporal_reference = TemporalReference {
                 local_date: reference_timestamp.date_naive(),
-                rounded_end_minute: round_to_nearest_30(
-                    minutes_from_time(reference_timestamp.time()) as i64,
-                )
+                rounded_end_minute: round_to_nearest_30(minutes_from_time(
+                    reference_timestamp.time(),
+                ) as i64)
                 .clamp(30, MINUTES_IN_DAY),
             };
 
@@ -1260,8 +1262,10 @@ fn build_temporal_reference(
     input: &InterpretTextInput,
     parsed_timestamp: DateTime<Local>,
 ) -> TemporalReference {
-    let local_date = parse_date(input.client_local_date.trim()).unwrap_or_else(|| parsed_timestamp.date_naive());
-    let local_time = parse_time(input.client_local_time.trim()).unwrap_or_else(|| parsed_timestamp.time());
+    let local_date =
+        parse_date(input.client_local_date.trim()).unwrap_or_else(|| parsed_timestamp.date_naive());
+    let local_time =
+        parse_time(input.client_local_time.trim()).unwrap_or_else(|| parsed_timestamp.time());
     let rounded_end_minute =
         round_to_nearest_30(minutes_from_time(local_time) as i64).clamp(30, MINUTES_IN_DAY);
 
@@ -1348,9 +1352,9 @@ fn normalize_llm_entry(
         (fallback_start, fallback_end, Some(reason.to_string()))
     } else {
         let (candidate_start, candidate_end) = match (parsed_start, parsed_end) {
-        (Some(start), Some(end)) => (start, end),
-        (Some(start), None) => (start, start + normalized_duration),
-        (None, Some(end)) => (end - normalized_duration, end),
+            (Some(start), Some(end)) => (start, end),
+            (Some(start), None) => (start, start + normalized_duration),
+            (None, Some(end)) => (end - normalized_duration, end),
             (None, None) => (fallback_start, fallback_end),
         };
         (candidate_start, candidate_end, None)
@@ -1624,7 +1628,9 @@ mod tests {
     #[test]
     fn explicit_time_cue_detection_identifies_clock_times() {
         assert!(message_has_explicit_clock_time_cue("Met client at 2:30 PM"));
-        assert!(message_has_explicit_clock_time_cue("reviewed controls at 14:10"));
+        assert!(message_has_explicit_clock_time_cue(
+            "reviewed controls at 14:10"
+        ));
         assert!(!message_has_explicit_clock_time_cue(
             "Reviewed OS-01 for non-sap itgcs"
         ));

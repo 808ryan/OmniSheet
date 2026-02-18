@@ -5,6 +5,7 @@ export interface Activity {
   engagementId: string
   code: string
   name: string
+  colorHex: string | null
   tags: string[]
   isActive: boolean
   createdAt: number
@@ -16,6 +17,7 @@ export interface Engagement {
   code: string
   name: string
   client: string | null
+  colorHex: string | null
   tags: string[]
   isActive: boolean
   createdAt: number
@@ -28,6 +30,7 @@ export interface EngagementUpsertInput {
   code: string
   name: string
   client?: string | null
+  colorHex?: string | null
   tags: string[]
   isActive?: boolean
 }
@@ -37,6 +40,7 @@ export interface ActivityUpsertInput {
   engagementId: string
   code: string
   name: string
+  colorHex?: string | null
   tags: string[]
   isActive?: boolean
 }

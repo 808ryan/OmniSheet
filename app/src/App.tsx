@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 
 import {
@@ -19,7 +19,6 @@ import {
 } from './lib/api'
 import { isTauriRuntime } from './lib/runtime'
 import {
-  durationToHourLabel,
   formatDate,
   joinTags,
   minuteToLabel,
@@ -53,6 +52,7 @@ interface EngagementFormState {
   code: string
   name: string
   client: string
+  colorHex: string
   tags: string
   isActive: boolean
 }
@@ -62,6 +62,7 @@ interface ActivityFormState {
   engagementId: string
   code: string
   name: string
+  colorHex: string
   tags: string
   isActive: boolean
 }
@@ -81,10 +82,34 @@ interface TimelineWindow {
   endMinute: number
 }
 
+interface ClippedTimelineEntry {
+  entry: TimelineEntry
+  clippedStartMinute: number
+  clippedEndMinute: number
+}
+
+interface PositionedTimelineEntry extends ClippedTimelineEntry {
+  laneIndex: number
+  laneCount: number
+  top: number
+  height: number
+  leftPercent: number
+  widthPercent: number
+}
+
+type TimelineLabelTier = 1 | 2 | 3
+
+interface TimelineLabel {
+  label: string
+  fullLabel: string
+  tier: TimelineLabelTier
+}
+
 const EMPTY_ENGAGEMENT_FORM: EngagementFormState = {
   code: '',
   name: '',
   client: '',
+  colorHex: '',
   tags: '',
   isActive: true,
 }
@@ -93,16 +118,23 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
   engagementId: '',
   code: '',
   name: '',
+  colorHex: '',
   tags: '',
   isActive: true,
 }
 
-const DEFAULT_TIMELINE_START = 6 * 60
-const DEFAULT_TIMELINE_END = 18 * 60
-const TIMELINE_PADDING_MINUTES = 30
 const MINUTES_IN_DAY = 24 * 60
 const HOUR_IN_MINUTES = 60
+const TIMELINE_VIEWPORT_MINUTES = 9 * HOUR_IN_MINUTES
+const DEFAULT_TIMELINE_START = 8 * HOUR_IN_MINUTES
+const DEFAULT_TIMELINE_END = DEFAULT_TIMELINE_START + TIMELINE_VIEWPORT_MINUTES
+const TIMELINE_PADDING_MINUTES = 30
 const PIXELS_PER_MINUTE = 1
+const TIMELINE_CANVAS_TOP_PADDING = 18
+const TIMELINE_CANVAS_BOTTOM_PADDING = 20
+const TIMELINE_SCROLL_TOP_PADDING_MINUTES = 30
+const TIMELINE_OVERLAP_GAP_PERCENT = 1.2
+const TIMELINE_NEUTRAL_COLOR = '#6F7B89'
 const EMPTY_CAPTURE_STATUS: CaptureStatus = {
   state: 'idle',
   message: 'No capture submitted yet.',
@@ -132,6 +164,8 @@ function App() {
   const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([])
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
+  const timelineGridRef = useRef<HTMLDivElement | null>(null)
+  const timelineAutoScrollKeyRef = useRef('')
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
@@ -147,12 +181,37 @@ function App() {
   )
 
   const timelineWindowMinutes = timelineWindow.endMinute - timelineWindow.startMinute
-  const timelineGridHeight = timelineWindowMinutes * PIXELS_PER_MINUTE + 20
+  const timelineCanvasHeight = (
+    timelineWindowMinutes * PIXELS_PER_MINUTE
+      + TIMELINE_CANVAS_TOP_PADDING
+      + TIMELINE_CANVAS_BOTTOM_PADDING
+  )
+  const timelineViewportHeight = (
+    TIMELINE_VIEWPORT_MINUTES * PIXELS_PER_MINUTE
+      + TIMELINE_CANVAS_TOP_PADDING
+      + TIMELINE_CANVAS_BOTTOM_PADDING
+  )
+
+  const positionedTimelineEntries = useMemo(
+    () => positionTimelineEntries(timelineEntries, timelineWindow),
+    [timelineEntries, timelineWindow],
+  )
+
+  const timelineAutoScrollKey = useMemo(
+    () =>
+      `${selectedDate}:${timelineEntries
+        .map((entry) => `${entry.id}:${entry.startMinute}:${entry.endMinute}`)
+        .join('|')}`,
+    [selectedDate, timelineEntries],
+  )
 
   const timelineHourMarks = useMemo(() => {
     const marks: number[] = []
+    const firstHourMark =
+      Math.ceil(timelineWindow.startMinute / HOUR_IN_MINUTES) * HOUR_IN_MINUTES
+
     for (
-      let minute = timelineWindow.startMinute;
+      let minute = firstHourMark;
       minute <= timelineWindow.endMinute;
       minute += HOUR_IN_MINUTES
     ) {
@@ -172,6 +231,33 @@ function App() {
 
     return engagement?.activities ?? []
   }, [engagements, entryDraft])
+
+  const engagementColorById = useMemo(() => {
+    const values = new Map<string, string | null>()
+    for (const engagement of engagements) {
+      values.set(engagement.id, normalizeColorHexInput(engagement.colorHex))
+    }
+    return values
+  }, [engagements])
+
+  const activityColorById = useMemo(() => {
+    const values = new Map<string, string | null>()
+    for (const engagement of engagements) {
+      for (const activity of engagement.activities) {
+        values.set(activity.id, normalizeColorHexInput(activity.colorHex))
+      }
+    }
+    return values
+  }, [engagements])
+
+  const selectedActivityEngagement = useMemo(
+    () => engagements.find((engagement) => engagement.id === activityForm.engagementId) ?? null,
+    [activityForm.engagementId, engagements],
+  )
+
+  const engagementFormColorValue = normalizeColorHexInput(engagementForm.colorHex)
+  const activityFormColorValue = normalizeColorHexInput(activityForm.colorHex)
+  const selectedEngagementColorValue = normalizeColorHexInput(selectedActivityEngagement?.colorHex)
 
   const loadEngagements = useCallback(async () => {
     const values = await engagementList()
@@ -249,6 +335,45 @@ function App() {
 
     void loadDiagnostics()
   }, [activeView, loadDiagnostics, tauriRuntime, diagnosticsFilter])
+
+  useEffect(() => {
+    if (activeView !== 'timeline') {
+      timelineAutoScrollKeyRef.current = ''
+    }
+  }, [activeView])
+
+  useEffect(() => {
+    if (activeView !== 'timeline') {
+      return
+    }
+
+    if (timelineAutoScrollKeyRef.current === timelineAutoScrollKey) {
+      return
+    }
+
+    const grid = timelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const firstEntry = positionedTimelineEntries[0]
+    const targetMinute = firstEntry
+      ? Math.max(
+          timelineWindow.startMinute,
+          firstEntry.clippedStartMinute - TIMELINE_SCROLL_TOP_PADDING_MINUTES,
+        )
+      : timelineWindow.startMinute
+
+    grid.scrollTop =
+      TIMELINE_CANVAS_TOP_PADDING
+      + (targetMinute - timelineWindow.startMinute) * PIXELS_PER_MINUTE
+    timelineAutoScrollKeyRef.current = timelineAutoScrollKey
+  }, [
+    activeView,
+    positionedTimelineEntries,
+    timelineAutoScrollKey,
+    timelineWindow.startMinute,
+  ])
 
   const refreshAfterMutation = useCallback(async () => {
     await Promise.all([loadEngagements(), loadTimeline(selectedDate), loadSettings()])
@@ -350,11 +475,17 @@ function App() {
     event.preventDefault()
 
     void runAction(async () => {
+      const colorHex = normalizeColorHexInput(engagementForm.colorHex)
+      if (engagementForm.colorHex.trim().length > 0 && !colorHex) {
+        throw new Error('Engagement color must be a valid #RRGGBB value.')
+      }
+
       await engagementUpsert({
         id: engagementForm.id,
         code: engagementForm.code,
         name: engagementForm.name,
         client: engagementForm.client || null,
+        colorHex,
         tags: parseTagInput(engagementForm.tags),
         isActive: engagementForm.isActive,
       })
@@ -379,6 +510,7 @@ function App() {
       code: engagement.code,
       name: engagement.name,
       client: engagement.client ?? '',
+      colorHex: engagement.colorHex ?? '',
       tags: joinTags(engagement.tags),
       isActive: engagement.isActive,
     })
@@ -388,11 +520,17 @@ function App() {
     event.preventDefault()
 
     void runAction(async () => {
+      const colorHex = normalizeColorHexInput(activityForm.colorHex)
+      if (activityForm.colorHex.trim().length > 0 && !colorHex) {
+        throw new Error('Activity color must be a valid #RRGGBB value.')
+      }
+
       await activityUpsert({
         id: activityForm.id,
         engagementId: activityForm.engagementId,
         code: activityForm.code,
         name: activityForm.name,
+        colorHex,
         tags: parseTagInput(activityForm.tags),
         isActive: activityForm.isActive,
       })
@@ -420,6 +558,7 @@ function App() {
       engagementId: activity.engagementId,
       code: activity.code,
       name: activity.name,
+      colorHex: activity.colorHex ?? '',
       tags: joinTags(activity.tags),
       isActive: activity.isActive,
     })
@@ -657,60 +796,65 @@ function App() {
                 className="timeline-grid"
                 role="list"
                 aria-label="Timeline entries"
-                style={{ minHeight: `${timelineGridHeight}px` }}
+                ref={timelineGridRef}
+                style={{ height: `${timelineViewportHeight}px` }}
               >
-                {timelineHourMarks.map((minute) => (
-                  <div
-                    key={minute}
-                    className="timeline-hour-mark"
-                    style={{
-                      top:
-                        (minute - timelineWindow.startMinute) * PIXELS_PER_MINUTE,
-                    }}
-                  >
-                    <span>{minuteToLabel(minute)}</span>
-                  </div>
-                ))}
-
-                {timelineEntries.map((entry) => {
-                  const clippedStart = Math.max(entry.startMinute, timelineWindow.startMinute)
-                  const clippedEnd = Math.min(entry.endMinute, timelineWindow.endMinute)
-
-                  if (clippedEnd <= clippedStart) {
-                    return null
-                  }
-
-                  const top =
-                    (clippedStart - timelineWindow.startMinute) * PIXELS_PER_MINUTE
-                  const height = Math.max(
-                    (clippedEnd - clippedStart) * PIXELS_PER_MINUTE,
-                    30,
-                  )
-
-                  return (
-                    <button
-                      type="button"
-                      key={entry.id}
-                      className={`timeline-block ${selectedEntryId === entry.id ? 'selected' : ''}`}
+                <div
+                  className="timeline-canvas"
+                  style={{ minHeight: `${timelineCanvasHeight}px` }}
+                >
+                  {timelineHourMarks.map((minute) => (
+                    <div
+                      key={minute}
+                      className="timeline-hour-mark"
                       style={{
-                        top,
-                        height,
-                        backgroundColor: colorForEngagement(entry.engagementId),
+                        top:
+                          TIMELINE_CANVAS_TOP_PADDING
+                          + (minute - timelineWindow.startMinute) * PIXELS_PER_MINUTE,
                       }}
-                      onClick={() => onSelectEntry(entry)}
-                      title={entry.description}
-                      aria-label={`${entry.engagementCode ?? 'UNCAT'} ${entry.activityCode ?? 'UNCAT'} ${entry.description}`}
                     >
-                      <strong>{entry.engagementCode ?? 'UNCAT'} / {entry.activityCode ?? 'UNCAT'}</strong>
-                      <span className="timeline-block-meta">
-                        {durationToHourLabel(entry.durationMinutes)}
-                        {entry.warningFlags.length > 0
-                          ? ` | ${entry.warningFlags.length} warning${entry.warningFlags.length === 1 ? '' : 's'}`
-                          : ''}
-                      </span>
-                    </button>
-                  )
-                })}
+                      <span>{minuteToLabel(minute)}</span>
+                    </div>
+                  ))}
+
+                  <div className="timeline-entry-layer">
+                    {positionedTimelineEntries.map((positionedEntry) => {
+                      const { entry } = positionedEntry
+                      const blockColor = resolveTimelineBlockColor(
+                        entry,
+                        activityColorById,
+                        engagementColorById,
+                      )
+                      const blockLabel = buildTimelineBlockLabel(
+                        entry,
+                        positionedEntry.widthPercent,
+                        positionedEntry.height,
+                      )
+                      const textColor = colorForBackground(blockColor)
+
+                      return (
+                        <button
+                          type="button"
+                          key={entry.id}
+                          className={`timeline-block tier-${blockLabel.tier} ${selectedEntryId === entry.id ? 'selected' : ''}`}
+                          style={{
+                            top: positionedEntry.top,
+                            height: positionedEntry.height,
+                            left: `${positionedEntry.leftPercent}%`,
+                            width: `${positionedEntry.widthPercent}%`,
+                            backgroundColor: blockColor,
+                            color: textColor,
+                          }}
+                          onClick={() => onSelectEntry(entry)}
+                          title={`${blockLabel.fullLabel}\n${entry.description}`}
+                          aria-label={`${blockLabel.fullLabel}. ${entry.description}`}
+                        >
+                          <span className="timeline-block-label">{blockLabel.label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
               </div>
 
               <aside className="timeline-editor">
@@ -907,6 +1051,52 @@ function App() {
                   />
                 </label>
                 <label>
+                  Engagement Color (optional)
+                  <div className="color-input-row">
+                    <input
+                      type="color"
+                      value={engagementFormColorValue ?? TIMELINE_NEUTRAL_COLOR}
+                      onChange={(event) =>
+                        setEngagementForm((previous) => ({
+                          ...previous,
+                          colorHex: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      aria-label="Select engagement color"
+                    />
+                    <input
+                      value={engagementForm.colorHex}
+                      onChange={(event) =>
+                        setEngagementForm((previous) => ({
+                          ...previous,
+                          colorHex: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="#RRGGBB"
+                      maxLength={7}
+                    />
+                  </div>
+                </label>
+                <div className="color-note-row">
+                  <span
+                    className="color-chip"
+                    style={{ backgroundColor: engagementFormColorValue ?? TIMELINE_NEUTRAL_COLOR }}
+                  />
+                  <p>Global fallback color for activities in this engagement.</p>
+                  <button
+                    type="button"
+                    className="ghost color-clear-button"
+                    onClick={() =>
+                      setEngagementForm((previous) => ({
+                        ...previous,
+                        colorHex: '',
+                      }))
+                    }
+                  >
+                    Use Default
+                  </button>
+                </div>
+                <label>
                   Tags (comma separated)
                   <input
                     value={engagementForm.tags}
@@ -983,6 +1173,57 @@ function App() {
                   />
                 </label>
                 <label>
+                  Activity Color (optional)
+                  <div className="color-input-row">
+                    <input
+                      type="color"
+                      value={activityFormColorValue ?? selectedEngagementColorValue ?? TIMELINE_NEUTRAL_COLOR}
+                      onChange={(event) =>
+                        setActivityForm((previous) => ({
+                          ...previous,
+                          colorHex: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      aria-label="Select activity color"
+                    />
+                    <input
+                      value={activityForm.colorHex}
+                      onChange={(event) =>
+                        setActivityForm((previous) => ({
+                          ...previous,
+                          colorHex: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="#RRGGBB"
+                      maxLength={7}
+                    />
+                  </div>
+                </label>
+                <div className="color-note-row">
+                  <span
+                    className="color-chip"
+                    style={{
+                      backgroundColor:
+                        activityFormColorValue
+                        ?? selectedEngagementColorValue
+                        ?? TIMELINE_NEUTRAL_COLOR,
+                    }}
+                  />
+                  <p>Activity color overrides engagement color for timeline blocks.</p>
+                  <button
+                    type="button"
+                    className="ghost color-clear-button"
+                    onClick={() =>
+                      setActivityForm((previous) => ({
+                        ...previous,
+                        colorHex: '',
+                      }))
+                    }
+                  >
+                    Use Default
+                  </button>
+                </div>
+                <label>
                   Tags (comma separated)
                   <input
                     value={activityForm.tags}
@@ -1015,53 +1256,78 @@ function App() {
             </div>
 
             <div className="code-list">
-              {engagements.map((engagement) => (
-                <article key={engagement.id} className="engagement-card">
-                  <header>
-                    <div>
-                      <h3>
-                        {engagement.code} {engagement.name}
-                      </h3>
-                      <p>{engagement.client ?? 'No client'}</p>
-                      <p>{joinTags(engagement.tags) || 'No tags'}</p>
-                    </div>
-                    <div className="row-actions">
-                      <button type="button" onClick={() => onEditEngagement(engagement)}>
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => onDeleteEngagement(engagement.id)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </header>
-                  <ul>
-                    {engagement.activities.map((activity) => (
-                      <li key={activity.id}>
-                        <div>
-                          <strong>{activity.code} {activity.name}</strong>
-                          <span>{joinTags(activity.tags) || 'No tags'}</span>
-                        </div>
-                        <div className="row-actions">
-                          <button type="button" onClick={() => onEditActivity(activity)}>
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            className="danger"
-                            onClick={() => onDeleteActivity(activity.id)}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </article>
-              ))}
+              {engagements.map((engagement) => {
+                const engagementColor = normalizeColorHexInput(engagement.colorHex) ?? TIMELINE_NEUTRAL_COLOR
+
+                return (
+                  <article key={engagement.id} className="engagement-card">
+                    <header>
+                      <div>
+                        <h3>
+                          {engagement.code} {engagement.name}
+                        </h3>
+                        <p>{engagement.client ?? 'No client'}</p>
+                        <p>{joinTags(engagement.tags) || 'No tags'}</p>
+                        <p className="color-list-row">
+                          <span
+                            className="color-chip"
+                            style={{ backgroundColor: engagementColor }}
+                          />
+                          Engagement color
+                        </p>
+                      </div>
+                      <div className="row-actions">
+                        <button type="button" onClick={() => onEditEngagement(engagement)}>
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="danger"
+                          onClick={() => onDeleteEngagement(engagement.id)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </header>
+                    <ul>
+                      {engagement.activities.map((activity) => {
+                        const activityColor =
+                          normalizeColorHexInput(activity.colorHex)
+                          ?? normalizeColorHexInput(engagement.colorHex)
+                          ?? TIMELINE_NEUTRAL_COLOR
+
+                        return (
+                          <li key={activity.id}>
+                            <div>
+                              <strong>{activity.code} {activity.name}</strong>
+                              <span>{joinTags(activity.tags) || 'No tags'}</span>
+                              <span className="color-list-row">
+                                <span
+                                  className="color-chip"
+                                  style={{ backgroundColor: activityColor }}
+                                />
+                                {activity.colorHex ? 'Activity color' : 'Inherited from engagement/default'}
+                              </span>
+                            </div>
+                            <div className="row-actions">
+                              <button type="button" onClick={() => onEditActivity(activity)}>
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() => onDeleteActivity(activity.id)}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </article>
+                )
+              })}
             </div>
           </section>
         ) : null}
@@ -1218,10 +1484,11 @@ function formatTimelineRangeEndLabel(minute: number): string {
 
 function computeTimelineWindow(entries: TimelineEntry[]): TimelineWindow {
   if (entries.length === 0) {
-    return {
-      startMinute: DEFAULT_TIMELINE_START,
-      endMinute: DEFAULT_TIMELINE_END,
-    }
+    return ensureMinimumTimelineSpan(
+      DEFAULT_TIMELINE_START,
+      DEFAULT_TIMELINE_END,
+      TIMELINE_VIEWPORT_MINUTES,
+    )
   }
 
   const earliestStart = Math.max(
@@ -1246,26 +1513,256 @@ function computeTimelineWindow(entries: TimelineEntry[]): TimelineWindow {
     endMinute = Math.min(startMinute + HOUR_IN_MINUTES, MINUTES_IN_DAY)
   }
 
-  return {
+  return ensureMinimumTimelineSpan(
     startMinute,
     endMinute,
+    TIMELINE_VIEWPORT_MINUTES,
+  )
+}
+
+function ensureMinimumTimelineSpan(
+  startMinute: number,
+  endMinute: number,
+  minimumSpan: number,
+): TimelineWindow {
+  if (minimumSpan >= MINUTES_IN_DAY) {
+    return {
+      startMinute: 0,
+      endMinute: MINUTES_IN_DAY,
+    }
+  }
+
+  let normalizedStart = Math.max(0, Math.min(startMinute, MINUTES_IN_DAY))
+  let normalizedEnd = Math.max(0, Math.min(endMinute, MINUTES_IN_DAY))
+
+  if (normalizedEnd <= normalizedStart) {
+    normalizedEnd = Math.min(normalizedStart + HOUR_IN_MINUTES, MINUTES_IN_DAY)
+  }
+
+  if (normalizedEnd - normalizedStart >= minimumSpan) {
+    return {
+      startMinute: normalizedStart,
+      endMinute: normalizedEnd,
+    }
+  }
+
+  const missingMinutes = minimumSpan - (normalizedEnd - normalizedStart)
+  const prependMinutes = Math.min(normalizedStart, Math.floor(missingMinutes / 2))
+  normalizedStart -= prependMinutes
+  normalizedEnd = Math.min(
+    MINUTES_IN_DAY,
+    normalizedEnd + (missingMinutes - prependMinutes),
+  )
+
+  const remainingMinutes = minimumSpan - (normalizedEnd - normalizedStart)
+  if (remainingMinutes > 0) {
+    if (normalizedStart > 0) {
+      normalizedStart = Math.max(0, normalizedStart - remainingMinutes)
+    } else {
+      normalizedEnd = Math.min(MINUTES_IN_DAY, normalizedEnd + remainingMinutes)
+    }
+  }
+
+  return {
+    startMinute: normalizedStart,
+    endMinute: normalizedEnd,
   }
 }
 
-function colorForEngagement(engagementId: string | null): string {
-  if (!engagementId) {
-    return '#6f7b89'
+function positionTimelineEntries(
+  entries: TimelineEntry[],
+  timelineWindow: TimelineWindow,
+): PositionedTimelineEntry[] {
+  const clippedEntries: ClippedTimelineEntry[] = entries
+    .map((entry) => {
+      const clippedStartMinute = Math.max(entry.startMinute, timelineWindow.startMinute)
+      const clippedEndMinute = Math.min(entry.endMinute, timelineWindow.endMinute)
+
+      return {
+        entry,
+        clippedStartMinute,
+        clippedEndMinute,
+      }
+    })
+    .filter((entry) => entry.clippedEndMinute > entry.clippedStartMinute)
+    .sort((a, b) => {
+      if (a.clippedStartMinute !== b.clippedStartMinute) {
+        return a.clippedStartMinute - b.clippedStartMinute
+      }
+
+      if (a.clippedEndMinute !== b.clippedEndMinute) {
+        return a.clippedEndMinute - b.clippedEndMinute
+      }
+
+      return a.entry.id.localeCompare(b.entry.id)
+    })
+
+  if (clippedEntries.length === 0) {
+    return []
   }
 
-  const palette = ['#1570ef', '#0f766e', '#d97706', '#b42318', '#4f46e5', '#0e7490']
+  type LaneEntry = ClippedTimelineEntry & { laneIndex: number }
 
-  let hash = 0
-  for (let index = 0; index < engagementId.length; index += 1) {
-    hash = (hash << 5) - hash + engagementId.charCodeAt(index)
-    hash |= 0
+  const groups: LaneEntry[][] = []
+  let activeLanes: Array<{ laneIndex: number; endMinute: number }> = []
+  let currentGroup: LaneEntry[] = []
+
+  for (const clippedEntry of clippedEntries) {
+    activeLanes = activeLanes.filter(
+      (lane) => lane.endMinute > clippedEntry.clippedStartMinute,
+    )
+
+    if (activeLanes.length === 0 && currentGroup.length > 0) {
+      groups.push(currentGroup)
+      currentGroup = []
+    }
+
+    const occupiedLanes = new Set(activeLanes.map((lane) => lane.laneIndex))
+    let laneIndex = 0
+    while (occupiedLanes.has(laneIndex)) {
+      laneIndex += 1
+    }
+
+    activeLanes.push({
+      laneIndex,
+      endMinute: clippedEntry.clippedEndMinute,
+    })
+
+    currentGroup.push({
+      ...clippedEntry,
+      laneIndex,
+    })
   }
 
-  return palette[Math.abs(hash) % palette.length]
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup)
+  }
+
+  const positionedEntries: PositionedTimelineEntry[] = []
+
+  for (const group of groups) {
+    const laneCount = Math.max(...group.map((entry) => entry.laneIndex)) + 1
+    const laneGapPercent = laneCount > 1 ? TIMELINE_OVERLAP_GAP_PERCENT : 0
+    const totalGapPercent = laneGapPercent * Math.max(0, laneCount - 1)
+    const widthPercent = (100 - totalGapPercent) / laneCount
+
+    for (const groupEntry of group) {
+      positionedEntries.push({
+        ...groupEntry,
+        laneCount,
+        top:
+          TIMELINE_CANVAS_TOP_PADDING
+          + (groupEntry.clippedStartMinute - timelineWindow.startMinute)
+          * PIXELS_PER_MINUTE,
+        height: Math.max(
+          (groupEntry.clippedEndMinute - groupEntry.clippedStartMinute)
+          * PIXELS_PER_MINUTE,
+          30,
+        ),
+        leftPercent: groupEntry.laneIndex * (widthPercent + laneGapPercent),
+        widthPercent,
+      })
+    }
+  }
+
+  return positionedEntries
+}
+
+function normalizeColorHexInput(value: string | null | undefined): string | null {
+  if (!value) {
+    return null
+  }
+
+  const normalized = value.trim().toUpperCase()
+  if (normalized.length === 0) {
+    return null
+  }
+
+  if (!/^#[0-9A-F]{6}$/.test(normalized)) {
+    return null
+  }
+
+  return normalized
+}
+
+function resolveTimelineBlockColor(
+  entry: TimelineEntry,
+  activityColorById: Map<string, string | null>,
+  engagementColorById: Map<string, string | null>,
+): string {
+  if (entry.activityId) {
+    const activityColor = activityColorById.get(entry.activityId)
+    if (activityColor) {
+      return activityColor
+    }
+  }
+
+  if (entry.engagementId) {
+    const engagementColor = engagementColorById.get(entry.engagementId)
+    if (engagementColor) {
+      return engagementColor
+    }
+  }
+
+  return TIMELINE_NEUTRAL_COLOR
+}
+
+function colorForBackground(backgroundHex: string): string {
+  const normalized = normalizeColorHexInput(backgroundHex) ?? TIMELINE_NEUTRAL_COLOR
+  const red = Number.parseInt(normalized.slice(1, 3), 16)
+  const green = Number.parseInt(normalized.slice(3, 5), 16)
+  const blue = Number.parseInt(normalized.slice(5, 7), 16)
+  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255
+
+  return luminance > 0.62 ? '#0F172A' : '#F8FAFC'
+}
+
+function buildTimelineBlockLabel(
+  entry: TimelineEntry,
+  widthPercent: number,
+  blockHeight: number,
+): TimelineLabel {
+  const engagementCode = entry.engagementCode ?? 'UNCAT'
+  const activityCode = entry.activityCode ?? 'UNCAT'
+  const activityName = entry.activityName?.trim() ?? activityCode
+  const activityDisplaySegment =
+    activityName.toUpperCase() === activityCode.toUpperCase()
+      ? activityCode
+      : `${activityCode} ${activityName}`
+  const warningCount = entry.warningFlags.length
+  const warningLong = warningCount > 0
+    ? `${warningCount} warning${warningCount === 1 ? '' : 's'}`
+    : ''
+  const warningCompact = warningCount > 0 ? `${warningCount}w` : ''
+
+  const fullLabelBase = `${engagementCode} | ${activityDisplaySegment}`
+  const fullLabel = warningLong ? `${fullLabelBase} | ${warningLong}` : fullLabelBase
+
+  if (widthPercent < 36 || blockHeight < 28) {
+    const compactLabel = warningCompact ? `${activityCode} | ${warningCompact}` : activityCode
+    return {
+      label: compactLabel,
+      fullLabel,
+      tier: 3,
+    }
+  }
+
+  if (widthPercent < 58 || blockHeight < 38) {
+    const compactLabel = warningCompact
+      ? `${engagementCode} | ${activityCode} | ${warningCompact}`
+      : `${engagementCode} | ${activityCode}`
+    return {
+      label: compactLabel,
+      fullLabel,
+      tier: 2,
+    }
+  }
+
+  return {
+    label: fullLabel,
+    fullLabel,
+    tier: 1,
+  }
 }
 
 export default App

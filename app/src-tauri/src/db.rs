@@ -50,6 +50,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         code TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         client TEXT,
+        color_hex TEXT,
         tags TEXT NOT NULL,
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
@@ -61,6 +62,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         engagement_id TEXT NOT NULL,
         code TEXT NOT NULL,
         name TEXT NOT NULL,
+        color_hex TEXT,
         tags TEXT NOT NULL,
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
@@ -139,6 +141,42 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
     "#,
     )?;
 
+    ensure_color_columns(conn)?;
+
+    Ok(())
+}
+
+fn ensure_color_columns(conn: &Connection) -> AppResult<()> {
+    ensure_column_exists(conn, "engagements", "color_hex", "TEXT")?;
+    ensure_column_exists(conn, "activities", "color_hex", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_column_exists(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+    column_type: &str,
+) -> AppResult<()> {
+    let query = format!("PRAGMA table_info({table_name})");
+    let mut statement = conn.prepare(&query)?;
+    let mut rows = statement.query([])?;
+
+    let mut column_exists = false;
+    while let Some(row) = rows.next()? {
+        let candidate_name: String = row.get(1)?;
+        if candidate_name == column_name {
+            column_exists = true;
+            break;
+        }
+    }
+
+    if !column_exists {
+        let alter_statement =
+            format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}");
+        conn.execute_batch(&alter_statement)?;
+    }
+
     Ok(())
 }
 
@@ -151,6 +189,7 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
 
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
     let is_active = if input.is_active.unwrap_or(true) {
         1
@@ -160,12 +199,13 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
 
     conn.execute(
         r#"
-      INSERT INTO engagements (id, code, name, client, tags, is_active, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+      INSERT INTO engagements (id, code, name, client, color_hex, tags, is_active, created_at, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
       ON CONFLICT(id) DO UPDATE SET
         code = excluded.code,
         name = excluded.name,
         client = excluded.client,
+        color_hex = excluded.color_hex,
         tags = excluded.tags,
         is_active = excluded.is_active,
         updated_at = excluded.updated_at
@@ -175,6 +215,7 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
             input.code.trim(),
             input.name.trim(),
             input.client.as_ref().map(|client| client.trim()),
+            color_hex,
             tags_json,
             is_active,
             now,
@@ -201,6 +242,7 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
 
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
     let is_active = if input.is_active.unwrap_or(true) {
         1
@@ -210,12 +252,13 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
 
     conn.execute(
     r#"
-      INSERT INTO activities (id, engagement_id, code, name, tags, is_active, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+      INSERT INTO activities (id, engagement_id, code, name, color_hex, tags, is_active, created_at, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
       ON CONFLICT(id) DO UPDATE SET
         engagement_id = excluded.engagement_id,
         code = excluded.code,
         name = excluded.name,
+        color_hex = excluded.color_hex,
         tags = excluded.tags,
         is_active = excluded.is_active,
         updated_at = excluded.updated_at
@@ -225,6 +268,7 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
       input.engagement_id.trim(),
       input.code.trim(),
       input.name.trim(),
+      color_hex,
       tags_json,
       is_active,
       now,
@@ -242,7 +286,7 @@ pub fn delete_activity(conn: &Connection, id: &str) -> AppResult<()> {
 pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
     let mut engagement_statement = conn.prepare(
         r#"
-      SELECT id, code, name, client, tags, is_active, created_at, updated_at
+      SELECT id, code, name, client, color_hex, tags, is_active, created_at, updated_at
       FROM engagements
       ORDER BY name COLLATE NOCASE
     "#,
@@ -250,17 +294,18 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
 
     let mut engagements: Vec<Engagement> = engagement_statement
         .query_map([], |row| {
-            let tags_json: String = row.get(4)?;
+            let tags_json: String = row.get(5)?;
             let tags = parse_tags(&tags_json).unwrap_or_default();
             Ok(Engagement {
                 id: row.get(0)?,
                 code: row.get(1)?,
                 name: row.get(2)?,
                 client: row.get(3)?,
+                color_hex: row.get(4)?,
                 tags,
-                is_active: row.get::<_, i64>(5)? == 1,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                is_active: row.get::<_, i64>(6)? == 1,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
                 activities: Vec::new(),
             })
         })?
@@ -269,7 +314,7 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
     let mut activities_by_engagement: HashMap<String, Vec<Activity>> = HashMap::new();
     let mut activity_statement = conn.prepare(
         r#"
-      SELECT id, engagement_id, code, name, tags, is_active, created_at, updated_at
+      SELECT id, engagement_id, code, name, color_hex, tags, is_active, created_at, updated_at
       FROM activities
       ORDER BY name COLLATE NOCASE
     "#,
@@ -277,7 +322,7 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
 
     for activity in activity_statement
         .query_map([], |row| {
-            let tags_json: String = row.get(4)?;
+            let tags_json: String = row.get(5)?;
             let tags = parse_tags(&tags_json).unwrap_or_default();
 
             Ok(Activity {
@@ -285,10 +330,11 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
                 engagement_id: row.get(1)?,
                 code: row.get(2)?,
                 name: row.get(3)?,
+                color_hex: row.get(4)?,
                 tags,
-                is_active: row.get::<_, i64>(5)? == 1,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                is_active: row.get::<_, i64>(6)? == 1,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?
@@ -844,6 +890,32 @@ pub fn list_diagnostics_events(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(events)
+}
+
+fn normalize_color_hex(raw_value: Option<String>) -> AppResult<Option<String>> {
+    let Some(value) = raw_value else {
+        return Ok(None);
+    };
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let candidate = trimmed.to_uppercase();
+    let is_valid = candidate.len() == 7
+        && candidate.starts_with('#')
+        && candidate[1..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit());
+
+    if !is_valid {
+        return Err(AppError::InvalidInput(
+            "colorHex must be a valid #RRGGBB value".to_string(),
+        ));
+    }
+
+    Ok(Some(candidate))
 }
 
 fn parse_tags(tags_json: &str) -> Option<Vec<String>> {
