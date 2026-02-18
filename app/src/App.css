@@ -267,12 +267,20 @@ button.danger {
 }
 
 .timeline-grid {
+  --timeline-gutter-left: 4.5rem;
+  --timeline-gutter-right: 0.45rem;
   position: relative;
-  min-height: calc((720px * var(--zoom, 1)) + 20px);
   border-radius: 14px;
   border: 1px solid var(--outline);
   background: linear-gradient(180deg, rgba(213, 226, 245, 0.42), rgba(255, 255, 255, 0.95));
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+
+.timeline-canvas {
+  position: relative;
+  min-height: 100%;
 }
 
 .timeline-hour-mark {
@@ -287,23 +295,28 @@ button.danger {
 .timeline-hour-mark span {
   position: absolute;
   left: 0.4rem;
-  top: -0.65rem;
+  top: -0.58rem;
   background: white;
   padding: 0 0.25rem;
 }
 
+.timeline-entry-layer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--timeline-gutter-left);
+  right: var(--timeline-gutter-right);
+}
+
 .timeline-block {
   position: absolute;
-  left: 4.5rem;
-  right: 0.45rem;
+  left: 0;
   border-radius: 10px;
   border: none;
   text-align: left;
-  color: #f8fafc;
-  padding: 0.35rem 0.5rem;
-  display: grid;
-  gap: 0.2rem;
-  align-content: start;
+  padding: 0.28rem 0.5rem;
+  display: flex;
+  align-items: center;
   overflow: hidden;
   box-shadow: 0 8px 12px rgba(0, 0, 0, 0.16);
   transform: translateY(0);
@@ -318,23 +331,24 @@ button.danger {
   outline: 2px solid #facc15;
 }
 
-.timeline-block strong {
+.timeline-block-label {
   font-size: 0.78rem;
-  display: block;
+  font-weight: 700;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.timeline-block span {
-  font-size: 0.75rem;
+.timeline-block.tier-2 .timeline-block-label {
+  font-size: 0.74rem;
 }
 
-.timeline-block-meta {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0.95;
+.timeline-block.tier-3 {
+  padding: 0.2rem 0.4rem;
+}
+
+.timeline-block.tier-3 .timeline-block-label {
+  font-size: 0.7rem;
 }
 
 .timeline-editor {
@@ -362,6 +376,51 @@ button.danger {
 .code-forms {
   display: grid;
   gap: 1rem;
+}
+
+.color-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.color-input-row input[type="color"] {
+  width: 2.25rem;
+  height: 2rem;
+  padding: 0.12rem;
+  cursor: pointer;
+}
+
+.color-input-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.color-note-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: -0.3rem;
+}
+
+.color-note-row p {
+  margin: 0;
+  font-size: 0.79rem;
+  color: var(--ink-soft);
+  flex: 1;
+}
+
+.color-clear-button {
+  padding: 0.28rem 0.5rem;
+  font-size: 0.73rem;
+}
+
+.color-chip {
+  width: 0.92rem;
+  height: 0.92rem;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 34, 64, 0.18);
+  flex-shrink: 0;
 }
 
 .code-list {
@@ -393,6 +452,12 @@ button.danger {
   margin: 0.15rem 0;
   color: var(--ink-soft);
   font-size: 0.84rem;
+}
+
+.color-list-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 .engagement-card ul {
@@ -531,10 +596,6 @@ button.danger {
   .code-panel {
     grid-template-columns: 1fr;
   }
-
-  .timeline-grid {
-    min-height: 720px;
-  }
 }
 
 @media (max-width: 720px) {
@@ -546,7 +607,7 @@ button.danger {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .timeline-block {
-    left: 3.8rem;
+  .timeline-grid {
+    --timeline-gutter-left: 3.8rem;
   }
 }

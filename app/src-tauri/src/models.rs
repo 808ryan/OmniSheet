@@ -47,6 +47,7 @@ pub struct Activity {
     pub engagement_id: String,
     pub code: String,
     pub name: String,
+    pub color_hex: Option<String>,
     pub tags: Vec<String>,
     pub is_active: bool,
     pub created_at: i64,
@@ -60,6 +61,7 @@ pub struct Engagement {
     pub code: String,
     pub name: String,
     pub client: Option<String>,
+    pub color_hex: Option<String>,
     pub tags: Vec<String>,
     pub is_active: bool,
     pub created_at: i64,
@@ -74,6 +76,7 @@ pub struct EngagementUpsertInput {
     pub code: String,
     pub name: String,
     pub client: Option<String>,
+    pub color_hex: Option<String>,
     pub tags: Vec<String>,
     pub is_active: Option<bool>,
 }
@@ -85,6 +88,7 @@ pub struct ActivityUpsertInput {
     pub engagement_id: String,
     pub code: String,
     pub name: String,
+    pub color_hex: Option<String>,
     pub tags: Vec<String>,
     pub is_active: Option<bool>,
 }
