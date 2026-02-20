@@ -88,6 +88,21 @@ struct TemporalReference {
     rounded_end_minute: i64,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TemporalCueType {
+    ExplicitClock,
+    RelativeDuration,
+    None,
+}
+
+fn temporal_cue_type_label(value: TemporalCueType) -> &'static str {
+    match value {
+        TemporalCueType::ExplicitClock => "explicit_clock",
+        TemporalCueType::RelativeDuration => "relative_duration",
+        TemporalCueType::None => "none",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct NormalizedEntryResult {
     entry: NormalizedEntry,
@@ -97,6 +112,8 @@ struct NormalizedEntryResult {
     raw_start: Option<String>,
     raw_end: Option<String>,
     raw_duration: Option<i64>,
+    temporal_cue_type: TemporalCueType,
+    temporal_source: &'static str,
 }
 
 fn keyring_entry() -> AppResult<Entry> {
@@ -636,7 +653,7 @@ pub async fn interpret_text_message(
 
     let parsed_timestamp = parse_client_timestamp(&input.client_timestamp_iso);
     let temporal_reference = build_temporal_reference(&input, parsed_timestamp);
-    let has_explicit_time_cue = message_has_explicit_clock_time_cue(input.raw_text.trim());
+    let temporal_cue_type = detect_temporal_cue_type(input.raw_text.trim());
 
     let api_key = match get_openai_api_key(&state) {
         Ok(value) => value,
@@ -732,7 +749,7 @@ pub async fn interpret_text_message(
                 entry,
                 &temporal_reference,
                 input.raw_text.trim(),
-                has_explicit_time_cue,
+                temporal_cue_type,
             )
         })
         .collect::<Vec<_>>();
@@ -754,6 +771,8 @@ pub async fn interpret_text_message(
         normalization_details.push(json!({
           "usedTemporalFallback": result.used_temporal_fallback,
           "fallbackReason": result.fallback_reason,
+          "temporalCueType": temporal_cue_type_label(result.temporal_cue_type),
+          "temporalSource": result.temporal_source,
           "llmStartRaw": result.raw_start,
           "llmEndRaw": result.raw_end,
           "llmDurationRaw": result.raw_duration,
@@ -777,6 +796,8 @@ pub async fn interpret_text_message(
         normalization_details.push(json!({
           "usedTemporalFallback": true,
           "fallbackReason": "no_llm_entries",
+          "temporalCueType": temporal_cue_type_label(temporal_cue_type),
+          "temporalSource": "fallback",
           "savedDate": temporal_reference.local_date.format("%Y-%m-%d").to_string(),
           "savedStartMinute": (temporal_reference.rounded_end_minute - 30).max(0),
           "savedEndMinute": temporal_reference.rounded_end_minute,
@@ -1296,7 +1317,7 @@ fn normalize_llm_entry(
     entry: &LlmEntry,
     reference: &TemporalReference,
     fallback_description: &str,
-    has_explicit_time_cue: bool,
+    temporal_cue_type: TemporalCueType,
 ) -> NormalizedEntryResult {
     let date = entry
         .date
@@ -1333,32 +1354,69 @@ fn normalize_llm_entry(
         (Some(0), Some(0), Some(value)) if value <= 0
     );
     let has_no_times = parsed_start.is_none() && parsed_end.is_none();
-    let should_use_fallback = !has_explicit_time_cue
-        || has_invalid_duration
-        || has_midnight_zero_tuple
-        || (has_explicit_time_cue && has_no_times);
 
-    let (start_minute, end_minute, fallback_reason) = if should_use_fallback {
-        let reason = if !has_explicit_time_cue {
-            "no_explicit_time_cue"
-        } else if has_invalid_duration {
-            "invalid_duration"
-        } else if has_midnight_zero_tuple {
-            "invalid_midnight_default"
-        } else {
-            "unable_to_parse_explicit_time"
-        };
-
-        (fallback_start, fallback_end, Some(reason.to_string()))
+    let (start_minute, end_minute, fallback_reason, temporal_source) = if has_invalid_duration {
+        (
+            fallback_start,
+            fallback_end,
+            Some("invalid_duration".to_string()),
+            "fallback",
+        )
+    } else if has_midnight_zero_tuple {
+        (
+            fallback_start,
+            fallback_end,
+            Some("invalid_midnight_default".to_string()),
+            "fallback",
+        )
     } else {
-        let (candidate_start, candidate_end) = match (parsed_start, parsed_end) {
-            (Some(start), Some(end)) => (start, end),
-            (Some(start), None) => (start, start + normalized_duration),
-            (None, Some(end)) => (end - normalized_duration, end),
-            (None, None) => (fallback_start, fallback_end),
-        };
-        (candidate_start, candidate_end, None)
+        match (parsed_start, parsed_end) {
+            (Some(start), Some(end)) => (start, end, None, "llm_start_end"),
+            (Some(start), None) => (
+                start,
+                start + normalized_duration,
+                None,
+                "llm_start_plus_duration",
+            ),
+            (None, Some(end)) => (
+                end - normalized_duration,
+                end,
+                None,
+                "llm_end_minus_duration",
+            ),
+            (None, None) => {
+                if temporal_cue_type == TemporalCueType::RelativeDuration
+                    && raw_duration.unwrap_or(0) > 0
+                {
+                    (
+                        reference.rounded_end_minute - normalized_duration,
+                        reference.rounded_end_minute,
+                        None,
+                        "derived_from_duration",
+                    )
+                } else {
+                    let reason = if temporal_cue_type == TemporalCueType::ExplicitClock {
+                        "unable_to_parse_explicit_time"
+                    } else if temporal_cue_type == TemporalCueType::RelativeDuration {
+                        "unable_to_derive_relative_duration"
+                    } else if has_no_times {
+                        "no_temporal_data"
+                    } else {
+                        "unusable_temporal_data"
+                    };
+
+                    (
+                        fallback_start,
+                        fallback_end,
+                        Some(reason.to_string()),
+                        "fallback",
+                    )
+                }
+            }
+        }
     };
+
+    let should_use_fallback = fallback_reason.is_some();
 
     let (normalized_start, normalized_end, duration_minutes) =
         normalize_update_window(start_minute, end_minute);
@@ -1393,6 +1451,18 @@ fn normalize_llm_entry(
         raw_start,
         raw_end,
         raw_duration,
+        temporal_cue_type,
+        temporal_source,
+    }
+}
+
+fn detect_temporal_cue_type(raw_text: &str) -> TemporalCueType {
+    if message_has_explicit_clock_time_cue(raw_text) {
+        TemporalCueType::ExplicitClock
+    } else if message_has_relative_duration_cue(raw_text) {
+        TemporalCueType::RelativeDuration
+    } else {
+        TemporalCueType::None
     }
 }
 
@@ -1452,6 +1522,104 @@ fn message_has_explicit_clock_time_cue(raw_text: &str) -> bool {
     }
 
     false
+}
+
+fn message_has_relative_duration_cue(raw_text: &str) -> bool {
+    let normalized = raw_text
+        .to_lowercase()
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || value == ':' {
+                value
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    for (index, token) in tokens.iter().enumerate() {
+        if *token == "since" {
+            return true;
+        }
+
+        if *token == "past" || *token == "last" {
+            if let Some(next) = tokens.get(index + 1) {
+                if is_duration_unit(next) {
+                    return true;
+                }
+
+                if is_duration_value(next)
+                    && tokens
+                        .get(index + 2)
+                        .is_some_and(|candidate| is_duration_unit(candidate))
+                {
+                    return true;
+                }
+            }
+        }
+
+        if *token == "for" {
+            if let Some(next) = tokens.get(index + 1) {
+                if (*next == "the")
+                    && tokens
+                        .get(index + 2)
+                        .is_some_and(|candidate| *candidate == "past" || *candidate == "last")
+                {
+                    return true;
+                }
+
+                if (*next == "a" || *next == "an")
+                    && tokens
+                        .get(index + 2)
+                        .is_some_and(|candidate| is_duration_unit(candidate))
+                {
+                    return true;
+                }
+
+                if is_duration_value(next)
+                    && tokens
+                        .get(index + 2)
+                        .is_some_and(|candidate| is_duration_unit(candidate))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn is_duration_value(value: &str) -> bool {
+    value.chars().all(|character| character.is_ascii_digit())
+        || matches!(
+            value,
+            "a" | "an"
+                | "one"
+                | "two"
+                | "three"
+                | "four"
+                | "five"
+                | "six"
+                | "seven"
+                | "eight"
+                | "nine"
+                | "ten"
+                | "half"
+                | "quarter"
+        )
+}
+
+fn is_duration_unit(value: &str) -> bool {
+    matches!(
+        value,
+        "m" | "min" | "mins" | "minute" | "minutes" | "h" | "hr" | "hrs" | "hour" | "hours"
+    )
 }
 
 fn parse_date(value: &str) -> Option<NaiveDate> {
@@ -1560,8 +1728,9 @@ mod tests {
     use crate::models::{KeySource, LlmEntry, StatusLevel};
 
     use super::{
-        derive_key_status_level, message_has_explicit_clock_time_cue, normalize_confidence,
-        normalize_llm_entry, normalize_update_window, round_to_nearest_30, TemporalReference,
+        derive_key_status_level, message_has_explicit_clock_time_cue,
+        message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
+        normalize_update_window, round_to_nearest_30, TemporalCueType, TemporalReference,
     };
 
     #[test]
@@ -1637,6 +1806,22 @@ mod tests {
     }
 
     #[test]
+    fn relative_time_cue_detection_identifies_duration_language() {
+        assert!(message_has_relative_duration_cue(
+            "for the past hour i've been in meetings for rr itacs"
+        ));
+        assert!(message_has_relative_duration_cue(
+            "for 45 minutes I was in planning"
+        ));
+        assert!(message_has_relative_duration_cue(
+            "since lunch i was testing controls"
+        ));
+        assert!(!message_has_relative_duration_cue(
+            "Reviewed OS-01 for non-sap itgcs"
+        ));
+    }
+
+    #[test]
     fn normalization_falls_back_to_capture_window_when_no_time_cue() {
         let entry = LlmEntry {
             engagement_code: Some("E-123".to_string()),
@@ -1653,7 +1838,7 @@ mod tests {
             rounded_end_minute: 1320,
         };
 
-        let result = normalize_llm_entry(&entry, &reference, "fallback", false);
+        let result = normalize_llm_entry(&entry, &reference, "fallback", TemporalCueType::None);
 
         assert!(result.used_temporal_fallback);
         assert_eq!(result.entry.start_minute, 1290);
@@ -1678,10 +1863,102 @@ mod tests {
             rounded_end_minute: 1320,
         };
 
-        let result = normalize_llm_entry(&entry, &reference, "fallback", true);
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "fallback",
+            TemporalCueType::ExplicitClock,
+        );
 
         assert!(!result.used_temporal_fallback);
         assert_eq!(result.entry.start_minute, 780);
         assert_eq!(result.entry.end_minute, 810);
+    }
+
+    #[test]
+    fn normalization_keeps_relative_duration_window_when_llm_times_present() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-17".to_string()),
+            start_time: Some("20:48".to_string()),
+            end_time: Some("21:48".to_string()),
+            duration_minutes: Some(60),
+            description: Some("Meetings for RR ITACs".to_string()),
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 17).expect("valid date"),
+            rounded_end_minute: 1320,
+        };
+
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "fallback",
+            TemporalCueType::RelativeDuration,
+        );
+
+        assert!(!result.used_temporal_fallback);
+        assert_eq!(result.entry.start_minute, 1260);
+        assert_eq!(result.entry.end_minute, 1320);
+        assert_eq!(result.entry.duration_minutes, 60);
+    }
+
+    #[test]
+    fn normalization_derives_from_duration_when_relative_cue_has_no_times() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-17".to_string()),
+            start_time: None,
+            end_time: None,
+            duration_minutes: Some(60),
+            description: Some("Meetings for RR ITACs".to_string()),
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 17).expect("valid date"),
+            rounded_end_minute: 1320,
+        };
+
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "fallback",
+            TemporalCueType::RelativeDuration,
+        );
+
+        assert!(!result.used_temporal_fallback);
+        assert_eq!(result.temporal_source, "derived_from_duration");
+        assert_eq!(result.entry.start_minute, 1260);
+        assert_eq!(result.entry.end_minute, 1320);
+        assert_eq!(result.entry.duration_minutes, 60);
+    }
+
+    #[test]
+    fn normalization_falls_back_for_duration_without_relative_or_clock_cue() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-17".to_string()),
+            start_time: None,
+            end_time: None,
+            duration_minutes: Some(60),
+            description: Some("Meetings".to_string()),
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 17).expect("valid date"),
+            rounded_end_minute: 1320,
+        };
+
+        let result = normalize_llm_entry(&entry, &reference, "fallback", TemporalCueType::None);
+
+        assert!(result.used_temporal_fallback);
+        assert_eq!(result.fallback_reason.as_deref(), Some("no_temporal_data"));
+        assert_eq!(result.entry.start_minute, 1290);
+        assert_eq!(result.entry.end_minute, 1320);
+        assert_eq!(result.entry.duration_minutes, 30);
     }
 }

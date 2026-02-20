@@ -36,6 +36,10 @@ export function timeInputToMinute(value: string): number {
 
 export function minuteToLabel(totalMinutes: number): string {
   const normalizedMinutes = ((Math.floor(totalMinutes) % 1440) + 1440) % 1440
+  if (normalizedMinutes === 12 * 60) {
+    return 'Noon'
+  }
+
   const hours24 = Math.floor(normalizedMinutes / 60)
   const minutes = normalizedMinutes % 60
   const suffix = hours24 >= 12 ? 'PM' : 'AM'

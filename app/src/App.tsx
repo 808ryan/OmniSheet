@@ -126,15 +126,15 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
 const MINUTES_IN_DAY = 24 * 60
 const HOUR_IN_MINUTES = 60
 const TIMELINE_VIEWPORT_MINUTES = 9 * HOUR_IN_MINUTES
-const DEFAULT_TIMELINE_START = 8 * HOUR_IN_MINUTES
-const DEFAULT_TIMELINE_END = DEFAULT_TIMELINE_START + TIMELINE_VIEWPORT_MINUTES
-const TIMELINE_PADDING_MINUTES = 30
 const PIXELS_PER_MINUTE = 1
 const TIMELINE_CANVAS_TOP_PADDING = 18
 const TIMELINE_CANVAS_BOTTOM_PADDING = 20
-const TIMELINE_SCROLL_TOP_PADDING_MINUTES = 30
 const TIMELINE_OVERLAP_GAP_PERCENT = 1.2
 const TIMELINE_NEUTRAL_COLOR = '#6F7B89'
+const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
+  startMinute: 0,
+  endMinute: MINUTES_IN_DAY,
+}
 const EMPTY_CAPTURE_STATUS: CaptureStatus = {
   state: 'idle',
   message: 'No capture submitted yet.',
@@ -165,7 +165,6 @@ function App() {
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
-  const timelineAutoScrollKeyRef = useRef('')
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
@@ -175,10 +174,7 @@ function App() {
     [selectedEntryId, timelineEntries],
   )
 
-  const timelineWindow = useMemo(
-    () => computeTimelineWindow(timelineEntries),
-    [timelineEntries],
-  )
+  const timelineWindow = FULL_DAY_TIMELINE_WINDOW
 
   const timelineWindowMinutes = timelineWindow.endMinute - timelineWindow.startMinute
   const timelineCanvasHeight = (
@@ -195,14 +191,6 @@ function App() {
   const positionedTimelineEntries = useMemo(
     () => positionTimelineEntries(timelineEntries, timelineWindow),
     [timelineEntries, timelineWindow],
-  )
-
-  const timelineAutoScrollKey = useMemo(
-    () =>
-      `${selectedDate}:${timelineEntries
-        .map((entry) => `${entry.id}:${entry.startMinute}:${entry.endMinute}`)
-        .join('|')}`,
-    [selectedDate, timelineEntries],
   )
 
   const timelineHourMarks = useMemo(() => {
@@ -338,16 +326,6 @@ function App() {
 
   useEffect(() => {
     if (activeView !== 'timeline') {
-      timelineAutoScrollKeyRef.current = ''
-    }
-  }, [activeView])
-
-  useEffect(() => {
-    if (activeView !== 'timeline') {
-      return
-    }
-
-    if (timelineAutoScrollKeyRef.current === timelineAutoScrollKey) {
       return
     }
 
@@ -356,24 +334,8 @@ function App() {
       return
     }
 
-    const firstEntry = positionedTimelineEntries[0]
-    const targetMinute = firstEntry
-      ? Math.max(
-          timelineWindow.startMinute,
-          firstEntry.clippedStartMinute - TIMELINE_SCROLL_TOP_PADDING_MINUTES,
-        )
-      : timelineWindow.startMinute
-
-    grid.scrollTop =
-      TIMELINE_CANVAS_TOP_PADDING
-      + (targetMinute - timelineWindow.startMinute) * PIXELS_PER_MINUTE
-    timelineAutoScrollKeyRef.current = timelineAutoScrollKey
-  }, [
-    activeView,
-    positionedTimelineEntries,
-    timelineAutoScrollKey,
-    timelineWindow.startMinute,
-  ])
+    grid.scrollTop = 0
+  }, [activeView, selectedDate])
 
   const refreshAfterMutation = useCallback(async () => {
     await Promise.all([loadEngagements(), loadTimeline(selectedDate), loadSettings()])
@@ -1476,97 +1438,10 @@ function formatKeySource(value: SettingsStatus['keySource'] | undefined): string
 
 function formatTimelineRangeEndLabel(minute: number): string {
   if (minute >= MINUTES_IN_DAY) {
-    return '12:00 AM (next day)'
+    return '12:00 AM'
   }
 
   return minuteToLabel(minute)
-}
-
-function computeTimelineWindow(entries: TimelineEntry[]): TimelineWindow {
-  if (entries.length === 0) {
-    return ensureMinimumTimelineSpan(
-      DEFAULT_TIMELINE_START,
-      DEFAULT_TIMELINE_END,
-      TIMELINE_VIEWPORT_MINUTES,
-    )
-  }
-
-  const earliestStart = Math.max(
-    0,
-    Math.min(...entries.map((entry) => entry.startMinute)) - TIMELINE_PADDING_MINUTES,
-  )
-  const latestEnd = Math.min(
-    MINUTES_IN_DAY,
-    Math.max(...entries.map((entry) => entry.endMinute)) + TIMELINE_PADDING_MINUTES,
-  )
-
-  const startMinute = Math.max(
-    0,
-    Math.floor(earliestStart / HOUR_IN_MINUTES) * HOUR_IN_MINUTES,
-  )
-  let endMinute = Math.min(
-    MINUTES_IN_DAY,
-    Math.ceil(latestEnd / HOUR_IN_MINUTES) * HOUR_IN_MINUTES,
-  )
-
-  if (endMinute <= startMinute) {
-    endMinute = Math.min(startMinute + HOUR_IN_MINUTES, MINUTES_IN_DAY)
-  }
-
-  return ensureMinimumTimelineSpan(
-    startMinute,
-    endMinute,
-    TIMELINE_VIEWPORT_MINUTES,
-  )
-}
-
-function ensureMinimumTimelineSpan(
-  startMinute: number,
-  endMinute: number,
-  minimumSpan: number,
-): TimelineWindow {
-  if (minimumSpan >= MINUTES_IN_DAY) {
-    return {
-      startMinute: 0,
-      endMinute: MINUTES_IN_DAY,
-    }
-  }
-
-  let normalizedStart = Math.max(0, Math.min(startMinute, MINUTES_IN_DAY))
-  let normalizedEnd = Math.max(0, Math.min(endMinute, MINUTES_IN_DAY))
-
-  if (normalizedEnd <= normalizedStart) {
-    normalizedEnd = Math.min(normalizedStart + HOUR_IN_MINUTES, MINUTES_IN_DAY)
-  }
-
-  if (normalizedEnd - normalizedStart >= minimumSpan) {
-    return {
-      startMinute: normalizedStart,
-      endMinute: normalizedEnd,
-    }
-  }
-
-  const missingMinutes = minimumSpan - (normalizedEnd - normalizedStart)
-  const prependMinutes = Math.min(normalizedStart, Math.floor(missingMinutes / 2))
-  normalizedStart -= prependMinutes
-  normalizedEnd = Math.min(
-    MINUTES_IN_DAY,
-    normalizedEnd + (missingMinutes - prependMinutes),
-  )
-
-  const remainingMinutes = minimumSpan - (normalizedEnd - normalizedStart)
-  if (remainingMinutes > 0) {
-    if (normalizedStart > 0) {
-      normalizedStart = Math.max(0, normalizedStart - remainingMinutes)
-    } else {
-      normalizedEnd = Math.min(MINUTES_IN_DAY, normalizedEnd + remainingMinutes)
-    }
-  }
-
-  return {
-    startMinute: normalizedStart,
-    endMinute: normalizedEnd,
-  }
 }
 
 function positionTimelineEntries(
