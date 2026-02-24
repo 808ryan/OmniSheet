@@ -11,16 +11,19 @@ use uuid::Uuid;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    ActivityUpsertInput, ApiKeyInput, DateInput, DiagnosticsBundle, DiagnosticsEvent,
-    DiagnosticsListInput, DiagnosticsRecordInput, Engagement, EngagementUpsertInput, IdInput,
-    IdResult, InterpretResult, InterpretTextInput, KeySource, LlmEntry, NormalizedEntry,
-    RepairSuspiciousEntriesInput, RepairSuspiciousEntriesResult, SettingsStatus, StatusLevel,
-    StorageHealth, TimelineEntry, TimelineUpdateInput, Warning, WarningType,
+    ActivityUpsertInput, ApiKeyInput, CodeContext, ContextActivity, ContextEngagement, DateInput,
+    DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement,
+    EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
+    LlmEntry, NormalizedEntry, RepairSuspiciousEntriesInput, RepairSuspiciousEntriesResult,
+    SettingsStatus, StatusLevel, StorageHealth, TimelineEntry, TimelineUpdateInput, Warning,
+    WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
 
 const MINUTES_IN_DAY: i64 = 24 * 60;
+const ACTIVITY_FALLBACK_CONFIDENCE_CAP: f64 = 0.60;
+const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
 
 fn state_lock_error() -> String {
     "application state lock poisoned".to_string()
@@ -114,6 +117,34 @@ struct NormalizedEntryResult {
     raw_duration: Option<i64>,
     temporal_cue_type: TemporalCueType,
     temporal_source: &'static str,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ActivityFallbackDecision {
+    attempted: bool,
+    applied: bool,
+    reason: Option<String>,
+    candidate_count: usize,
+    chosen_activity_code: Option<String>,
+    chosen_activity_name: Option<String>,
+    chosen_score: Option<f64>,
+    matched_terms: Vec<String>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ActivityCandidateMatch {
+    code: String,
+    name: String,
+    score: f64,
+    matched_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MatchingText {
+    phrase: String,
+    padded_phrase: String,
+    tokens: HashSet<String>,
 }
 
 fn keyring_entry() -> AppResult<Entry> {
@@ -370,7 +401,8 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         &correlation_id,
         "command_success",
         command,
-        status_level_label(&status.status_level),
+        // Command execution succeeded; key health severity is reported in details.statusLevel.
+        "ok",
         Some(duration_ms(started_at)),
         None,
         json!({
@@ -759,8 +791,15 @@ pub async fn interpret_text_message(
     let mut normalization_details = Vec::<Value>::new();
     let mut fallback_count = 0;
 
-    for result in normalization_results {
+    for mut result in normalization_results {
+        let activity_fallback =
+            apply_activity_fallback_if_needed(&mut result.entry, input.raw_text.trim(), &code_context);
+
         if let Some(note) = result.note {
+            normalization_notes.push(note);
+        }
+
+        if let Some(note) = activity_fallback.note.clone() {
             normalization_notes.push(note);
         }
 
@@ -779,6 +818,17 @@ pub async fn interpret_text_message(
           "savedDate": result.entry.date,
           "savedStartMinute": result.entry.start_minute,
           "savedEndMinute": result.entry.end_minute,
+          "savedEngagementCode": result.entry.engagement_code,
+          "savedActivityCode": result.entry.activity_code,
+          "savedConfidence": result.entry.confidence,
+          "attemptedActivityFallback": activity_fallback.attempted,
+          "usedActivityFallback": activity_fallback.applied,
+          "activityFallbackReason": activity_fallback.reason,
+          "activityFallbackCandidateCount": activity_fallback.candidate_count,
+          "activityFallbackChosenCode": activity_fallback.chosen_activity_code,
+          "activityFallbackChosenName": activity_fallback.chosen_activity_name,
+          "activityFallbackScore": activity_fallback.chosen_score,
+          "activityFallbackMatchedTerms": activity_fallback.matched_terms,
         }));
 
         normalized_entries.push(result.entry);
@@ -801,6 +851,8 @@ pub async fn interpret_text_message(
           "savedDate": temporal_reference.local_date.format("%Y-%m-%d").to_string(),
           "savedStartMinute": (temporal_reference.rounded_end_minute - 30).max(0),
           "savedEndMinute": temporal_reference.rounded_end_minute,
+          "attemptedActivityFallback": false,
+          "usedActivityFallback": false,
           "note": note,
         }));
     }
@@ -1456,6 +1508,219 @@ fn normalize_llm_entry(
     }
 }
 
+fn apply_activity_fallback_if_needed(
+    entry: &mut NormalizedEntry,
+    raw_text: &str,
+    code_context: &CodeContext,
+) -> ActivityFallbackDecision {
+    if entry.activity_code.is_some() {
+        return ActivityFallbackDecision::default();
+    }
+
+    let Some(engagement_code) = entry.engagement_code.as_deref() else {
+        return ActivityFallbackDecision::default();
+    };
+
+    let mut decision = ActivityFallbackDecision {
+        attempted: true,
+        ..ActivityFallbackDecision::default()
+    };
+
+    let Some(engagement) = code_context
+        .engagements
+        .iter()
+        .find(|candidate| candidate.code.eq_ignore_ascii_case(engagement_code))
+    else {
+        decision.reason = Some("engagement_not_found_in_context".to_string());
+        return decision;
+    };
+
+    decision.candidate_count = engagement.activities.len();
+
+    if engagement.activities.is_empty() {
+        decision.reason = Some("no_active_activities".to_string());
+        return decision;
+    }
+
+    let Some(candidate) = select_best_activity_candidate(engagement, raw_text) else {
+        decision.reason = Some("no_similarity_signal".to_string());
+        return decision;
+    };
+
+    entry.activity_code = Some(candidate.code.clone());
+    entry.confidence = entry.confidence.min(ACTIVITY_FALLBACK_CONFIDENCE_CAP);
+
+    decision.applied = true;
+    decision.reason = Some("engagement_known_activity_missing".to_string());
+    decision.chosen_activity_code = Some(candidate.code.clone());
+    decision.chosen_activity_name = Some(candidate.name.clone());
+    decision.chosen_score = Some(candidate.score);
+    decision.matched_terms = candidate.matched_terms.clone();
+    decision.note = Some(format!(
+        "Activity fallback applied: selected {} ({}) for {} using activity name/tag similarity.",
+        candidate.code, candidate.name, engagement.code
+    ));
+
+    decision
+}
+
+fn select_best_activity_candidate(
+    engagement: &ContextEngagement,
+    raw_text: &str,
+) -> Option<ActivityCandidateMatch> {
+    let message = build_matching_text(raw_text);
+    let mut best: Option<ActivityCandidateMatch> = None;
+
+    for activity in &engagement.activities {
+        let candidate = score_activity_candidate(&message, activity);
+        if candidate.score <= 0.0 || candidate.matched_terms.is_empty() {
+            continue;
+        }
+
+        let should_replace = match &best {
+            None => true,
+            Some(current) => is_better_activity_candidate(&candidate, current),
+        };
+
+        if should_replace {
+            best = Some(candidate);
+        }
+    }
+
+    best
+}
+
+fn is_better_activity_candidate(
+    candidate: &ActivityCandidateMatch,
+    current: &ActivityCandidateMatch,
+) -> bool {
+    if candidate.score > current.score + ACTIVITY_MATCH_SCORE_EPSILON {
+        return true;
+    }
+
+    if (candidate.score - current.score).abs() > ACTIVITY_MATCH_SCORE_EPSILON {
+        return false;
+    }
+
+    if candidate.matched_terms.len() != current.matched_terms.len() {
+        return candidate.matched_terms.len() > current.matched_terms.len();
+    }
+
+    candidate.code < current.code
+}
+
+fn score_activity_candidate(message: &MatchingText, activity: &ContextActivity) -> ActivityCandidateMatch {
+    let mut score = 0.0;
+    let mut matched_terms = HashSet::<String>::new();
+
+    let name_text = build_matching_text(&activity.name);
+    let (name_score, name_matches) = score_match_component(message, &name_text, 2.0, 1.25);
+    score += name_score;
+    matched_terms.extend(name_matches);
+
+    let mut activity_tokens = name_text.tokens.clone();
+    for tag in &activity.tags {
+        let tag_text = build_matching_text(tag);
+        activity_tokens.extend(tag_text.tokens.iter().cloned());
+        let (tag_score, tag_matches) = score_match_component(message, &tag_text, 3.0, 1.75);
+        score += tag_score;
+        matched_terms.extend(tag_matches);
+    }
+
+    if !message.tokens.is_empty() && !activity_tokens.is_empty() {
+        let intersection_count = message.tokens.intersection(&activity_tokens).count();
+        if intersection_count > 0 {
+            let union_count = message.tokens.union(&activity_tokens).count();
+            if union_count > 0 {
+                score += intersection_count as f64 / union_count as f64;
+            }
+        }
+    }
+
+    let mut matched_terms = matched_terms.into_iter().collect::<Vec<_>>();
+    matched_terms.sort();
+    if matched_terms.len() > 8 {
+        matched_terms.truncate(8);
+    }
+
+    ActivityCandidateMatch {
+        code: activity.code.clone(),
+        name: activity.name.clone(),
+        score,
+        matched_terms,
+    }
+}
+
+fn score_match_component(
+    message: &MatchingText,
+    component: &MatchingText,
+    phrase_weight: f64,
+    token_weight: f64,
+) -> (f64, HashSet<String>) {
+    let mut score = 0.0;
+    let mut matches = HashSet::<String>::new();
+
+    if component.phrase.is_empty() {
+        return (score, matches);
+    }
+
+    if message.padded_phrase.contains(&component.padded_phrase) {
+        score += phrase_weight;
+        matches.insert(component.phrase.clone());
+    }
+
+    if !message.tokens.is_empty() && !component.tokens.is_empty() {
+        let overlap = component
+            .tokens
+            .intersection(&message.tokens)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if !overlap.is_empty() {
+            score += token_weight * (overlap.len() as f64 / component.tokens.len() as f64);
+            matches.extend(overlap);
+        }
+    }
+
+    (score, matches)
+}
+
+fn build_matching_text(value: &str) -> MatchingText {
+    let phrase = normalize_for_matching(value);
+    let padded_phrase = if phrase.is_empty() {
+        " ".to_string()
+    } else {
+        format!(" {phrase} ")
+    };
+    let tokens = phrase
+        .split_whitespace()
+        .filter(|token| token.len() >= 2)
+        .map(|token| token.to_string())
+        .collect::<HashSet<_>>();
+
+    MatchingText {
+        phrase,
+        padded_phrase,
+        tokens,
+    }
+}
+
+fn normalize_for_matching(value: &str) -> String {
+    value.to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn detect_temporal_cue_type(raw_text: &str) -> TemporalCueType {
     if message_has_explicit_clock_time_cue(raw_text) {
         TemporalCueType::ExplicitClock
@@ -1725,12 +1990,16 @@ impl TimeParts for NaiveTime {
 mod tests {
     use chrono::{Local, NaiveDate};
 
-    use crate::models::{KeySource, LlmEntry, StatusLevel};
+    use crate::models::{
+        CodeContext, ContextActivity, ContextEngagement, KeySource, LlmEntry, NormalizedEntry,
+        StatusLevel,
+    };
 
     use super::{
-        derive_key_status_level, message_has_explicit_clock_time_cue,
-        message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
-        normalize_update_window, round_to_nearest_30, TemporalCueType, TemporalReference,
+        apply_activity_fallback_if_needed, derive_key_status_level,
+        message_has_explicit_clock_time_cue, message_has_relative_duration_cue,
+        normalize_confidence, normalize_llm_entry, normalize_update_window, round_to_nearest_30,
+        TemporalCueType, TemporalReference,
     };
 
     #[test]
@@ -1960,5 +2229,97 @@ mod tests {
         assert_eq!(result.entry.start_minute, 1290);
         assert_eq!(result.entry.end_minute, 1320);
         assert_eq!(result.entry.duration_minutes, 30);
+    }
+
+    #[test]
+    fn activity_fallback_selects_best_matching_activity_within_engagement() {
+        let code_context = CodeContext {
+            engagements: vec![ContextEngagement {
+                code: "E-69306633".to_string(),
+                name: "PCC SOC2".to_string(),
+                tags: vec![],
+                activities: vec![
+                    ContextActivity {
+                        code: "0001".to_string(),
+                        name: "Report 1".to_string(),
+                        tags: vec!["PCC".to_string(), "detail review".to_string()],
+                    },
+                    ContextActivity {
+                        code: "0006".to_string(),
+                        name: "Admin/Management".to_string(),
+                        tags: vec!["Admin".to_string(), "Management".to_string()],
+                    },
+                ],
+            }],
+        };
+
+        let mut entry = NormalizedEntry {
+            date: "2026-02-23".to_string(),
+            start_minute: 1080,
+            end_minute: 1320,
+            duration_minutes: 240,
+            description: "Flight home from Reno for the PCC data center visit.".to_string(),
+            confidence: 0.9,
+            engagement_code: Some("E-69306633".to_string()),
+            activity_code: None,
+        };
+
+        let decision = apply_activity_fallback_if_needed(
+            &mut entry,
+            "Just got home from a 4 hour flight from Reno for the PCC data center visit",
+            &code_context,
+        );
+
+        assert!(decision.attempted);
+        assert!(decision.applied);
+        assert_eq!(entry.activity_code.as_deref(), Some("0001"));
+        assert!(entry.confidence <= 0.60);
+        assert_eq!(decision.chosen_activity_code.as_deref(), Some("0001"));
+    }
+
+    #[test]
+    fn activity_fallback_keeps_null_when_no_similarity_signal_exists() {
+        let code_context = CodeContext {
+            engagements: vec![ContextEngagement {
+                code: "E-1".to_string(),
+                name: "Example".to_string(),
+                tags: vec![],
+                activities: vec![
+                    ContextActivity {
+                        code: "1000".to_string(),
+                        name: "Testing".to_string(),
+                        tags: vec!["controls".to_string()],
+                    },
+                    ContextActivity {
+                        code: "2000".to_string(),
+                        name: "Documentation".to_string(),
+                        tags: vec!["writeups".to_string()],
+                    },
+                ],
+            }],
+        };
+
+        let mut entry = NormalizedEntry {
+            date: "2026-02-23".to_string(),
+            start_minute: 60,
+            end_minute: 90,
+            duration_minutes: 30,
+            description: "Unrelated message".to_string(),
+            confidence: 0.85,
+            engagement_code: Some("E-1".to_string()),
+            activity_code: None,
+        };
+
+        let decision = apply_activity_fallback_if_needed(
+            &mut entry,
+            "completely unrelated phrase with no overlap",
+            &code_context,
+        );
+
+        assert!(decision.attempted);
+        assert!(!decision.applied);
+        assert_eq!(decision.reason.as_deref(), Some("no_similarity_signal"));
+        assert!(entry.activity_code.is_none());
+        assert_eq!(entry.confidence, 0.85);
     }
 }

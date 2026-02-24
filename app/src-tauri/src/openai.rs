@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use crate::error::{AppError, AppResult};
 use crate::models::{CodeContext, LlmResponse};
 
-const OPENAI_MODEL: &str = "gpt-4o-mini";
+const OPENAI_MODEL: &str = "gpt-5-nano";
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
 
 fn build_system_prompt() -> &'static str {
@@ -43,7 +43,10 @@ Additional rules:
 - Infer date from capture context and inferred time window.
 - Never default missing times to 00:00.
 - If uncertain, set lower confidence.
-- If no code match exists, set engagementCode/activityCode to null.
+- Use engagement/activity names and tags as semantic hints; exact keyword overlap is not required.
+- If you identify an engagementCode and that engagement has activities in the provided context, choose the best available activityCode from that engagement.
+- Use activityCode = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
+- If no engagement match exists, set engagementCode/activityCode to null.
 - Duration and times must be internally consistent.
 - Confidence must be in range 0.0 to 1.0.
 - Never include text outside JSON.
@@ -85,7 +88,6 @@ pub async fn interpret_message(
         .bearer_auth(api_key)
         .json(&json!({
           "model": OPENAI_MODEL,
-          "temperature": 0,
           "response_format": { "type": "json_object" },
           "messages": [
             { "role": "system", "content": system_prompt },
@@ -139,5 +141,13 @@ mod tests {
         assert!(prompt.contains("Only when no usable temporal intent exists"));
         assert!(prompt.contains("Set startTime/endTime/durationMinutes to null"));
         assert!(prompt.contains("Never default missing times to 00:00"));
+    }
+
+    #[test]
+    fn prompt_makes_activity_null_a_last_resort_when_engagement_is_known() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("choose the best available activityCode"));
+        assert!(prompt.contains("Use activityCode = null only as a last resort"));
+        assert!(prompt.contains("If no engagement match exists"));
     }
 }
