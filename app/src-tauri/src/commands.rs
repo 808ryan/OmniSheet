@@ -15,8 +15,8 @@ use crate::models::{
     DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement,
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
     LlmEntry, NormalizedEntry, RepairSuspiciousEntriesInput, RepairSuspiciousEntriesResult,
-    SettingsStatus, StatusLevel, StorageHealth, TimelineEntry, TimelineUpdateInput, Warning,
-    WarningType,
+    SettingsStatus, StatusLevel, StorageHealth, TimelineDaySummary, TimelineEntry,
+    TimelineMonthSummaryInput, TimelineUpdateInput, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -62,6 +62,42 @@ fn status_level_label(value: &StatusLevel) -> &'static str {
         StatusLevel::Warning => "warning",
         StatusLevel::Error => "error",
     }
+}
+
+fn timeline_month_bounds(month: &str) -> Result<(String, String), String> {
+    let trimmed = month.trim();
+    let mut parts = trimmed.split('-');
+    let year = parts
+        .next()
+        .ok_or_else(|| "month must be in YYYY-MM format".to_string())?
+        .parse::<i32>()
+        .map_err(|_| "month must be in YYYY-MM format".to_string())?;
+    let month_number = parts
+        .next()
+        .ok_or_else(|| "month must be in YYYY-MM format".to_string())?
+        .parse::<u32>()
+        .map_err(|_| "month must be in YYYY-MM format".to_string())?;
+
+    if parts.next().is_some() {
+        return Err("month must be in YYYY-MM format".to_string());
+    }
+
+    let start = NaiveDate::from_ymd_opt(year, month_number, 1)
+        .ok_or_else(|| "month must be a valid calendar month".to_string())?;
+
+    let (end_year, end_month) = if month_number == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month_number + 1)
+    };
+
+    let end_exclusive = NaiveDate::from_ymd_opt(end_year, end_month, 1)
+        .ok_or_else(|| "failed to resolve month boundary".to_string())?;
+
+    Ok((
+        start.format("%Y-%m-%d").to_string(),
+        end_exclusive.format("%Y-%m-%d").to_string(),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -547,6 +583,18 @@ pub fn timeline_list_for_date(
 ) -> Result<Vec<TimelineEntry>, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
     db::list_timeline_entries(&connection, input.date.trim()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn timeline_month_summary(
+    state: State<'_, AppState>,
+    input: TimelineMonthSummaryInput,
+) -> Result<Vec<TimelineDaySummary>, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    let (start_date, end_date_exclusive) = timeline_month_bounds(&input.month)?;
+
+    db::list_timeline_day_summaries_for_month(&connection, &start_date, &end_date_exclusive)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

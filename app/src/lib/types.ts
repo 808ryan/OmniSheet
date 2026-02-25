@@ -53,6 +53,10 @@ export interface DateInput {
   date: string
 }
 
+export interface TimelineMonthSummaryInput {
+  month: string
+}
+
 export interface InterpretTextInput {
   rawText: string
   clientTimestampIso: string
@@ -92,6 +96,12 @@ export interface TimelineEntry {
   activityCode: string | null
   activityName: string | null
   warningFlags: WarningType[]
+}
+
+export interface TimelineDaySummary {
+  date: string
+  entryCount: number
+  totalMinutes: number
 }
 
 export interface TimelineUpdateInput {

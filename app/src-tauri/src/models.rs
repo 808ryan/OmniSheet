@@ -107,6 +107,12 @@ pub struct DateInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TimelineMonthSummaryInput {
+    pub month: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InterpretTextInput {
     pub raw_text: String,
     pub client_timestamp_iso: String,
@@ -160,6 +166,14 @@ pub struct TimelineEntry {
     pub activity_code: Option<String>,
     pub activity_name: Option<String>,
     pub warning_flags: Vec<WarningType>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineDaySummary {
+    pub date: String,
+    pub entry_count: i64,
+    pub total_minutes: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

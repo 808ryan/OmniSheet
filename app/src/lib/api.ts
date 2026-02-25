@@ -17,7 +17,9 @@ import type {
   RepairSuspiciousEntriesInput,
   RepairSuspiciousEntriesResult,
   SettingsStatus,
+  TimelineDaySummary,
   TimelineEntry,
+  TimelineMonthSummaryInput,
   TimelineUpdateInput,
 } from './types'
 
@@ -197,6 +199,12 @@ export function interpretTextMessage(input: InterpretTextInput): Promise<Interpr
 
 export function timelineListForDate(input: DateInput): Promise<TimelineEntry[]> {
   return invokeCommand<TimelineEntry[]>('timeline_list_for_date', { input })
+}
+
+export function timelineMonthSummary(
+  input: TimelineMonthSummaryInput,
+): Promise<TimelineDaySummary[]> {
+  return invokeCommand<TimelineDaySummary[]>('timeline_month_summary', { input })
 }
 
 export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {

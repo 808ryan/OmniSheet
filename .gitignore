@@ -34,3 +34,5 @@ app/src-tauri/target/
 
 build/
 coverage/
+Proposed_Plan.md
+implementation_status.md
