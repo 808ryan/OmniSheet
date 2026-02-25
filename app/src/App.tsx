@@ -15,6 +15,7 @@ import {
   settingsGetStatus,
   settingsSetOpenAiKey,
   timelineListForDate,
+  timelineMonthSummary,
   timelineUpdateEntry,
 } from './lib/api'
 import { isTauriRuntime } from './lib/runtime'
@@ -33,13 +34,15 @@ import type {
   Engagement,
   InterpretResult,
   SettingsStatus,
+  TimelineDaySummary,
   TimelineEntry,
   WarningType,
 } from './lib/types'
 import './App.css'
 
-type View = 'capture' | 'timeline' | 'codes' | 'settings' | 'diagnostics'
+type View = 'timeline' | 'codes' | 'settings' | 'diagnostics'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
+type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 
 interface CaptureStatus {
   state: 'idle' | 'running' | 'success' | 'error'
@@ -105,6 +108,23 @@ interface TimelineLabel {
   tier: TimelineLabelTier
 }
 
+interface MiniCalendarProps {
+  selectedDate: string
+  visibleMonth: string
+  todayDate: string
+  daysWithEntries: Set<string>
+  isLoading: boolean
+  errorMessage: string | null
+  onVisibleMonthChange: (nextMonth: string) => void
+  onSelectDate: (date: string) => void
+}
+
+interface CalendarDayCell {
+  date: string
+  dayOfMonth: number
+  isCurrentMonth: boolean
+}
+
 const EMPTY_ENGAGEMENT_FORM: EngagementFormState = {
   code: '',
   name: '',
@@ -125,7 +145,6 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
 
 const MINUTES_IN_DAY = 24 * 60
 const HOUR_IN_MINUTES = 60
-const TIMELINE_VIEWPORT_MINUTES = 9 * HOUR_IN_MINUTES
 const PIXELS_PER_MINUTE = 1
 const TIMELINE_CANVAS_TOP_PADDING = 18
 const TIMELINE_CANVAS_BOTTOM_PADDING = 20
@@ -139,12 +158,16 @@ const EMPTY_CAPTURE_STATUS: CaptureStatus = {
   state: 'idle',
   message: 'No capture submitted yet.',
 }
+const SEGMENTED_VIEWS: View[] = ['timeline', 'codes', 'settings', 'diagnostics']
+const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const
 
 function App() {
   const tauriRuntime = isTauriRuntime()
+  const todayDate = useMemo(() => formatDate(new Date()), [])
 
-  const [activeView, setActiveView] = useState<View>('capture')
+  const [activeView, setActiveView] = useState<View>('timeline')
   const [isBusy, setIsBusy] = useState(false)
+  const [isTimelineLoading, setIsTimelineLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
@@ -160,11 +183,17 @@ function App() {
   const [interpretResult, setInterpretResult] = useState<InterpretResult | null>(null)
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus>(EMPTY_CAPTURE_STATUS)
 
-  const [selectedDate, setSelectedDate] = useState(formatDate(new Date()))
+  const [selectedDate, setSelectedDate] = useState(todayDate)
+  const [visibleMonth, setVisibleMonth] = useState(() => monthKeyFromDate(todayDate))
   const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([])
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
+  const [monthSummaryCache, setMonthSummaryCache] = useState<MonthSummaryCache>({})
+  const [monthSummaryLoadingMonth, setMonthSummaryLoadingMonth] = useState<string | null>(null)
+  const [monthSummaryError, setMonthSummaryError] = useState<string | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
+  const hasInitializedRef = useRef(false)
+  const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
@@ -173,6 +202,16 @@ function App() {
     () => timelineEntries.find((entry) => entry.id === selectedEntryId) ?? null,
     [selectedEntryId, timelineEntries],
   )
+  const visibleMonthSummaries = useMemo(
+    () => monthSummaryCache[visibleMonth] ?? [],
+    [monthSummaryCache, visibleMonth],
+  )
+  const visibleMonthDaysWithEntries = useMemo(
+    () => new Set(visibleMonthSummaries.filter((day) => day.entryCount > 0).map((day) => day.date)),
+    [visibleMonthSummaries],
+  )
+  const visibleMonthSummaryError = monthSummaryCache[visibleMonth] ? null : monthSummaryError
+  const hasVisibleMonthSummary = monthSummaryCache[visibleMonth] !== undefined
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
 
@@ -182,12 +221,6 @@ function App() {
       + TIMELINE_CANVAS_TOP_PADDING
       + TIMELINE_CANVAS_BOTTOM_PADDING
   )
-  const timelineViewportHeight = (
-    TIMELINE_VIEWPORT_MINUTES * PIXELS_PER_MINUTE
-      + TIMELINE_CANVAS_TOP_PADDING
-      + TIMELINE_CANVAS_BOTTOM_PADDING
-  )
-
   const positionedTimelineEntries = useMemo(
     () => positionTimelineEntries(timelineEntries, timelineWindow),
     [timelineEntries, timelineWindow],
@@ -269,17 +302,43 @@ function App() {
 
   const loadTimeline = useCallback(async (date: string) => {
     const entries = await timelineListForDate({ date })
+    lastLoadedTimelineDateRef.current = date
     setTimelineEntries(entries)
     return entries
   }, [])
 
-  const loadDiagnostics = useCallback(async (filter: DiagnosticsFilter = diagnosticsFilter) => {
+  const loadTimelineMonthSummary = useCallback(async (month: string) => {
+    const rows = await timelineMonthSummary({ month })
+    setMonthSummaryCache((previous) => ({
+      ...previous,
+      [month]: rows,
+    }))
+    return rows
+  }, [])
+
+  const invalidateMonthSummaries = useCallback((monthKeys: string[]) => {
+    setMonthSummaryCache((previous) => {
+      let changed = false
+      const next = { ...previous }
+
+      for (const monthKey of monthKeys) {
+        if (next[monthKey]) {
+          delete next[monthKey]
+          changed = true
+        }
+      }
+
+      return changed ? next : previous
+    })
+  }, [])
+
+  const loadDiagnostics = useCallback(async (filter: DiagnosticsFilter) => {
     const events = await diagnosticsList({
       limit: 100,
       filter: filter === 'all' ? undefined : filter,
     })
     setDiagnosticsEvents(events)
-  }, [diagnosticsFilter])
+  }, [])
 
   useEffect(() => {
     if (!tauriRuntime) {
@@ -292,9 +351,10 @@ function App() {
         await Promise.all([
           loadEngagements(),
           loadSettings(),
-          loadTimeline(selectedDate),
-          loadDiagnostics(),
+          loadTimeline(todayDate),
+          loadDiagnostics('all'),
         ])
+        hasInitializedRef.current = true
       } catch (error) {
         setErrorMessage((error as Error).message)
       } finally {
@@ -303,7 +363,79 @@ function App() {
     }
 
     void initialize()
-  }, [loadDiagnostics, loadEngagements, loadSettings, loadTimeline, selectedDate, tauriRuntime])
+  }, [loadDiagnostics, loadEngagements, loadSettings, loadTimeline, tauriRuntime, todayDate])
+
+  useEffect(() => {
+    if (!tauriRuntime || !hasInitializedRef.current) {
+      return
+    }
+
+    if (lastLoadedTimelineDateRef.current === selectedDate) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsTimelineLoading(true)
+        setErrorMessage(null)
+        await loadTimeline(selectedDate)
+      } catch (error) {
+        if (isAppCommandError(error)) {
+          setErrorMessage(
+            `${error.message} (command: ${error.command}, correlationId: ${error.correlationId})`,
+          )
+        } else {
+          setErrorMessage((error as Error).message)
+        }
+      } finally {
+        setIsTimelineLoading(false)
+      }
+    })()
+  }, [loadTimeline, selectedDate, tauriRuntime])
+
+  useEffect(() => {
+    const selectedMonth = monthKeyFromDate(selectedDate)
+    if (selectedMonth !== visibleMonth) {
+      setVisibleMonth(selectedMonth)
+    }
+  }, [selectedDate, visibleMonth])
+
+  useEffect(() => {
+    if (!tauriRuntime) {
+      return
+    }
+
+    if (hasVisibleMonthSummary) {
+      return
+    }
+
+    let cancelled = false
+    const requestedMonth = visibleMonth
+
+    void (async () => {
+      try {
+        setMonthSummaryLoadingMonth(requestedMonth)
+        setMonthSummaryError(null)
+        await loadTimelineMonthSummary(requestedMonth)
+        if (cancelled) {
+          return
+        }
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+        setMonthSummaryError((error as Error).message)
+      } finally {
+        setMonthSummaryLoadingMonth((previous) => (
+          previous === requestedMonth ? null : previous
+        ))
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [hasVisibleMonthSummary, loadTimelineMonthSummary, tauriRuntime, visibleMonth])
 
   useEffect(() => {
     if (!selectedEntryId) {
@@ -321,8 +453,8 @@ function App() {
       return
     }
 
-    void loadDiagnostics()
-  }, [activeView, loadDiagnostics, tauriRuntime, diagnosticsFilter])
+    void loadDiagnostics(diagnosticsFilter)
+  }, [activeView, diagnosticsFilter, loadDiagnostics, tauriRuntime])
 
   useEffect(() => {
     if (activeView !== 'timeline') {
@@ -334,8 +466,37 @@ function App() {
       return
     }
 
-    grid.scrollTop = 0
-  }, [activeView, selectedDate])
+    if (lastLoadedTimelineDateRef.current !== selectedDate) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      if (positionedTimelineEntries.length === 0) {
+        grid.scrollTop = 0
+        return
+      }
+
+      const earliestEntry = positionedTimelineEntries.reduce((earliest, current) =>
+        current.top < earliest.top ? current : earliest,
+      )
+      const targetTop = (
+        earliestEntry.top
+        - (grid.clientHeight / 2)
+        + (earliestEntry.height / 2)
+      )
+      const maxScrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
+      const clampedScrollTop = Math.min(Math.max(0, targetTop), maxScrollTop)
+
+      grid.scrollTo({
+        top: clampedScrollTop,
+        behavior: 'auto',
+      })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+    }
+  }, [activeView, positionedTimelineEntries, selectedDate])
 
   const refreshAfterMutation = useCallback(async () => {
     await Promise.all([loadEngagements(), loadTimeline(selectedDate), loadSettings()])
@@ -409,6 +570,7 @@ function App() {
           correlationId: result.correlationId,
         })
         setSuccessMessage('Message interpretation finished.')
+        invalidateMonthSummaries([monthKeyFromDate(selectedDate)])
       } catch (error) {
         if (isAppCommandError(error)) {
           setCaptureStatus({
@@ -527,9 +689,18 @@ function App() {
   }
 
   const onSetDate = (nextDate: string) => {
+    if (nextDate === selectedDate) {
+      return
+    }
+
     setSelectedDate(nextDate)
     setSelectedEntryId(null)
     setEntryDraft(null)
+  }
+
+  const onSelectCalendarDate = (nextDate: string) => {
+    setActiveView('timeline')
+    onSetDate(nextDate)
   }
 
   const onSelectEntry = (entry: TimelineEntry) => {
@@ -553,6 +724,10 @@ function App() {
     }
 
     void runAction(async () => {
+      const previousEntryDate = selectedEntry?.date ?? selectedDate
+      const previousMonthKey = monthKeyFromDate(previousEntryDate)
+      const nextMonthKey = monthKeyFromDate(entryDraft.date)
+
       await timelineUpdateEntry({
         id: entryDraft.id,
         engagementId: entryDraft.engagementId || null,
@@ -564,6 +739,7 @@ function App() {
       })
 
       await loadTimeline(selectedDate)
+      invalidateMonthSummaries([previousMonthKey, nextMonthKey])
       setSuccessMessage('Timeline entry updated.')
     })
   }
@@ -618,6 +794,7 @@ function App() {
     void runAction(async () => {
       const result = await maintenanceRepairSuspiciousEntries({ limit: 300 })
       await Promise.all([loadTimeline(selectedDate), loadDiagnostics(diagnosticsFilter)])
+      invalidateMonthSummaries([monthKeyFromDate(selectedDate)])
       setSuccessMessage(
         `Temporal repair complete. Repaired ${result.repairedCount} of ${result.scannedCount} suspicious entries.`,
       )
@@ -636,68 +813,30 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div>
-          <p className="app-eyebrow">OmniSheet</p>
-          <h1>Time Capture Console</h1>
-        </div>
-        <div className="header-right">
-          <span>{selectedDate}</span>
-          {isBusy && <span className="status-chip">Working...</span>}
-        </div>
-      </header>
+      <div className={`workspace-shell ${activeView === 'timeline' ? 'with-timeline' : 'without-timeline'}`}>
+        <aside className="sidebar-panel">
+          <div className="sidebar-header">
+            <div>
+              <p className="app-eyebrow">OmniSheet</p>
+              <h1>Capture + Timeline</h1>
+            </div>
+            <div className="sidebar-header-meta">
+              <span>{selectedDate}</span>
+              {isBusy ? <span className="status-chip">Working...</span> : null}
+            </div>
+          </div>
 
-      <nav className="app-nav">
-        <button
-          type="button"
-          className={activeView === 'capture' ? 'active' : ''}
-          onClick={() => setActiveView('capture')}
-        >
-          Capture
-        </button>
-        <button
-          type="button"
-          className={activeView === 'timeline' ? 'active' : ''}
-          onClick={() => setActiveView('timeline')}
-        >
-          Timeline
-        </button>
-        <button
-          type="button"
-          className={activeView === 'codes' ? 'active' : ''}
-          onClick={() => setActiveView('codes')}
-        >
-          Codes
-        </button>
-        <button
-          type="button"
-          className={activeView === 'settings' ? 'active' : ''}
-          onClick={() => setActiveView('settings')}
-        >
-          Settings
-        </button>
-        <button
-          type="button"
-          className={activeView === 'diagnostics' ? 'active' : ''}
-          onClick={() => setActiveView('diagnostics')}
-        >
-          Diagnostics
-        </button>
-      </nav>
-
-      {errorMessage ? <p className="alert error">{errorMessage}</p> : null}
-      {successMessage ? <p className="alert success">{successMessage}</p> : null}
-
-      <main className="app-content">
-        {activeView === 'capture' ? (
-          <section className="panel">
-            <h2>Message Input</h2>
+          <section className="sidebar-section sidebar-capture">
+            <div className="sidebar-section-header">
+              <h2>Capture</h2>
+              <p>Submit a message from any view.</p>
+            </div>
             <form onSubmit={onSubmitCapture} className="stack">
               <textarea
                 value={captureMessage}
                 onChange={(event) => setCaptureMessage(event.target.value)}
                 placeholder="Example: Just finished a 30 minute SAP ITGC meeting with the Apple team"
-                rows={5}
+                rows={4}
                 required
               />
               <button type="submit" disabled={isBusy || captureMessage.trim().length === 0}>
@@ -705,7 +844,7 @@ function App() {
               </button>
             </form>
 
-            <div className={`result-card capture-status ${captureStatus.state}`}>
+            <div className={`result-card capture-status compact ${captureStatus.state}`}>
               <h3>Capture Status</h3>
               <p>{captureStatus.message}</p>
               {captureStatus.correlationId ? (
@@ -714,19 +853,59 @@ function App() {
                 </p>
               ) : null}
               {interpretResult ? (
-                <>
-                  <p>Raw message ID: {interpretResult.rawMessageId}</p>
+                <div className="sidebar-capture-summary">
                   <p>Entries created: {interpretResult.createdEntryIds.length}</p>
-                  <div className="warning-row">
-                    {interpretResult.warnings.map((warning) => (
-                      <WarningBadge key={`${warning.entryId}-${warning.warningType}`} type={warning.warningType} />
-                    ))}
-                  </div>
-                </>
+                  {interpretResult.warnings.length > 0 ? (
+                    <div className="warning-row">
+                      {interpretResult.warnings.map((warning) => (
+                        <WarningBadge
+                          key={`${warning.entryId}-${warning.warningType}`}
+                          type={warning.warningType}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               ) : null}
             </div>
           </section>
-        ) : null}
+
+          <section className="sidebar-section sidebar-calendar">
+            <MiniCalendar
+              selectedDate={selectedDate}
+              visibleMonth={visibleMonth}
+              todayDate={todayDate}
+              daysWithEntries={visibleMonthDaysWithEntries}
+              isLoading={monthSummaryLoadingMonth === visibleMonth}
+              errorMessage={visibleMonthSummaryError}
+              onVisibleMonthChange={setVisibleMonth}
+              onSelectDate={onSelectCalendarDate}
+            />
+          </section>
+        </aside>
+
+        <main className="app-main">
+          <div className="segmented-control" role="tablist" aria-label="Main views">
+            {SEGMENTED_VIEWS.map((view) => (
+              <button
+                key={view}
+                type="button"
+                role="tab"
+                aria-selected={activeView === view}
+                className={activeView === view ? 'active' : ''}
+                onClick={() => setActiveView(view)}
+              >
+                {view[0].toUpperCase() + view.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          <div className="app-notices" aria-live="polite">
+            {errorMessage ? <p className="alert error">{errorMessage}</p> : null}
+            {successMessage ? <p className="alert success">{successMessage}</p> : null}
+          </div>
+
+          <div className={`app-content ${activeView === 'timeline' ? 'timeline-active' : 'wide-active'}`}>
 
         {activeView === 'timeline' ? (
           <section className="panel timeline-panel">
@@ -739,15 +918,24 @@ function App() {
                 </p>
               </div>
               <div className="timeline-controls">
-                <button type="button" onClick={() => onSetDate(shiftDate(selectedDate, -1))}>
+                <button
+                  type="button"
+                  onClick={() => onSetDate(shiftDate(selectedDate, -1))}
+                  disabled={isBusy || isTimelineLoading}
+                >
                   Previous
                 </button>
                 <input
                   type="date"
                   value={selectedDate}
+                  disabled={isBusy || isTimelineLoading}
                   onChange={(event) => onSetDate(event.target.value)}
                 />
-                <button type="button" onClick={() => onSetDate(shiftDate(selectedDate, 1))}>
+                <button
+                  type="button"
+                  onClick={() => onSetDate(shiftDate(selectedDate, 1))}
+                  disabled={isBusy || isTimelineLoading}
+                >
                   Next
                 </button>
               </div>
@@ -758,8 +946,8 @@ function App() {
                 className="timeline-grid"
                 role="list"
                 aria-label="Timeline entries"
+                aria-busy={isTimelineLoading}
                 ref={timelineGridRef}
-                style={{ height: `${timelineViewportHeight}px` }}
               >
                 <div
                   className="timeline-canvas"
@@ -1295,7 +1483,7 @@ function App() {
         ) : null}
 
         {activeView === 'settings' ? (
-          <section className="panel">
+          <section className="panel settings-panel">
             <h2>Settings</h2>
             <form className="stack" onSubmit={onSaveApiKey}>
               <label>
@@ -1394,7 +1582,92 @@ function App() {
             ) : null}
           </section>
         ) : null}
-      </main>
+          </div>
+        </main>
+      </div>
+    </div>
+  )
+}
+
+function MiniCalendar({
+  selectedDate,
+  visibleMonth,
+  todayDate,
+  daysWithEntries,
+  isLoading,
+  errorMessage,
+  onVisibleMonthChange,
+  onSelectDate,
+}: MiniCalendarProps) {
+  const monthLabel = useMemo(() => formatMonthHeading(visibleMonth), [visibleMonth])
+  const dayCells = useMemo(() => buildCalendarDayCells(visibleMonth), [visibleMonth])
+
+  return (
+    <div className="mini-calendar" aria-busy={isLoading}>
+      <div className="mini-calendar-nav">
+        <button
+          type="button"
+          className="ghost mini-calendar-arrow"
+          onClick={() => onVisibleMonthChange(shiftMonthKey(visibleMonth, -1))}
+          aria-label={`Show ${formatMonthHeading(shiftMonthKey(visibleMonth, -1))}`}
+        >
+          &#8249;
+        </button>
+        <p className="mini-calendar-title" aria-live="polite">
+          {monthLabel}
+        </p>
+        <button
+          type="button"
+          className="ghost mini-calendar-arrow"
+          onClick={() => onVisibleMonthChange(shiftMonthKey(visibleMonth, 1))}
+          aria-label={`Show ${formatMonthHeading(shiftMonthKey(visibleMonth, 1))}`}
+        >
+          &#8250;
+        </button>
+      </div>
+
+      <div className="mini-calendar-weekdays" aria-hidden="true">
+        {WEEKDAY_LABELS.map((label, index) => (
+          <span key={`${visibleMonth}-${label}-${index}`}>{label}</span>
+        ))}
+      </div>
+
+      <div className="mini-calendar-grid" role="grid" aria-label={`${monthLabel} calendar`}>
+        {dayCells.map((cell) => {
+          const isSelected = cell.date === selectedDate
+          const isToday = cell.date === todayDate
+          const hasEntries = daysWithEntries.has(cell.date)
+          const classes = [
+            'mini-calendar-day',
+            cell.isCurrentMonth ? 'current-month' : 'outside-month',
+            isSelected ? 'is-selected' : '',
+            isToday ? 'is-today' : '',
+            hasEntries ? 'has-entries' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')
+
+          return (
+            <button
+              type="button"
+              key={cell.date}
+              className={classes}
+              role="gridcell"
+              aria-pressed={isSelected}
+              aria-label={formatCalendarDayAriaLabel(cell.date, {
+                isSelected,
+                isToday,
+                hasEntries,
+              })}
+              onClick={() => onSelectDate(cell.date)}
+            >
+              <span>{cell.dayOfMonth}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {errorMessage ? <p className="mini-calendar-error">{errorMessage}</p> : null}
     </div>
   )
 }
@@ -1442,6 +1715,84 @@ function formatTimelineRangeEndLabel(minute: number): string {
   }
 
   return minuteToLabel(minute)
+}
+
+function monthKeyFromDate(date: string): string {
+  return date.slice(0, 7)
+}
+
+function shiftMonthKey(monthKey: string, delta: number): string {
+  const [yearToken, monthToken] = monthKey.split('-')
+  const year = Number(yearToken)
+  const monthIndex = Number(monthToken) - 1
+  const shifted = new Date(year, monthIndex + delta, 1)
+  return `${shifted.getFullYear()}-${`${shifted.getMonth() + 1}`.padStart(2, '0')}`
+}
+
+function formatMonthHeading(monthKey: string): string {
+  const [yearToken, monthToken] = monthKey.split('-')
+  const year = Number(yearToken)
+  const monthIndex = Number(monthToken) - 1
+  const value = new Date(year, monthIndex, 1)
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'long',
+    year: 'numeric',
+  }).format(value)
+}
+
+function buildCalendarDayCells(monthKey: string): CalendarDayCell[] {
+  const [yearToken, monthToken] = monthKey.split('-')
+  const year = Number(yearToken)
+  const monthIndex = Number(monthToken) - 1
+
+  const firstDayOfMonth = new Date(year, monthIndex, 1)
+  const gridStart = new Date(year, monthIndex, 1 - firstDayOfMonth.getDay())
+  const cells: CalendarDayCell[] = []
+
+  for (let index = 0; index < 42; index += 1) {
+    const currentDate = new Date(gridStart)
+    currentDate.setDate(gridStart.getDate() + index)
+
+    cells.push({
+      date: formatDate(currentDate),
+      dayOfMonth: currentDate.getDate(),
+      isCurrentMonth:
+        currentDate.getFullYear() === year
+        && currentDate.getMonth() === monthIndex,
+    })
+  }
+
+  return cells
+}
+
+function formatCalendarDayAriaLabel(
+  date: string,
+  state: { isSelected: boolean; isToday: boolean; hasEntries: boolean },
+): string {
+  const value = new Date(`${date}T00:00:00`)
+  const parts = [
+    new Intl.DateTimeFormat(undefined, {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(value),
+  ]
+
+  if (state.isSelected) {
+    parts.push('selected')
+  }
+
+  if (state.isToday) {
+    parts.push('today')
+  }
+
+  if (state.hasEntries) {
+    parts.push('has entries')
+  }
+
+  return parts.join(', ')
 }
 
 function positionTimelineEntries(
