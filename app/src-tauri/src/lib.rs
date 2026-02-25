@@ -52,6 +52,7 @@ pub fn run() {
             commands::activity_upsert,
             commands::activity_delete,
             commands::timeline_list_for_date,
+            commands::timeline_month_summary,
             commands::timeline_update_entry,
             commands::interpret_text_message,
             commands::diagnostics_record_frontend_event,

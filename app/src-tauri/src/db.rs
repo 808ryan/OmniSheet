@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
-    DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, TimelineEntry, Warning,
-    WarningType,
+    DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, TimelineDaySummary,
+    TimelineEntry, Warning, WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
@@ -628,6 +628,37 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
     }
 
     Ok(entries)
+}
+
+pub fn list_timeline_day_summaries_for_month(
+    conn: &Connection,
+    start_date: &str,
+    end_date_exclusive: &str,
+) -> AppResult<Vec<TimelineDaySummary>> {
+    let mut statement = conn.prepare(
+        r#"
+      SELECT
+        te.date,
+        COUNT(te.id) AS entry_count,
+        COALESCE(SUM(te.duration_minutes), 0) AS total_minutes
+      FROM timesheet_entries te
+      WHERE te.date >= ?1 AND te.date < ?2
+      GROUP BY te.date
+      ORDER BY te.date
+    "#,
+    )?;
+
+    let rows = statement
+        .query_map(params![start_date, end_date_exclusive], |row| {
+            Ok(TimelineDaySummary {
+                date: row.get(0)?,
+                entry_count: row.get(1)?,
+                total_minutes: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(rows)
 }
 
 pub fn list_warning_flags(conn: &Connection, entry_id: &str) -> AppResult<Vec<WarningType>> {
