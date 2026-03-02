@@ -15,6 +15,7 @@ use crate::models::{
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
 pub const DIAGNOSTICS_RETENTION_DAYS: i64 = 7;
+const MAX_USAGE_DESCRIPTION_LENGTH: usize = 500;
 
 pub fn current_unix_timestamp() -> i64 {
     SystemTime::now()
@@ -52,6 +53,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         client TEXT,
         color_hex TEXT,
         tags TEXT NOT NULL,
+        describe_when_to_use TEXT,
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -64,6 +66,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         name TEXT NOT NULL,
         color_hex TEXT,
         tags TEXT NOT NULL,
+        describe_when_to_use TEXT,
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -95,6 +98,10 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         source TEXT NOT NULL,
         raw_message_id TEXT,
         confidence REAL NOT NULL,
+        used_activity_fallback INTEGER NOT NULL DEFAULT 0,
+        used_temporal_fallback INTEGER NOT NULL DEFAULT 0,
+        duration_defaulted INTEGER NOT NULL DEFAULT 0,
+        fallback_summary TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE SET NULL,
@@ -141,14 +148,35 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
     "#,
     )?;
 
-    ensure_color_columns(conn)?;
+    ensure_expected_columns(conn)?;
 
     Ok(())
 }
 
-fn ensure_color_columns(conn: &Connection) -> AppResult<()> {
+fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
     ensure_column_exists(conn, "engagements", "color_hex", "TEXT")?;
+    ensure_column_exists(conn, "engagements", "describe_when_to_use", "TEXT")?;
     ensure_column_exists(conn, "activities", "color_hex", "TEXT")?;
+    ensure_column_exists(conn, "activities", "describe_when_to_use", "TEXT")?;
+    ensure_column_exists(
+        conn,
+        "timesheet_entries",
+        "used_activity_fallback",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "timesheet_entries",
+        "used_temporal_fallback",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "timesheet_entries",
+        "duration_defaulted",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(conn, "timesheet_entries", "fallback_summary", "TEXT")?;
     Ok(())
 }
 
@@ -191,6 +219,7 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
+    let describe_when_to_use = normalize_usage_description(input.describe_when_to_use)?;
     let is_active = if input.is_active.unwrap_or(true) {
         1
     } else {
@@ -199,14 +228,17 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
 
     conn.execute(
         r#"
-      INSERT INTO engagements (id, code, name, client, color_hex, tags, is_active, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+      INSERT INTO engagements (
+        id, code, name, client, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+      )
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
       ON CONFLICT(id) DO UPDATE SET
         code = excluded.code,
         name = excluded.name,
         client = excluded.client,
         color_hex = excluded.color_hex,
         tags = excluded.tags,
+        describe_when_to_use = excluded.describe_when_to_use,
         is_active = excluded.is_active,
         updated_at = excluded.updated_at
     "#,
@@ -217,6 +249,7 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
             input.client.as_ref().map(|client| client.trim()),
             color_hex,
             tags_json,
+            describe_when_to_use,
             is_active,
             now,
         ],
@@ -244,6 +277,7 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
+    let describe_when_to_use = normalize_usage_description(input.describe_when_to_use)?;
     let is_active = if input.is_active.unwrap_or(true) {
         1
     } else {
@@ -252,14 +286,17 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
 
     conn.execute(
     r#"
-      INSERT INTO activities (id, engagement_id, code, name, color_hex, tags, is_active, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+      INSERT INTO activities (
+        id, engagement_id, code, name, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+      )
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
       ON CONFLICT(id) DO UPDATE SET
         engagement_id = excluded.engagement_id,
         code = excluded.code,
         name = excluded.name,
         color_hex = excluded.color_hex,
         tags = excluded.tags,
+        describe_when_to_use = excluded.describe_when_to_use,
         is_active = excluded.is_active,
         updated_at = excluded.updated_at
     "#,
@@ -270,6 +307,7 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
       input.name.trim(),
       color_hex,
       tags_json,
+      describe_when_to_use,
       is_active,
       now,
     ],
@@ -286,7 +324,7 @@ pub fn delete_activity(conn: &Connection, id: &str) -> AppResult<()> {
 pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
     let mut engagement_statement = conn.prepare(
         r#"
-      SELECT id, code, name, client, color_hex, tags, is_active, created_at, updated_at
+      SELECT id, code, name, client, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
       FROM engagements
       ORDER BY name COLLATE NOCASE
     "#,
@@ -303,9 +341,10 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
                 client: row.get(3)?,
                 color_hex: row.get(4)?,
                 tags,
-                is_active: row.get::<_, i64>(6)? == 1,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                describe_when_to_use: row.get(6)?,
+                is_active: row.get::<_, i64>(7)? == 1,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
                 activities: Vec::new(),
             })
         })?
@@ -314,7 +353,7 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
     let mut activities_by_engagement: HashMap<String, Vec<Activity>> = HashMap::new();
     let mut activity_statement = conn.prepare(
         r#"
-      SELECT id, engagement_id, code, name, color_hex, tags, is_active, created_at, updated_at
+      SELECT id, engagement_id, code, name, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
       FROM activities
       ORDER BY name COLLATE NOCASE
     "#,
@@ -332,9 +371,10 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
                 name: row.get(3)?,
                 color_hex: row.get(4)?,
                 tags,
-                is_active: row.get::<_, i64>(6)? == 1,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                describe_when_to_use: row.get(6)?,
+                is_active: row.get::<_, i64>(7)? == 1,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?
@@ -363,6 +403,7 @@ pub fn load_code_context(conn: &Connection) -> AppResult<CodeContext> {
             code: engagement.code,
             name: engagement.name,
             tags: engagement.tags,
+            describe_when_to_use: engagement.describe_when_to_use,
             activities: engagement
                 .activities
                 .into_iter()
@@ -371,6 +412,7 @@ pub fn load_code_context(conn: &Connection) -> AppResult<CodeContext> {
                     code: activity.code,
                     name: activity.name,
                     tags: activity.tags,
+                    describe_when_to_use: activity.describe_when_to_use,
                 })
                 .collect(),
         })
@@ -418,6 +460,10 @@ pub fn insert_timesheet_entry(
     entry: &NormalizedEntry,
     engagement_id: Option<&str>,
     activity_id: Option<&str>,
+    used_activity_fallback: bool,
+    used_temporal_fallback: bool,
+    duration_defaulted: bool,
+    fallback_summary: Option<&str>,
     source: &str,
 ) -> AppResult<String> {
     let id = Uuid::new_v4().to_string();
@@ -428,9 +474,10 @@ pub fn insert_timesheet_entry(
       INSERT INTO timesheet_entries (
         id, engagement_id, activity_id, date, start_minute, end_minute,
         duration_minutes, description, source, raw_message_id, confidence,
-        created_at, updated_at
+        used_activity_fallback, used_temporal_fallback, duration_defaulted,
+        fallback_summary, created_at, updated_at
       )
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
     "#,
         params![
             id,
@@ -444,6 +491,10 @@ pub fn insert_timesheet_entry(
             source,
             raw_message_id,
             entry.confidence,
+            if used_activity_fallback { 1 } else { 0 },
+            if used_temporal_fallback { 1 } else { 0 },
+            if duration_defaulted { 1 } else { 0 },
+            fallback_summary,
             now,
         ],
     )?;
@@ -592,7 +643,11 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         e.code,
         e.name,
         a.code,
-        a.name
+        a.name,
+        te.used_activity_fallback,
+        te.used_temporal_fallback,
+        te.duration_defaulted,
+        te.fallback_summary
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -618,6 +673,10 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
                 engagement_name: row.get(11)?,
                 activity_code: row.get(12)?,
                 activity_name: row.get(13)?,
+                used_activity_fallback: row.get::<_, i64>(14)? == 1,
+                used_temporal_fallback: row.get::<_, i64>(15)? == 1,
+                duration_defaulted: row.get::<_, i64>(16)? == 1,
+                fallback_summary: row.get(17)?,
                 warning_flags: Vec::new(),
             })
         })?
@@ -947,6 +1006,26 @@ fn normalize_color_hex(raw_value: Option<String>) -> AppResult<Option<String>> {
     }
 
     Ok(Some(candidate))
+}
+
+fn normalize_usage_description(raw_value: Option<String>) -> AppResult<Option<String>> {
+    let Some(value) = raw_value else {
+        return Ok(None);
+    };
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.chars().count() > MAX_USAGE_DESCRIPTION_LENGTH {
+        return Err(AppError::InvalidInput(format!(
+            "describeWhenToUse must be {} characters or fewer",
+            MAX_USAGE_DESCRIPTION_LENGTH
+        )));
+    }
+
+    Ok(Some(trimmed.to_string()))
 }
 
 fn parse_tags(tags_json: &str) -> Option<Vec<String>> {

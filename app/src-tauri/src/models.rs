@@ -49,6 +49,7 @@ pub struct Activity {
     pub name: String,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
+    pub describe_when_to_use: Option<String>,
     pub is_active: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -63,6 +64,7 @@ pub struct Engagement {
     pub client: Option<String>,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
+    pub describe_when_to_use: Option<String>,
     pub is_active: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -78,6 +80,7 @@ pub struct EngagementUpsertInput {
     pub client: Option<String>,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
+    pub describe_when_to_use: Option<String>,
     pub is_active: Option<bool>,
 }
 
@@ -90,6 +93,7 @@ pub struct ActivityUpsertInput {
     pub name: String,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
+    pub describe_when_to_use: Option<String>,
     pub is_active: Option<bool>,
 }
 
@@ -165,6 +169,10 @@ pub struct TimelineEntry {
     pub engagement_name: Option<String>,
     pub activity_code: Option<String>,
     pub activity_name: Option<String>,
+    pub used_activity_fallback: bool,
+    pub used_temporal_fallback: bool,
+    pub duration_defaulted: bool,
+    pub fallback_summary: Option<String>,
     pub warning_flags: Vec<WarningType>,
 }
 
@@ -262,6 +270,8 @@ pub struct ContextEngagement {
     pub code: String,
     pub name: String,
     pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub describe_when_to_use: Option<String>,
     pub activities: Vec<ContextActivity>,
 }
 
@@ -271,6 +281,8 @@ pub struct ContextActivity {
     pub code: String,
     pub name: String,
     pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub describe_when_to_use: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,4 +314,97 @@ pub struct NormalizedEntry {
     pub confidence: f64,
     pub engagement_code: Option<String>,
     pub activity_code: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::{CodeContext, ContextActivity, ContextEngagement};
+
+    #[test]
+    fn context_serialization_omits_null_usage_description_fields() {
+        let context = CodeContext {
+            engagements: vec![ContextEngagement {
+                code: "E-001".to_string(),
+                name: "Example Engagement".to_string(),
+                tags: vec!["example".to_string()],
+                describe_when_to_use: None,
+                activities: vec![ContextActivity {
+                    code: "A-001".to_string(),
+                    name: "Example Activity".to_string(),
+                    tags: vec!["task".to_string()],
+                    describe_when_to_use: None,
+                }],
+            }],
+        };
+
+        let serialized = serde_json::to_value(&context).expect("context serialization should work");
+        let engagement = serialized
+            .get("engagements")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(Value::as_object)
+            .expect("engagement should exist");
+
+        assert!(!engagement.contains_key("describeWhenToUse"));
+
+        let activity = engagement
+            .get("activities")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(Value::as_object)
+            .expect("activity should exist");
+
+        assert!(!activity.contains_key("describeWhenToUse"));
+    }
+
+    #[test]
+    fn context_serialization_includes_non_null_usage_description_fields() {
+        let context = CodeContext {
+            engagements: vec![ContextEngagement {
+                code: "E-001".to_string(),
+                name: "Example Engagement".to_string(),
+                tags: vec!["example".to_string()],
+                describe_when_to_use: Some("Use for client example work.".to_string()),
+                activities: vec![ContextActivity {
+                    code: "A-001".to_string(),
+                    name: "Example Activity".to_string(),
+                    tags: vec!["task".to_string()],
+                    describe_when_to_use: Some("Use for walkthrough sessions.".to_string()),
+                }],
+            }],
+        };
+
+        let serialized = serde_json::to_value(&context).expect("context serialization should work");
+        let engagement = serialized
+            .get("engagements")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(Value::as_object)
+            .expect("engagement should exist");
+
+        assert_eq!(
+            engagement
+                .get("describeWhenToUse")
+                .and_then(Value::as_str)
+                .expect("engagement description should exist"),
+            "Use for client example work."
+        );
+
+        let activity = engagement
+            .get("activities")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(Value::as_object)
+            .expect("activity should exist");
+
+        assert_eq!(
+            activity
+                .get("describeWhenToUse")
+                .and_then(Value::as_str)
+                .expect("activity description should exist"),
+            "Use for walkthrough sessions."
+        );
+    }
 }

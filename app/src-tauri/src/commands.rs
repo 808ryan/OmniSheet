@@ -147,12 +147,22 @@ struct NormalizedEntryResult {
     entry: NormalizedEntry,
     note: Option<String>,
     used_temporal_fallback: bool,
+    duration_defaulted: bool,
     fallback_reason: Option<String>,
     raw_start: Option<String>,
     raw_end: Option<String>,
     raw_duration: Option<i64>,
     temporal_cue_type: TemporalCueType,
     temporal_source: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedEntry {
+    entry: NormalizedEntry,
+    used_activity_fallback: bool,
+    used_temporal_fallback: bool,
+    duration_defaulted: bool,
+    fallback_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -181,6 +191,18 @@ struct MatchingText {
     phrase: String,
     padded_phrase: String,
     tokens: HashSet<String>,
+}
+
+fn build_fallback_summary(
+    used_temporal_fallback: bool,
+    used_activity_fallback: bool,
+) -> Option<String> {
+    match (used_temporal_fallback, used_activity_fallback) {
+        (true, true) => Some("Activity + temporal fallback applied".to_string()),
+        (true, false) => Some("Temporal fallback applied".to_string()),
+        (false, true) => Some("Activity fallback applied".to_string()),
+        (false, false) => None,
+    }
 }
 
 fn keyring_entry() -> AppResult<Entry> {
@@ -834,7 +856,7 @@ pub async fn interpret_text_message(
         })
         .collect::<Vec<_>>();
 
-    let mut normalized_entries = Vec::<NormalizedEntry>::new();
+    let mut prepared_entries = Vec::<PreparedEntry>::new();
     let mut normalization_notes = Vec::<String>::new();
     let mut normalization_details = Vec::<Value>::new();
     let mut fallback_count = 0;
@@ -855,6 +877,10 @@ pub async fn interpret_text_message(
             fallback_count += 1;
         }
 
+        let used_activity_fallback = activity_fallback.applied;
+        let fallback_summary =
+            build_fallback_summary(result.used_temporal_fallback, used_activity_fallback);
+
         normalization_details.push(json!({
           "usedTemporalFallback": result.used_temporal_fallback,
           "fallbackReason": result.fallback_reason,
@@ -863,6 +889,7 @@ pub async fn interpret_text_message(
           "llmStartRaw": result.raw_start,
           "llmEndRaw": result.raw_end,
           "llmDurationRaw": result.raw_duration,
+          "durationDefaulted": result.duration_defaulted,
           "savedDate": result.entry.date,
           "savedStartMinute": result.entry.start_minute,
           "savedEndMinute": result.entry.end_minute,
@@ -877,13 +904,30 @@ pub async fn interpret_text_message(
           "activityFallbackChosenName": activity_fallback.chosen_activity_name,
           "activityFallbackScore": activity_fallback.chosen_score,
           "activityFallbackMatchedTerms": activity_fallback.matched_terms,
+          "fallbackSummary": fallback_summary.clone(),
         }));
 
-        normalized_entries.push(result.entry);
+        prepared_entries.push(PreparedEntry {
+            entry: result.entry,
+            used_activity_fallback,
+            used_temporal_fallback: result.used_temporal_fallback,
+            duration_defaulted: result.duration_defaulted,
+            fallback_summary,
+        });
     }
 
-    if normalized_entries.is_empty() {
-        normalized_entries.push(fallback_entry(&temporal_reference, input.raw_text.trim()));
+    if prepared_entries.is_empty() {
+        let used_temporal_fallback = true;
+        let used_activity_fallback = false;
+        let fallback_summary =
+            build_fallback_summary(used_temporal_fallback, used_activity_fallback);
+        prepared_entries.push(PreparedEntry {
+            entry: fallback_entry(&temporal_reference, input.raw_text.trim()),
+            used_activity_fallback,
+            used_temporal_fallback,
+            duration_defaulted: false,
+            fallback_summary: fallback_summary.clone(),
+        });
         fallback_count += 1;
         let note = format!(
             "No LLM entries returned. Defaulted to {} - {} based on capture time.",
@@ -896,20 +940,22 @@ pub async fn interpret_text_message(
           "fallbackReason": "no_llm_entries",
           "temporalCueType": temporal_cue_type_label(temporal_cue_type),
           "temporalSource": "fallback",
+          "durationDefaulted": false,
           "savedDate": temporal_reference.local_date.format("%Y-%m-%d").to_string(),
           "savedStartMinute": (temporal_reference.rounded_end_minute - 30).max(0),
           "savedEndMinute": temporal_reference.rounded_end_minute,
           "attemptedActivityFallback": false,
           "usedActivityFallback": false,
+          "fallbackSummary": fallback_summary,
           "note": note,
         }));
     }
 
-    let confidence_average = normalized_entries
+    let confidence_average = prepared_entries
         .iter()
-        .map(|entry| entry.confidence)
+        .map(|prepared| prepared.entry.confidence)
         .sum::<f64>()
-        / normalized_entries.len() as f64;
+        / prepared_entries.len() as f64;
 
     let raw_message_id = Uuid::new_v4().to_string();
     let mut created_entry_ids = Vec::new();
@@ -933,7 +979,8 @@ pub async fn interpret_text_message(
         )
         .map_err(|error| error.to_string())?;
 
-        for normalized_entry in normalized_entries {
+        for prepared_entry in prepared_entries {
+            let normalized_entry = prepared_entry.entry;
             let (engagement_id, activity_id) = db::resolve_code_ids(
                 &connection,
                 normalized_entry.engagement_code.as_deref(),
@@ -947,6 +994,10 @@ pub async fn interpret_text_message(
                 &normalized_entry,
                 engagement_id.as_deref(),
                 activity_id.as_deref(),
+                prepared_entry.used_activity_fallback,
+                prepared_entry.used_temporal_fallback,
+                prepared_entry.duration_defaulted,
+                prepared_entry.fallback_summary.as_deref(),
                 "text",
             )
             .map_err(|error| error.to_string())?;
@@ -1449,6 +1500,7 @@ fn normalize_llm_entry(
         .unwrap_or(30);
 
     let has_invalid_duration = matches!(raw_duration, Some(value) if value <= 0);
+    let duration_defaulted = raw_duration.is_none() && !(parsed_start.is_some() && parsed_end.is_some());
     let has_midnight_zero_tuple = matches!(
         (parsed_start, parsed_end, raw_duration),
         (Some(0), Some(0), Some(value)) if value <= 0
@@ -1547,6 +1599,7 @@ fn normalize_llm_entry(
         },
         note,
         used_temporal_fallback: should_use_fallback,
+        duration_defaulted,
         fallback_reason,
         raw_start,
         raw_end,
@@ -1667,10 +1720,19 @@ fn score_activity_candidate(message: &MatchingText, activity: &ContextActivity) 
     matched_terms.extend(name_matches);
 
     let mut activity_tokens = name_text.tokens.clone();
+    if let Some(describe_when_to_use) = activity.describe_when_to_use.as_deref() {
+        let description_text = build_matching_text(describe_when_to_use);
+        activity_tokens.extend(description_text.tokens.iter().cloned());
+        let (description_score, description_matches) =
+            score_match_component(message, &description_text, 3.25, 1.75);
+        score += description_score;
+        matched_terms.extend(description_matches);
+    }
+
     for tag in &activity.tags {
         let tag_text = build_matching_text(tag);
         activity_tokens.extend(tag_text.tokens.iter().cloned());
-        let (tag_score, tag_matches) = score_match_component(message, &tag_text, 3.0, 1.75);
+        let (tag_score, tag_matches) = score_match_component(message, &tag_text, 2.5, 1.5);
         score += tag_score;
         matched_terms.extend(tag_matches);
     }
@@ -2158,8 +2220,41 @@ mod tests {
         let result = normalize_llm_entry(&entry, &reference, "fallback", TemporalCueType::None);
 
         assert!(result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
         assert_eq!(result.entry.start_minute, 1290);
         assert_eq!(result.entry.end_minute, 1320);
+        assert_eq!(result.entry.duration_minutes, 30);
+    }
+
+    #[test]
+    fn normalization_defaults_missing_duration_without_temporal_fallback() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-15".to_string()),
+            start_time: Some("12:00".to_string()),
+            end_time: None,
+            duration_minutes: None,
+            description: Some("FAIT TR sync".to_string()),
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date"),
+            rounded_end_minute: 1320,
+        };
+
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "fallback",
+            TemporalCueType::ExplicitClock,
+        );
+
+        assert!(!result.used_temporal_fallback);
+        assert!(result.duration_defaulted);
+        assert_eq!(result.temporal_source, "llm_start_plus_duration");
+        assert_eq!(result.entry.start_minute, 720);
+        assert_eq!(result.entry.end_minute, 750);
         assert_eq!(result.entry.duration_minutes, 30);
     }
 
@@ -2188,8 +2283,40 @@ mod tests {
         );
 
         assert!(!result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
         assert_eq!(result.entry.start_minute, 780);
         assert_eq!(result.entry.end_minute, 810);
+    }
+
+    #[test]
+    fn normalization_does_not_mark_default_when_start_and_end_define_duration() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-15".to_string()),
+            start_time: Some("13:00".to_string()),
+            end_time: Some("14:00".to_string()),
+            duration_minutes: None,
+            description: Some("Client meeting".to_string()),
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date"),
+            rounded_end_minute: 1320,
+        };
+
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "fallback",
+            TemporalCueType::ExplicitClock,
+        );
+
+        assert!(!result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
+        assert_eq!(result.entry.start_minute, 780);
+        assert_eq!(result.entry.end_minute, 840);
+        assert_eq!(result.entry.duration_minutes, 60);
     }
 
     #[test]
@@ -2247,6 +2374,7 @@ mod tests {
         );
 
         assert!(!result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
         assert_eq!(result.temporal_source, "derived_from_duration");
         assert_eq!(result.entry.start_minute, 1260);
         assert_eq!(result.entry.end_minute, 1320);
@@ -2273,6 +2401,34 @@ mod tests {
         let result = normalize_llm_entry(&entry, &reference, "fallback", TemporalCueType::None);
 
         assert!(result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
+        assert_eq!(result.fallback_reason.as_deref(), Some("no_temporal_data"));
+        assert_eq!(result.entry.start_minute, 1290);
+        assert_eq!(result.entry.end_minute, 1320);
+        assert_eq!(result.entry.duration_minutes, 30);
+    }
+
+    #[test]
+    fn normalization_marks_missing_duration_when_temporal_fallback_is_used() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-17".to_string()),
+            start_time: None,
+            end_time: None,
+            duration_minutes: None,
+            description: Some("Meetings".to_string()),
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 17).expect("valid date"),
+            rounded_end_minute: 1320,
+        };
+
+        let result = normalize_llm_entry(&entry, &reference, "fallback", TemporalCueType::None);
+
+        assert!(result.used_temporal_fallback);
+        assert!(result.duration_defaulted);
         assert_eq!(result.fallback_reason.as_deref(), Some("no_temporal_data"));
         assert_eq!(result.entry.start_minute, 1290);
         assert_eq!(result.entry.end_minute, 1320);
@@ -2286,16 +2442,19 @@ mod tests {
                 code: "ORANGE-FY26".to_string(),
                 name: "ExampleCo SOC2".to_string(),
                 tags: vec![],
+                describe_when_to_use: None,
                 activities: vec![
                     ContextActivity {
                         code: "0001".to_string(),
                         name: "Report 1".to_string(),
                         tags: vec!["ExampleCo".to_string(), "detail review".to_string()],
+                        describe_when_to_use: Some("Use for reporting and detailed review work.".to_string()),
                     },
                     ContextActivity {
                         code: "0006".to_string(),
                         name: "Admin/Management".to_string(),
                         tags: vec!["Admin".to_string(), "Management".to_string()],
+                        describe_when_to_use: Some("Use for management and administrative effort.".to_string()),
                     },
                 ],
             }],
@@ -2332,16 +2491,19 @@ mod tests {
                 code: "E-1".to_string(),
                 name: "Example".to_string(),
                 tags: vec![],
+                describe_when_to_use: None,
                 activities: vec![
                     ContextActivity {
                         code: "1000".to_string(),
                         name: "Testing".to_string(),
                         tags: vec!["controls".to_string()],
+                        describe_when_to_use: None,
                     },
                     ContextActivity {
                         code: "2000".to_string(),
                         name: "Documentation".to_string(),
                         tags: vec!["writeups".to_string()],
+                        describe_when_to_use: None,
                     },
                 ],
             }],
@@ -2369,5 +2531,57 @@ mod tests {
         assert_eq!(decision.reason.as_deref(), Some("no_similarity_signal"));
         assert!(entry.activity_code.is_none());
         assert_eq!(entry.confidence, 0.85);
+    }
+
+    #[test]
+    fn activity_fallback_can_use_description_guidance_without_tag_overlap() {
+        let code_context = CodeContext {
+            engagements: vec![ContextEngagement {
+                code: "E-2".to_string(),
+                name: "Client Work".to_string(),
+                tags: vec![],
+                describe_when_to_use: None,
+                activities: vec![
+                    ContextActivity {
+                        code: "A-10".to_string(),
+                        name: "Fieldwork".to_string(),
+                        tags: vec![],
+                        describe_when_to_use: Some(
+                            "Use when performing walkthrough meetings with client stakeholders."
+                                .to_string(),
+                        ),
+                    },
+                    ContextActivity {
+                        code: "A-20".to_string(),
+                        name: "Reporting".to_string(),
+                        tags: vec![],
+                        describe_when_to_use: Some(
+                            "Use when drafting final report language and manager review notes."
+                                .to_string(),
+                        ),
+                    },
+                ],
+            }],
+        };
+
+        let mut entry = NormalizedEntry {
+            date: "2026-02-23".to_string(),
+            start_minute: 60,
+            end_minute: 90,
+            duration_minutes: 30,
+            description: "Walkthrough call".to_string(),
+            confidence: 0.9,
+            engagement_code: Some("E-2".to_string()),
+            activity_code: None,
+        };
+
+        let decision = apply_activity_fallback_if_needed(
+            &mut entry,
+            "Met with client stakeholders for a walkthrough meeting",
+            &code_context,
+        );
+
+        assert!(decision.applied);
+        assert_eq!(entry.activity_code.as_deref(), Some("A-10"));
     }
 }

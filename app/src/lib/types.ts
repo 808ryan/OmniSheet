@@ -7,6 +7,7 @@ export interface Activity {
   name: string
   colorHex: string | null
   tags: string[]
+  describeWhenToUse: string | null
   isActive: boolean
   createdAt: number
   updatedAt: number
@@ -19,6 +20,7 @@ export interface Engagement {
   client: string | null
   colorHex: string | null
   tags: string[]
+  describeWhenToUse: string | null
   isActive: boolean
   createdAt: number
   updatedAt: number
@@ -32,6 +34,7 @@ export interface EngagementUpsertInput {
   client?: string | null
   colorHex?: string | null
   tags: string[]
+  describeWhenToUse?: string | null
   isActive?: boolean
 }
 
@@ -42,6 +45,7 @@ export interface ActivityUpsertInput {
   name: string
   colorHex?: string | null
   tags: string[]
+  describeWhenToUse?: string | null
   isActive?: boolean
 }
 
@@ -95,6 +99,10 @@ export interface TimelineEntry {
   engagementName: string | null
   activityCode: string | null
   activityName: string | null
+  usedActivityFallback: boolean
+  usedTemporalFallback: boolean
+  durationDefaulted: boolean
+  fallbackSummary: string | null
   warningFlags: WarningType[]
 }
 
