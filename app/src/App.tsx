@@ -56,6 +56,7 @@ interface EngagementFormState {
   name: string
   client: string
   colorHex: string
+  describeWhenToUse: string
   tags: string
   isActive: boolean
 }
@@ -66,6 +67,7 @@ interface ActivityFormState {
   code: string
   name: string
   colorHex: string
+  describeWhenToUse: string
   tags: string
   isActive: boolean
 }
@@ -125,11 +127,16 @@ interface CalendarDayCell {
   isCurrentMonth: boolean
 }
 
+interface RunActionOptions {
+  formatError?: (error: unknown) => string
+}
+
 const EMPTY_ENGAGEMENT_FORM: EngagementFormState = {
   code: '',
   name: '',
   client: '',
   colorHex: '',
+  describeWhenToUse: '',
   tags: '',
   isActive: true,
 }
@@ -139,6 +146,7 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
   code: '',
   name: '',
   colorHex: '',
+  describeWhenToUse: '',
   tags: '',
   isActive: true,
 }
@@ -491,18 +499,37 @@ function App() {
     }
   }, [activeView, positionedTimelineEntries, selectedDate])
 
+  useEffect(() => {
+    if (!successMessage) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setSuccessMessage(null)
+    }, 5000)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [successMessage])
+
   const refreshAfterMutation = useCallback(async () => {
     await Promise.all([loadEngagements(), loadTimeline(selectedDate), loadSettings()])
   }, [loadEngagements, loadSettings, loadTimeline, selectedDate])
 
   const runAction = useCallback(
-    async (action: () => Promise<void>) => {
+    async (action: () => Promise<void>, options?: RunActionOptions) => {
       try {
         setIsBusy(true)
         setErrorMessage(null)
         setSuccessMessage(null)
         await action()
       } catch (error) {
+        if (options?.formatError) {
+          setErrorMessage(options.formatError(error))
+          return
+        }
+
         if (isAppCommandError(error)) {
           setErrorMessage(
             `${error.message} (command: ${error.command}, correlationId: ${error.correlationId})`,
@@ -603,6 +630,7 @@ function App() {
         name: engagementForm.name,
         client: engagementForm.client || null,
         colorHex,
+        describeWhenToUse: engagementForm.describeWhenToUse.trim() || null,
         tags: parseTagInput(engagementForm.tags),
         isActive: engagementForm.isActive,
       })
@@ -610,7 +638,7 @@ function App() {
       setEngagementForm(EMPTY_ENGAGEMENT_FORM)
       await refreshAfterMutation()
       setSuccessMessage('Engagement saved.')
-    })
+    }, { formatError: formatCodesMutationError })
   }
 
   const onDeleteEngagement = (id: string) => {
@@ -628,6 +656,7 @@ function App() {
       name: engagement.name,
       client: engagement.client ?? '',
       colorHex: engagement.colorHex ?? '',
+      describeWhenToUse: engagement.describeWhenToUse ?? '',
       tags: joinTags(engagement.tags),
       isActive: engagement.isActive,
     })
@@ -648,6 +677,7 @@ function App() {
         code: activityForm.code,
         name: activityForm.name,
         colorHex,
+        describeWhenToUse: activityForm.describeWhenToUse.trim() || null,
         tags: parseTagInput(activityForm.tags),
         isActive: activityForm.isActive,
       })
@@ -658,7 +688,7 @@ function App() {
       }))
       await refreshAfterMutation()
       setSuccessMessage('Activity saved.')
-    })
+    }, { formatError: formatCodesMutationError })
   }
 
   const onDeleteActivity = (id: string) => {
@@ -676,6 +706,7 @@ function App() {
       code: activity.code,
       name: activity.name,
       colorHex: activity.colorHex ?? '',
+      describeWhenToUse: activity.describeWhenToUse ?? '',
       tags: joinTags(activity.tags),
       isActive: activity.isActive,
     })
@@ -895,8 +926,32 @@ function App() {
           </div>
 
           <div className="app-notices" aria-live="polite">
-            {errorMessage ? <p className="alert error">{errorMessage}</p> : null}
-            {successMessage ? <p className="alert success">{successMessage}</p> : null}
+            {errorMessage ? (
+              <div className="alert error" role="alert">
+                <span className="alert-message">{errorMessage}</span>
+                <button
+                  type="button"
+                  className="alert-close"
+                  aria-label="Dismiss error message"
+                  onClick={() => setErrorMessage(null)}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
+            {successMessage ? (
+              <div className="alert success" role="status">
+                <span className="alert-message">{successMessage}</span>
+                <button
+                  type="button"
+                  className="alert-close"
+                  aria-label="Dismiss success message"
+                  onClick={() => setSuccessMessage(null)}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
           </div>
 
           <div className={`app-content ${activeView === 'timeline' ? 'timeline-active' : 'wide-active'}`}>
@@ -1137,6 +1192,15 @@ function App() {
                     </p>
                     <p>Source: {selectedEntry.source}</p>
                     <p>Description: {selectedEntry.description}</p>
+                    {selectedEntry.durationDefaulted ? (
+                      <p>
+                        Duration: Defaulted to {selectedEntry.durationMinutes} minutes (not specified in
+                        message).
+                      </p>
+                    ) : null}
+                    {selectedEntry.fallbackSummary ? (
+                      <p>Fallback: {selectedEntry.fallbackSummary}</p>
+                    ) : null}
                     {selectedEntry.warningFlags.length > 0 ? (
                       <div className="warning-row">
                         {selectedEntry.warningFlags.map((warningType) => (
@@ -1241,7 +1305,22 @@ function App() {
                   </button>
                 </div>
                 <label>
-                  Tags (comma separated)
+                  Describe when to use this engagement
+                  <textarea
+                    rows={3}
+                    maxLength={500}
+                    value={engagementForm.describeWhenToUse}
+                    onChange={(event) =>
+                      setEngagementForm((previous) => ({
+                        ...previous,
+                        describeWhenToUse: event.target.value,
+                      }))
+                    }
+                    placeholder="Use this engagement when..."
+                  />
+                </label>
+                <label>
+                  Tags / Key Words (comma separated)
                   <input
                     value={engagementForm.tags}
                     onChange={(event) =>
@@ -1368,7 +1447,22 @@ function App() {
                   </button>
                 </div>
                 <label>
-                  Tags (comma separated)
+                  Describe when to use this activity code
+                  <textarea
+                    rows={3}
+                    maxLength={500}
+                    value={activityForm.describeWhenToUse}
+                    onChange={(event) =>
+                      setActivityForm((previous) => ({
+                        ...previous,
+                        describeWhenToUse: event.target.value,
+                      }))
+                    }
+                    placeholder="Use this activity code when..."
+                  />
+                </label>
+                <label>
+                  Tags / Key Words (comma separated)
                   <input
                     value={activityForm.tags}
                     onChange={(event) =>
@@ -1411,7 +1505,11 @@ function App() {
                           {engagement.code} {engagement.name}
                         </h3>
                         <p>{engagement.client ?? 'No client'}</p>
-                        <p>{joinTags(engagement.tags) || 'No tags'}</p>
+                        <p>
+                          When to use:{' '}
+                          {engagement.describeWhenToUse ?? 'No usage guidance'}
+                        </p>
+                        <p>Tags / Key Words: {joinTags(engagement.tags) || 'No tags'}</p>
                         <p className="color-list-row">
                           <span
                             className="color-chip"
@@ -1444,7 +1542,10 @@ function App() {
                           <li key={activity.id}>
                             <div>
                               <strong>{activity.code} {activity.name}</strong>
-                              <span>{joinTags(activity.tags) || 'No tags'}</span>
+                              <span>
+                                When to use: {activity.describeWhenToUse ?? 'No usage guidance'}
+                              </span>
+                              <span>Tags / Key Words: {joinTags(activity.tags) || 'No tags'}</span>
                               <span className="color-list-row">
                                 <span
                                   className="color-chip"
@@ -1701,6 +1802,68 @@ function formatKeySource(value: SettingsStatus['keySource'] | undefined): string
   }
 
   return 'unknown'
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (isAppCommandError(error)) {
+    return error.message
+  }
+
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  if (typeof error === 'string') {
+    return error
+  }
+
+  return 'Unknown error'
+}
+
+function formatCodesMutationError(error: unknown): string {
+  const rawMessage = extractErrorMessage(error).trim()
+  const normalized = rawMessage.toLowerCase()
+
+  if (normalized.includes('unique constraint failed: engagements.code')) {
+    return 'This engagement code is already in use. Enter a different engagement code.'
+  }
+
+  if (
+    normalized.includes('unique constraint failed: activities.engagement_id')
+    && normalized.includes('activities.code')
+  ) {
+    return 'This activity code already exists for the selected engagement. Enter a different activity code.'
+  }
+
+  if (normalized.includes('engagement code and name are required')) {
+    return 'Engagement code and name are required.'
+  }
+
+  if (normalized.includes('activity engagement, code, and name are required')) {
+    return 'Select an engagement and enter both activity code and activity name.'
+  }
+
+  if (
+    normalized.includes('invalid input: colorhex must be a valid #rrggbb value')
+    || normalized.includes('engagement color must be a valid #rrggbb value')
+    || normalized.includes('activity color must be a valid #rrggbb value')
+  ) {
+    return 'Color must be a valid hex value like #1A2B3C.'
+  }
+
+  if (normalized.includes('describewhentouse must be')) {
+    return '"Describe when to use" must be 500 characters or fewer.'
+  }
+
+  if (normalized.includes('foreign key constraint failed')) {
+    return 'The selected engagement is no longer available. Refresh and try again.'
+  }
+
+  if (normalized.includes('database error:')) {
+    return 'We could not save your changes due to a database error. Please try again.'
+  }
+
+  return 'We could not save your changes. Please review your input and try again.'
 }
 
 function formatTimelineRangeEndLabel(minute: number): string {

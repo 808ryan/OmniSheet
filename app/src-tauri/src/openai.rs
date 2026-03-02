@@ -43,7 +43,8 @@ Additional rules:
 - Infer date from capture context and inferred time window.
 - Never default missing times to 00:00.
 - If uncertain, set lower confidence.
-- Use engagement/activity names and tags as semantic hints; exact keyword overlap is not required.
+- Use describeWhenToUse as the primary categorization signal for engagements and activities.
+- Use tags/key words as secondary hints; exact keyword overlap is not required.
 - If you identify an engagementCode and that engagement has activities in the provided context, choose the best available activityCode from that engagement.
 - Use activityCode = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
 - If no engagement match exists, set engagementCode/activityCode to null.
@@ -149,5 +150,12 @@ mod tests {
         assert!(prompt.contains("choose the best available activityCode"));
         assert!(prompt.contains("Use activityCode = null only as a last resort"));
         assert!(prompt.contains("If no engagement match exists"));
+    }
+
+    #[test]
+    fn prompt_prioritizes_description_over_tags_for_categorization() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("Use describeWhenToUse as the primary categorization signal"));
+        assert!(prompt.contains("Use tags/key words as secondary hints"));
     }
 }

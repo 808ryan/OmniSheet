@@ -36,6 +36,16 @@ For any new engagements or any new activity code combinations used throughout th
 
 ---
 
+## 1.1 Current Implementation Snapshot (2026-02-18)
+
+- **App/runtime**: Tauri 2 + React + TypeScript is running locally.
+- **Database reality**: SQLite access is implemented in Rust (`rusqlite`) and exposed through Tauri commands, not via frontend Drizzle ownership.
+- **Timeline reality**: Daily view now uses an adaptive window with a minimum 9-hour viewport, vertical scroll, and side-by-side overlap lanes.
+- **Color system reality**: Activity colors are supported, with engagement-level fallback and neutral default.
+- **API key reality**: Phase 1 stores the key in OS keyring with in-memory session fallback when keyring readback fails.
+
+---
+
 ## 2. Core Features
 
 ### 2.1 Engagement & Activity Code Onboarding
@@ -116,12 +126,14 @@ If the program thinks its a low match rate, we can have a visual indicator that 
 Every block in the timeline should have the ability to edit, so that users can override what engagement/activity code it was assigned to. 
 
 ### 2.6 Daily Timeline View
-A vertical timeline from 8:00 AM to 6:00 PM (configurable) showing color-coded blocks for each time entry:
-- Each block shows the engagement name, activity name, and duration
-- Blocks are colored by engagement for visual grouping
+A vertical timeline with a default 9-hour visible viewport and vertical scroll, showing color-coded blocks for each time entry:
+- The timeline auto-windows around existing entries, then enforces at least 9 visible hours
+- Overlapping entries render side-by-side in lanes (calendar-style), not stacked
+- Each block label follows `Engagement code | Activity code NAME | # warnings` with adaptive compression for narrow/short blocks
+- Blocks are colored by activity when set, otherwise engagement fallback, then neutral default
 - Clicking a block opens it for editing
 - Gaps in the timeline are visible (untracked time)
-- The current time is marked with a line/indicator
+- A current-time indicator is planned but not yet implemented
 
 ### 2.7 Weekly Timesheet Summary View
 A table summarizing the week's hours:
@@ -205,10 +217,10 @@ A table summarizing the week's hours:
 
 Certainly open to using other models though. Cheapness and speed is a premium. We're not doing heavy reasoning tasks, we're mostly interpeting the user intent and matching it based on a pre-defined list. 
 
-### 3.5 Database: **SQLite (Local-First) via Drizzle ORM**
+### 3.5 Database: **SQLite (Local-First) via Rust (`rusqlite`)**
 
 - **SQLite**: A file-based relational database that lives inside the app. No server, no network, works offline.
-- **Drizzle ORM**: TypeScript-native ORM that provides type-safe database queries. Define your schema once in TypeScript, get auto-complete and type checking for all queries.
+- **Current implementation path**: schema, migrations, validation, and CRUD are implemented in `app/src-tauri/src/db.rs` and invoked from React through Tauri commands.
 - **Why local-first**:
   - Instant reads/writes (no network latency)
   - Works offline (log time on a plane, in a dead zone)
@@ -221,7 +233,7 @@ Certainly open to using other models though. Cheapness and speed is a premium. W
 ### 3.6 Server Strategy: **Progressive (None → Supabase Edge Functions)**
 
 **Phase 1 (Solo/MVP): No server.**
-The Tauri Rust backend calls OpenAI APIs (Whisper + GPT-4o-mini) directly. The API key is stored in a local configuration file. This is acceptable for personal use and eliminates all infrastructure costs.
+The Tauri Rust backend calls OpenAI APIs (Whisper + GPT-4o-mini) directly. The API key is stored in OS keyring, with an in-memory session fallback if keyring readback is unavailable. This is acceptable for personal use and eliminates all infrastructure costs.
 
 **Phase 2+ (Team/Production): Supabase Edge Functions (free tier).**
 When the app goes to a team, API calls move behind Supabase Edge Functions (serverless TypeScript functions). This:
@@ -245,12 +257,12 @@ A Tauri plugin providing cross-platform audio recording for desktop (Windows, ma
 |-------|-----------|---------|
 | Desktop framework | Tauri 2 | Native desktop app with system tray, small binary, iOS path |
 | Frontend | React + TypeScript | UI components, views, user interaction |
-| UI styling | Tailwind CSS | Utility-first CSS, fast iteration |
-| UI components | shadcn/ui | Pre-built buttons, forms, tables, cards, dialogs |
+| UI styling | Custom CSS (current) | Fast prototype iteration with app-specific timeline layout |
+| UI components | Hand-rolled React components (current) | Purpose-built forms, timeline editor, diagnostics views |
 | Desktop backend | Rust (thin) | System tray, audio recording, API calls, window management |
 | Voice transcription | OpenAI Whisper API | Speech-to-text ($0.006/min) |
 | Message interpretation | OpenAI GPT-4o-mini | Structured extraction from unstructured text (~$0.02/mo) |
-| Local database | SQLite via Drizzle ORM | Local-first data storage, offline support |
+| Local database | SQLite via Rust `rusqlite` | Local-first data storage, offline support |
 | Cloud database (later) | Supabase PostgreSQL | Team sync, shared engagement codes |
 | Server (later) | Supabase Edge Functions | API key management, team features |
 | Audio recording plugin | tauri-plugin-audio-recorder | Cross-platform mic access |
@@ -416,7 +428,9 @@ Phase 1 (MVP - $0 infrastructure, ~$1/mo API costs):
 |  |                    |  |                            |   |
 |  | - System tray /    |  | - Message input (text)     |   |
 |  |   menu bar         |  | - Daily timeline view      |   |
-|  | - Audio recording  |  |   (6am-6pm, color blocks)  |   |
+|  | - Audio recording  |  |   (adaptive 9h viewport,   |   |
+|  |                    |  |    scroll, overlap lanes,  |   |
+|  |                    |  |    adaptive block labels)  |   |
 |  | - HTTP calls to    |  | - Weekly timesheet table   |   |
 |  |   OpenAI APIs:     |  |   (Mon-Fri, hours grid)    |   |
 |  |   • Whisper        |  | - Engagement/activity      |   |
@@ -430,8 +444,8 @@ Phase 1 (MVP - $0 infrastructure, ~$1/mo API costs):
 |           |                             |                  |
 |           +----------+   +-------------v--------------+   |
 |                      |   | Local SQLite               |   |
-|                      |   | (Drizzle ORM - owned by    |   |
-|                      |   |  React/TS frontend)        |   |
+|                      |   | (accessed via Rust         |   |
+|                      |   |  `rusqlite` + Tauri IPC)   |   |
 |                      |   |                            |   |
 |                      |   | Tables:                    |   |
 |                      |   | - Engagements              |   |
@@ -511,6 +525,19 @@ Phase 2+ (Team - $0 infrastructure, ~$4/mo API costs for 5 users):
 
 ## 8. Implementation Plan
 
+### Current Implementation Snapshot (Reality Check)
+
+| Stream | Status | Notes |
+|-------|--------|-------|
+| Text capture -> LLM interpret -> auto-save | Delivered | Running in current prototype |
+| Timeline viewport/scroll/overlap lanes | Delivered | Minimum 9-hour viewport + side-by-side overlap layout |
+| Adaptive timeline block labels | Delivered | 3-tier compression to reduce clipping in short/narrow blocks |
+| Engagement/activity color system | Delivered | Activity override, engagement fallback, neutral default |
+| Diagnostics + temporal repair tooling | Delivered | Diagnostics tab and suspicious-entry repair command present |
+| Voice capture/transcription | Planned | Phase 2 |
+| Weekly timesheet summary table | Planned | Phase 3 |
+| Cloud sync + auth | Planned | Phase 4 |
+
 ### Phase 1: Foundation + Text Input (Weeks 1-3)
 
 **Goal:** Type a message → AI interprets it → see it on a daily timeline.
@@ -523,7 +550,8 @@ Phase 2+ (Team - $0 infrastructure, ~$4/mo API costs for 5 users):
    - Set up Git repository
 
 2. **Database setup**
-   - Install Drizzle ORM + better-sqlite3
+   - Implement SQLite schema and CRUD in Rust (`rusqlite`)
+   - Expose DB operations to React via Tauri commands
    - Define schema for all 4 tables (Engagements, Activities, TimesheetEntries, RawMessages)
    - Run migrations to create tables
    - Seed with sample data (2-3 engagement codes with activities and tags)
@@ -551,9 +579,11 @@ Phase 2+ (Team - $0 infrastructure, ~$4/mo API costs for 5 users):
    - Inline block editing (change engagement, activity, times, description)
 
 6. **Daily timeline view**
-   - Vertical timeline from 6am to 6pm
-   - Render time entry blocks with engagement color coding
-   - Show engagement name, activity name, duration on each block
+   - Adaptive time window around entries with minimum 9-hour viewport
+   - Vertical scroll in timeline panel for off-window ranges
+   - Render overlap entries side-by-side using lane layout
+   - Color precedence: activity color, then engagement fallback, then neutral default
+   - Adaptive text compression for small blocks to avoid clipped labels
    - Current time indicator
    - Click block to view/edit details
    - Date navigation (previous/next day)
@@ -673,7 +703,7 @@ Phase 2+ (Team - $0 infrastructure, ~$4/mo API costs for 5 users):
 
 ## 10. Open Questions for Review
 
-1. **How should overlapping time blocks be handled?** If a user logs a 1:00-2:00 PM entry and then a 1:30-2:30 PM entry, should the app warn about the overlap, auto-adjust, or allow it?
+1. **Overlap policy next step:** current behavior allows overlap, shows warnings, and renders blocks side-by-side. Should we also add optional auto-resolve suggestions?
 
 2. **Should the weekly summary support half-day or quarter-hour granularity?** The example shows hours as decimals (2.5). Is 15-minute granularity sufficient, or do you need 6-minute (0.1 hour) increments?
 
