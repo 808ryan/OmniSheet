@@ -394,13 +394,6 @@ function App() {
   }, [loadTimeline, selectedDate, tauriRuntime])
 
   useEffect(() => {
-    const selectedMonth = monthKeyFromDate(selectedDate)
-    if (selectedMonth !== visibleMonth) {
-      setVisibleMonth(selectedMonth)
-    }
-  }, [selectedDate, visibleMonth])
-
-  useEffect(() => {
     if (!tauriRuntime) {
       return
     }
@@ -694,6 +687,7 @@ function App() {
     }
 
     setSelectedDate(nextDate)
+    setVisibleMonth(monthKeyFromDate(nextDate))
     setSelectedEntryId(null)
     setEntryDraft(null)
   }
