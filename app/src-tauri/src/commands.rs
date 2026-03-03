@@ -24,6 +24,7 @@ use crate::state::AppState;
 const MINUTES_IN_DAY: i64 = 24 * 60;
 const ACTIVITY_FALLBACK_CONFIDENCE_CAP: f64 = 0.60;
 const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
+const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
 
 fn state_lock_error() -> String {
     "application state lock poisoned".to_string()
@@ -220,6 +221,40 @@ fn build_fallback_summary(
         (false, true) => Some("Activity fallback applied".to_string()),
         (false, false) => None,
     }
+}
+
+fn normalize_description_for_dedupe(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn prepared_entry_dedupe_key(entry: &PreparedEntry) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}",
+        entry.entry.date,
+        entry.entry.start_minute,
+        entry.entry.end_minute,
+        entry.entry.engagement_code.as_deref().unwrap_or(""),
+        entry.entry.activity_code.as_deref().unwrap_or(""),
+        normalize_description_for_dedupe(&entry.entry.description)
+    )
+}
+
+fn dedupe_prepared_entries(entries: Vec<PreparedEntry>) -> Vec<PreparedEntry> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        let key = prepared_entry_dedupe_key(&entry);
+        if seen.insert(key) {
+            deduped.push(entry);
+        }
+    }
+
+    deduped
 }
 
 fn keyring_entry() -> AppResult<Entry> {
@@ -451,6 +486,79 @@ fn record_backend_event_with_state(
             duration_ms,
             message_text,
             details,
+        );
+    }
+}
+
+fn llm_attempt_event_status(attempt: &openai::LlmAttemptTelemetry) -> &'static str {
+    if attempt.outcome == "success" {
+        "ok"
+    } else if attempt.retryable {
+        "warning"
+    } else {
+        "error"
+    }
+}
+
+fn llm_attempt_summary(attempts: &[openai::LlmAttemptTelemetry]) -> Value {
+    let successful_attempt = attempts
+        .iter()
+        .find(|attempt| attempt.outcome == "success")
+        .map(|attempt| attempt.attempt);
+    let retry_count = attempts.len().saturating_sub(1);
+    let retryable_failure_count = attempts
+        .iter()
+        .filter(|attempt| attempt.outcome != "success" && attempt.retryable)
+        .count();
+    let attempt_durations_ms = attempts
+        .iter()
+        .map(|attempt| attempt.duration_ms)
+        .collect::<Vec<_>>();
+    let attempt_outcomes = attempts
+        .iter()
+        .map(|attempt| attempt.outcome)
+        .collect::<Vec<_>>();
+    let total_backoff_delay_ms = attempts
+        .iter()
+        .filter_map(|attempt| attempt.retry_delay_ms)
+        .sum::<u64>();
+
+    json!({
+      "attemptCount": attempts.len(),
+      "retryCount": retry_count,
+      "retryableFailureCount": retryable_failure_count,
+      "successfulAttempt": successful_attempt,
+      "attemptOutcomes": attempt_outcomes,
+      "attemptDurationsMs": attempt_durations_ms,
+      "totalBackoffDelayMs": total_backoff_delay_ms,
+    })
+}
+
+fn record_llm_attempt_events(
+    state: &State<'_, AppState>,
+    correlation_id: &str,
+    command: &str,
+    attempts: &[openai::LlmAttemptTelemetry],
+) {
+    for attempt in attempts {
+        record_backend_event_with_state(
+            state,
+            correlation_id,
+            "llm_attempt",
+            command,
+            llm_attempt_event_status(attempt),
+            Some(attempt.duration_ms),
+            None,
+            json!({
+              "attempt": attempt.attempt,
+              "maxAttempts": attempt.max_attempts,
+              "outcome": attempt.outcome,
+              "httpStatus": attempt.http_status,
+              "retryable": attempt.retryable,
+              "retryDelayMs": attempt.retry_delay_ms,
+              "errorClass": attempt.error_class,
+              "error": attempt.error_message.as_deref(),
+            }),
         );
     }
 }
@@ -729,7 +837,7 @@ fn diagnostics_event_line(event: &DiagnosticsEvent) -> String {
         .as_deref()
         .map(|value| truncate_for_bundle(value, 80))
         .unwrap_or_else(|| "-".to_string());
-    let details = truncate_for_bundle(&event.details_json, 120);
+    let details = truncate_for_bundle(&event.details_json, 220);
 
     format!(
         "- ts={} layer={} type={} status={} cmd={} dur={} cid={} msg={} details={}",
@@ -831,7 +939,8 @@ pub async fn interpret_text_message(
     };
 
     let llm_started_at = Instant::now();
-    let llm_response = match openai::interpret_message(
+    let mut llm_attempts = Vec::<openai::LlmAttemptTelemetry>::new();
+    let llm_result = openai::interpret_message(
         &state.http_client,
         &api_key,
         input.raw_text.trim(),
@@ -841,9 +950,15 @@ pub async fn interpret_text_message(
         input.client_utc_offset_minutes,
         &input.timezone,
         &code_context,
+        &mut llm_attempts,
     )
-    .await
-    {
+    .await;
+
+    record_llm_attempt_events(&state, &correlation_id, command, &llm_attempts);
+    let llm_duration_ms = duration_ms(llm_started_at);
+    let llm_summary = llm_attempt_summary(&llm_attempts);
+
+    let llm_response = match llm_result {
         Ok(response) => {
             record_backend_event_with_state(
                 &state,
@@ -851,9 +966,13 @@ pub async fn interpret_text_message(
                 "llm_response",
                 command,
                 "ok",
-                Some(duration_ms(llm_started_at)),
+                Some(llm_duration_ms),
                 None,
-                json!({ "entryCount": response.entries.len() }),
+                json!({
+                  "entryCount": response.entries.len(),
+                  "totalLlmDurationMs": llm_duration_ms,
+                  "attemptSummary": llm_summary,
+                }),
             );
             response
         }
@@ -865,13 +984,19 @@ pub async fn interpret_text_message(
                 "llm_response",
                 command,
                 "error",
-                Some(duration_ms(llm_started_at)),
+                Some(llm_duration_ms),
                 Some(input.raw_text.trim()),
-                json!({ "message": message }),
+                json!({
+                  "message": message,
+                  "totalLlmDurationMs": llm_duration_ms,
+                  "attemptSummary": llm_summary,
+                }),
             );
             return Err(format_command_error(&correlation_id, message));
         }
     };
+
+    let interpreted_entry_count = llm_response.entries.len() as i64;
 
     let interpreted_entries_json = serde_json::to_string(&llm_response)
         .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
@@ -993,6 +1118,23 @@ pub async fn interpret_text_message(
         }));
     }
 
+    let mut prepared_entries = dedupe_prepared_entries(prepared_entries);
+    let unique_entry_count = prepared_entries.len() as i64;
+
+    if prepared_entries.len() > MAX_SAVED_ENTRIES_PER_MESSAGE {
+        let dropped_count = prepared_entries.len() - MAX_SAVED_ENTRIES_PER_MESSAGE;
+        prepared_entries.truncate(MAX_SAVED_ENTRIES_PER_MESSAGE);
+        let note = format!(
+            "LLM produced too many entries; kept the first {} and dropped {}.",
+            MAX_SAVED_ENTRIES_PER_MESSAGE, dropped_count
+        );
+        normalization_notes.push(note);
+    }
+
+    let saved_entry_count = prepared_entries.len() as i64;
+    let truncated_entry_count = (unique_entry_count - saved_entry_count).max(0);
+    let contains_multiple_events = unique_entry_count > 1;
+
     let confidence_average = prepared_entries
         .iter()
         .map(|prepared| prepared.entry.confidence)
@@ -1018,10 +1160,15 @@ pub async fn interpret_text_message(
             &interpreted_entries_json,
             confidence_average,
             parsed_timestamp.timestamp(),
+            interpreted_entry_count,
+            unique_entry_count,
+            saved_entry_count,
+            truncated_entry_count,
+            contains_multiple_events,
         )
         .map_err(|error| error.to_string())?;
 
-        for prepared_entry in prepared_entries {
+        for (index, prepared_entry) in prepared_entries.into_iter().enumerate() {
             let normalized_entry = prepared_entry.entry;
             let (engagement_id, activity_id) = db::resolve_code_ids(
                 &connection,
@@ -1040,6 +1187,8 @@ pub async fn interpret_text_message(
                 prepared_entry.used_temporal_fallback,
                 prepared_entry.duration_defaulted,
                 prepared_entry.fallback_summary.as_deref(),
+                Some(index as i64 + 1),
+                Some(saved_entry_count),
                 "text",
             )
             .map_err(|error| error.to_string())?;
@@ -1123,6 +1272,11 @@ pub async fn interpret_text_message(
         json!({
           "rawMessageId": raw_message_id,
           "createdEntryCount": created_entry_ids.len(),
+          "interpretedEntryCount": interpreted_entry_count,
+          "uniqueEntryCount": unique_entry_count,
+          "savedEntryCount": saved_entry_count,
+          "truncatedEntryCount": truncated_entry_count,
+          "containsMultipleEvents": contains_multiple_events,
           "touchedMonthKeys": touched_month_keys,
           "warningCount": warnings.len(),
           "normalizationFallbackCount": fallback_count,
@@ -1135,6 +1289,11 @@ pub async fn interpret_text_message(
         correlation_id,
         raw_message_id,
         created_entry_ids,
+        interpreted_entry_count,
+        unique_entry_count,
+        saved_entry_count,
+        truncated_entry_count,
+        contains_multiple_events,
         touched_month_keys,
         warnings,
         normalization_notes,
@@ -1991,12 +2150,14 @@ mod tests {
         CodeContext, ContextActivity, ContextEngagement, KeySource, LlmEntry, NormalizedEntry,
         StatusLevel,
     };
+    use crate::openai::LlmAttemptTelemetry;
 
     use super::{
-        apply_activity_fallback_if_needed, derive_key_status_level,
-        message_has_explicit_clock_time_cue, message_has_relative_duration_cue,
-        normalize_confidence, normalize_llm_entry, normalize_update_window, round_to_nearest_30,
-        TemporalCueType, TemporalReference,
+        apply_activity_fallback_if_needed, dedupe_prepared_entries, derive_key_status_level,
+        llm_attempt_event_status, message_has_explicit_clock_time_cue,
+        message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
+        normalize_update_window, round_to_nearest_30, PreparedEntry, TemporalCueType,
+        TemporalReference,
     };
 
     #[test]
@@ -2494,5 +2655,115 @@ mod tests {
 
         assert!(decision.applied);
         assert_eq!(entry.activity_code.as_deref(), Some("A-10"));
+    }
+
+    #[test]
+    fn llm_attempt_status_mapping_prefers_success_over_retryable() {
+        let success_attempt = LlmAttemptTelemetry {
+            attempt: 1,
+            max_attempts: 3,
+            duration_ms: 50,
+            outcome: "success",
+            http_status: Some(200),
+            retryable: false,
+            retry_delay_ms: None,
+            error_class: None,
+            error_message: None,
+        };
+        assert_eq!(llm_attempt_event_status(&success_attempt), "ok");
+
+        let retryable_failure = LlmAttemptTelemetry {
+            attempt: 1,
+            max_attempts: 3,
+            duration_ms: 50,
+            outcome: "transport_error",
+            http_status: None,
+            retryable: true,
+            retry_delay_ms: Some(700),
+            error_class: Some("timeout"),
+            error_message: Some("timeout".to_string()),
+        };
+        assert_eq!(llm_attempt_event_status(&retryable_failure), "warning");
+
+        let terminal_failure = LlmAttemptTelemetry {
+            attempt: 3,
+            max_attempts: 3,
+            duration_ms: 50,
+            outcome: "http_error",
+            http_status: Some(429),
+            retryable: false,
+            retry_delay_ms: None,
+            error_class: None,
+            error_message: Some("rate limited".to_string()),
+        };
+        assert_eq!(llm_attempt_event_status(&terminal_failure), "error");
+    }
+
+    #[test]
+    fn dedupe_prepared_entries_removes_exact_duplicates() {
+        let template = PreparedEntry {
+            entry: NormalizedEntry {
+                date: "2026-03-02".to_string(),
+                start_minute: 540,
+                end_minute: 570,
+                duration_minutes: 30,
+                description: "Control testing".to_string(),
+                user_submission_text: "Control testing".to_string(),
+                confidence: 0.8,
+                engagement_code: Some("E-1".to_string()),
+                activity_code: Some("A-1".to_string()),
+            },
+            used_activity_fallback: false,
+            used_temporal_fallback: false,
+            duration_defaulted: false,
+            fallback_summary: None,
+        };
+
+        let entries = vec![template.clone(), template];
+        let deduped = dedupe_prepared_entries(entries);
+
+        assert_eq!(deduped.len(), 1);
+    }
+
+    #[test]
+    fn dedupe_prepared_entries_normalizes_description_case_and_spacing() {
+        let first = PreparedEntry {
+            entry: NormalizedEntry {
+                date: "2026-03-02".to_string(),
+                start_minute: 540,
+                end_minute: 570,
+                duration_minutes: 30,
+                description: "Controls   testing".to_string(),
+                user_submission_text: "Controls testing".to_string(),
+                confidence: 0.8,
+                engagement_code: Some("E-1".to_string()),
+                activity_code: Some("A-1".to_string()),
+            },
+            used_activity_fallback: false,
+            used_temporal_fallback: false,
+            duration_defaulted: false,
+            fallback_summary: None,
+        };
+
+        let second = PreparedEntry {
+            entry: NormalizedEntry {
+                date: "2026-03-02".to_string(),
+                start_minute: 540,
+                end_minute: 570,
+                duration_minutes: 30,
+                description: "controls testing".to_string(),
+                user_submission_text: "controls testing".to_string(),
+                confidence: 0.8,
+                engagement_code: Some("E-1".to_string()),
+                activity_code: Some("A-1".to_string()),
+            },
+            used_activity_fallback: true,
+            used_temporal_fallback: false,
+            duration_defaulted: false,
+            fallback_summary: Some("Activity fallback applied".to_string()),
+        };
+
+        let deduped = dedupe_prepared_entries(vec![first, second]);
+        assert_eq!(deduped.len(), 1);
     }
 }

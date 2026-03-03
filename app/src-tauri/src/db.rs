@@ -83,6 +83,11 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         confidence REAL NOT NULL,
         status TEXT NOT NULL,
         message_timestamp INTEGER NOT NULL,
+        interpreted_entry_count INTEGER NOT NULL DEFAULT 0,
+        unique_entry_count INTEGER NOT NULL DEFAULT 0,
+        saved_entry_count INTEGER NOT NULL DEFAULT 0,
+        truncated_entry_count INTEGER NOT NULL DEFAULT 0,
+        contains_multiple_events INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
       );
 
@@ -103,6 +108,8 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         used_temporal_fallback INTEGER NOT NULL DEFAULT 0,
         duration_defaulted INTEGER NOT NULL DEFAULT 0,
         fallback_summary TEXT,
+        source_message_entry_index INTEGER,
+        source_message_entry_count INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE SET NULL,
@@ -179,6 +186,48 @@ fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
     )?;
     ensure_column_exists(conn, "timesheet_entries", "fallback_summary", "TEXT")?;
     ensure_column_exists(conn, "timesheet_entries", "user_submission_text", "TEXT")?;
+    ensure_column_exists(
+        conn,
+        "timesheet_entries",
+        "source_message_entry_index",
+        "INTEGER",
+    )?;
+    ensure_column_exists(
+        conn,
+        "timesheet_entries",
+        "source_message_entry_count",
+        "INTEGER",
+    )?;
+    ensure_column_exists(
+        conn,
+        "raw_messages",
+        "interpreted_entry_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "raw_messages",
+        "unique_entry_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "raw_messages",
+        "saved_entry_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "raw_messages",
+        "truncated_entry_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        conn,
+        "raw_messages",
+        "contains_multiple_events",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 
@@ -437,6 +486,11 @@ pub fn insert_raw_message(
     interpreted_entries_json: &str,
     confidence: f64,
     message_timestamp: i64,
+    interpreted_entry_count: i64,
+    unique_entry_count: i64,
+    saved_entry_count: i64,
+    truncated_entry_count: i64,
+    contains_multiple_events: bool,
 ) -> AppResult<()> {
     let now = current_unix_timestamp();
 
@@ -444,9 +498,10 @@ pub fn insert_raw_message(
         r#"
       INSERT INTO raw_messages (
         id, raw_text, interpreted_entries_json, confidence,
-        status, message_timestamp, created_at
+        status, message_timestamp, interpreted_entry_count, unique_entry_count,
+        saved_entry_count, truncated_entry_count, contains_multiple_events, created_at
       )
-      VALUES (?1, ?2, ?3, ?4, 'processed', ?5, ?6)
+      VALUES (?1, ?2, ?3, ?4, 'processed', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
     "#,
         params![
             id,
@@ -454,6 +509,11 @@ pub fn insert_raw_message(
             interpreted_entries_json,
             confidence,
             message_timestamp,
+            interpreted_entry_count,
+            unique_entry_count,
+            saved_entry_count,
+            truncated_entry_count,
+            if contains_multiple_events { 1 } else { 0 },
             now,
         ],
     )?;
@@ -471,6 +531,8 @@ pub fn insert_timesheet_entry(
     used_temporal_fallback: bool,
     duration_defaulted: bool,
     fallback_summary: Option<&str>,
+    source_message_entry_index: Option<i64>,
+    source_message_entry_count: Option<i64>,
     source: &str,
 ) -> AppResult<String> {
     let id = Uuid::new_v4().to_string();
@@ -482,9 +544,9 @@ pub fn insert_timesheet_entry(
         id, engagement_id, activity_id, date, start_minute, end_minute,
         duration_minutes, description, user_submission_text, source, raw_message_id, confidence,
         used_activity_fallback, used_temporal_fallback, duration_defaulted,
-        fallback_summary, created_at, updated_at
+        fallback_summary, source_message_entry_index, source_message_entry_count, created_at, updated_at
       )
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?19)
     "#,
         params![
             id,
@@ -503,6 +565,8 @@ pub fn insert_timesheet_entry(
             if used_temporal_fallback { 1 } else { 0 },
             if duration_defaulted { 1 } else { 0 },
             fallback_summary,
+            source_message_entry_index,
+            source_message_entry_count,
             now,
         ],
     )?;
@@ -656,7 +720,9 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         te.used_activity_fallback,
         te.used_temporal_fallback,
         te.duration_defaulted,
-        te.fallback_summary
+        te.fallback_summary,
+        te.source_message_entry_index,
+        te.source_message_entry_count
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -688,6 +754,8 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
                 used_temporal_fallback: row.get::<_, i64>(16)? == 1,
                 duration_defaulted: row.get::<_, i64>(17)? == 1,
                 fallback_summary: row.get(18)?,
+                source_message_entry_index: row.get(19)?,
+                source_message_entry_count: row.get(20)?,
                 warning_flags: Vec::new(),
             })
         })?

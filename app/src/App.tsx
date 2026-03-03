@@ -229,6 +229,7 @@ function App() {
     () => timelineEntries.find((entry) => entry.id === selectedEntryId) ?? null,
     [selectedEntryId, timelineEntries],
   )
+  const selectedEntryHasMultiEventSource = (selectedEntry?.sourceMessageEntryCount ?? 0) > 1
   const visibleMonthSummaries = useMemo(
     () => monthSummaryCache[visibleMonth] ?? [],
     [monthSummaryCache, visibleMonth],
@@ -670,13 +671,19 @@ function App() {
           result.normalizationNotes.length > 0
             ? ` ${result.normalizationNotes[0]}`
             : ''
+        const multiEventNote = result.containsMultipleEvents
+          ? ` Parsed as ${result.savedEntryCount} events from one message.`
+          : ''
+        const truncationNote = result.truncatedEntryCount > 0
+          ? ` Kept the first ${result.savedEntryCount} events and dropped ${result.truncatedEntryCount}.`
+          : ''
 
         setCaptureStatus({
           state: 'success',
           message:
             createdOnSelectedDate > 0
-              ? `Interpretation completed. ${createdOnSelectedDate} new timeline entr${createdOnSelectedDate === 1 ? 'y' : 'ies'} on selected day.${normalizationNote}`
-              : `Interpretation completed, but no new entries landed on the selected day.${normalizationNote}`,
+              ? `Interpretation completed. ${createdOnSelectedDate} new timeline entr${createdOnSelectedDate === 1 ? 'y' : 'ies'} on selected day.${normalizationNote}${multiEventNote}${truncationNote}`
+              : `Interpretation completed, but no new entries landed on the selected day.${normalizationNote}${multiEventNote}${truncationNote}`,
           correlationId: result.correlationId,
         })
         setSuccessMessage('Message interpretation finished.')
@@ -1028,6 +1035,15 @@ function App() {
               {interpretResult ? (
                 <div className="sidebar-capture-summary">
                   <p>Entries created: {interpretResult.createdEntryIds.length}</p>
+                  {interpretResult.containsMultipleEvents ? (
+                    <p>
+                      Multi-event capture: {interpretResult.savedEntryCount} events saved from one
+                      message.
+                    </p>
+                  ) : null}
+                  {interpretResult.truncatedEntryCount > 0 ? (
+                    <p>Truncated: {interpretResult.truncatedEntryCount} event(s) dropped (cap: 8).</p>
+                  ) : null}
                   {interpretResult.warnings.length > 0 ? (
                     <div className="warning-row">
                       {interpretResult.warnings.map((warning) => (
@@ -1360,8 +1376,17 @@ function App() {
                     {selectedEntry.fallbackSummary ? (
                       <p>Fallback: {selectedEntry.fallbackSummary}</p>
                     ) : null}
-                    {selectedEntry.warningFlags.length > 0 ? (
+                    {selectedEntryHasMultiEventSource ? (
+                      <p>
+                        Capture provenance: Event {selectedEntry.sourceMessageEntryIndex ?? '?'} of{' '}
+                        {selectedEntry.sourceMessageEntryCount} from one message.
+                      </p>
+                    ) : null}
+                    {selectedEntryHasMultiEventSource || selectedEntry.warningFlags.length > 0 ? (
                       <div className="warning-row">
+                        {selectedEntryHasMultiEventSource ? (
+                          <span className="warning-badge provenance">Multi-Event Source</span>
+                        ) : null}
                         {selectedEntry.warningFlags.map((warningType) => (
                           <WarningBadge key={`${selectedEntry.id}-${warningType}`} type={warningType} />
                         ))}

@@ -28,7 +28,8 @@ pub fn run() {
         .setup(|app| {
             let connection = db::init_database(&app.handle())?;
             let http_client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(45))
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(90))
                 .build()?;
             let session_id = Uuid::new_v4().to_string();
             let app_version = app.package_info().version.to_string();

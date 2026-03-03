@@ -132,6 +132,11 @@ pub struct InterpretResult {
     pub correlation_id: String,
     pub raw_message_id: String,
     pub created_entry_ids: Vec<String>,
+    pub interpreted_entry_count: i64,
+    pub unique_entry_count: i64,
+    pub saved_entry_count: i64,
+    pub truncated_entry_count: i64,
+    pub contains_multiple_events: bool,
     pub touched_month_keys: Vec<String>,
     pub warnings: Vec<Warning>,
     pub normalization_notes: Vec<String>,
@@ -175,6 +180,8 @@ pub struct TimelineEntry {
     pub used_temporal_fallback: bool,
     pub duration_defaulted: bool,
     pub fallback_summary: Option<String>,
+    pub source_message_entry_index: Option<i64>,
+    pub source_message_entry_count: Option<i64>,
     pub warning_flags: Vec<WarningType>,
 }
 
