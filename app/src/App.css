@@ -726,6 +726,60 @@ button.danger {
   text-align: left;
 }
 
+.timeline-toast-stack {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 1300;
+  pointer-events: none;
+}
+
+.timeline-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  min-width: 14.5rem;
+  max-width: min(24rem, calc(100vw - 2rem));
+  border-radius: 12px;
+  border: 1px solid transparent;
+  padding: 0.55rem 0.65rem;
+  box-shadow: 0 14px 28px rgba(16, 24, 40, 0.2);
+  animation: fade-slide 160ms ease-out;
+}
+
+.timeline-toast.success {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #05603a;
+}
+
+.timeline-toast.error {
+  border-color: #fda29b;
+  background: #fff6f5;
+  color: #912018;
+}
+
+.timeline-toast p {
+  margin: 0;
+  font-size: 0.84rem;
+}
+
+.timeline-toast-close {
+  align-self: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  padding: 0.1rem 0.35rem;
+  line-height: 1;
+  font-size: 1rem;
+  border-radius: 6px;
+}
+
+.timeline-toast-close:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
 .timeline-editor {
   border: 1px solid var(--outline);
   border-radius: 14px;
