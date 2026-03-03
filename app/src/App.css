@@ -710,6 +710,22 @@ button.danger {
   font-size: 0.7rem;
 }
 
+.timeline-context-menu {
+  position: fixed;
+  z-index: 1200;
+  border: 1px solid var(--outline-strong);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  padding: 0.35rem;
+  box-shadow: 0 14px 28px rgba(16, 24, 40, 0.2);
+}
+
+.timeline-context-menu-item {
+  width: 100%;
+  min-width: 9rem;
+  text-align: left;
+}
+
 .timeline-editor {
   border: 1px solid var(--outline);
   border-radius: 14px;

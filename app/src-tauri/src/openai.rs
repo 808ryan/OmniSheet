@@ -20,6 +20,13 @@ Return strict JSON with this shape:
       "endTime": "HH:MM" | null,
       "durationMinutes": number | null,
       "description": string,
+      "activityReason": string | null,
+      "alternativeActivities": [
+        {
+          "activityCode": string,
+          "reason": string
+        }
+      ] | null,
       "confidence": number
     }
   ]
@@ -48,6 +55,9 @@ Additional rules:
 - If you identify an engagementCode and that engagement has activities in the provided context, choose the best available activityCode from that engagement.
 - Use activityCode = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
 - If no engagement match exists, set engagementCode/activityCode to null.
+- If activityCode is not null, include activityReason that cites the strongest evidence from message text plus provided context.
+- If activityCode is not null, include alternativeActivities with up to 3 rejected codes from the same engagement and concise rejection reasons.
+- If activityCode is null, set activityReason and alternativeActivities to null.
 - Duration and times must be internally consistent.
 - Confidence must be in range 0.0 to 1.0.
 - Never include text outside JSON.
@@ -157,5 +167,14 @@ mod tests {
         let prompt = build_system_prompt();
         assert!(prompt.contains("Use describeWhenToUse as the primary categorization signal"));
         assert!(prompt.contains("Use tags/key words as secondary hints"));
+    }
+
+    #[test]
+    fn prompt_requests_activity_explainability_fields() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("\"activityReason\": string | null"));
+        assert!(prompt.contains("\"alternativeActivities\""));
+        assert!(prompt.contains("include activityReason"));
+        assert!(prompt.contains("rejected codes"));
     }
 }

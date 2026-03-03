@@ -91,6 +91,7 @@ export interface TimelineEntry {
   endMinute: number
   durationMinutes: number
   description: string
+  userSubmissionText: string
   source: string
   confidence: number
   engagementId: string | null
