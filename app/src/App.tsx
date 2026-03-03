@@ -135,6 +135,12 @@ interface TimelineContextMenuState {
   y: number
 }
 
+interface TimelineToast {
+  id: number
+  kind: 'success' | 'error'
+  message: string
+}
+
 interface RunActionOptions {
   formatError?: (error: unknown) => string
 }
@@ -205,6 +211,8 @@ function App() {
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
+  const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
+  const [timelineToast, setTimelineToast] = useState<TimelineToast | null>(null)
   const [monthSummaryCache, setMonthSummaryCache] = useState<MonthSummaryCache>({})
   const [monthSummaryLoadingMonth, setMonthSummaryLoadingMonth] = useState<string | null>(null)
   const [monthSummaryError, setMonthSummaryError] = useState<string | null>(null)
@@ -212,6 +220,8 @@ function App() {
   const timelineContextMenuRef = useRef<HTMLDivElement | null>(null)
   const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
+  const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
+  const timelineToastIdRef = useRef(0)
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
@@ -532,9 +542,14 @@ function App() {
       return
     }
 
+    if (pendingAutoCenterDateRef.current !== selectedDate) {
+      return
+    }
+
     const frame = window.requestAnimationFrame(() => {
       if (positionedTimelineEntries.length === 0) {
         grid.scrollTop = 0
+        pendingAutoCenterDateRef.current = null
         return
       }
 
@@ -553,6 +568,7 @@ function App() {
         top: clampedScrollTop,
         behavior: 'auto',
       })
+      pendingAutoCenterDateRef.current = null
     })
 
     return () => {
@@ -573,6 +589,20 @@ function App() {
       window.clearTimeout(timeoutId)
     }
   }, [successMessage])
+
+  useEffect(() => {
+    if (!timelineToast) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setTimelineToast(null)
+    }, 4000)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [timelineToast])
 
   const refreshAfterMutation = useCallback(async () => {
     await Promise.all([loadEngagements(), loadTimeline(selectedDate), loadSettings()])
@@ -778,6 +808,7 @@ function App() {
       return
     }
 
+    pendingAutoCenterDateRef.current = nextDate
     setSelectedDate(nextDate)
     setVisibleMonth(monthKeyFromDate(nextDate))
     setSelectedEntryId(null)
@@ -848,17 +879,50 @@ function App() {
   }
 
   const onDeleteTimelineEntry = (id: string) => {
-    void runAction(async () => {
+    if (isTimelineDeleteBusy) {
+      return
+    }
+
+    void (async () => {
       const existingEntry = timelineEntries.find((entry) => entry.id === id) ?? null
       const entryDate = existingEntry?.date ?? selectedDate
       const monthKey = monthKeyFromDate(entryDate)
+      const previousScrollTop = timelineGridRef.current?.scrollTop ?? 0
 
-      await timelineDeleteEntry(id)
-      setTimelineContextMenu(null)
-      await loadTimeline(selectedDate)
-      invalidateMonthSummaries([monthKey])
-      setSuccessMessage('Timeline entry deleted.')
-    })
+      try {
+        setIsTimelineDeleteBusy(true)
+        setTimelineContextMenu(null)
+        await timelineDeleteEntry(id)
+        await loadTimeline(selectedDate)
+
+        window.requestAnimationFrame(() => {
+          const grid = timelineGridRef.current
+          if (!grid) {
+            return
+          }
+
+          const maxScrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
+          grid.scrollTop = Math.min(previousScrollTop, maxScrollTop)
+        })
+
+        invalidateMonthSummaries([monthKey])
+        timelineToastIdRef.current += 1
+        setTimelineToast({
+          id: timelineToastIdRef.current,
+          kind: 'success',
+          message: 'Timeline entry deleted.',
+        })
+      } catch (error) {
+        timelineToastIdRef.current += 1
+        setTimelineToast({
+          id: timelineToastIdRef.current,
+          kind: 'error',
+          message: extractErrorMessage(error),
+        })
+      } finally {
+        setIsTimelineDeleteBusy(false)
+      }
+    })()
   }
 
   const onSaveApiKey = (event: FormEvent<HTMLFormElement>) => {
@@ -1278,7 +1342,7 @@ function App() {
                       type="button"
                       className="danger"
                       onClick={() => onDeleteTimelineEntry(entryDraft.id)}
-                      disabled={isBusy}
+                      disabled={isBusy || isTimelineDeleteBusy}
                     >
                       Delete Entry
                     </button>
@@ -1799,10 +1863,26 @@ function App() {
             className="timeline-context-menu-item danger"
             role="menuitem"
             onClick={() => onDeleteTimelineEntry(timelineContextMenu.entryId)}
-            disabled={isBusy}
+            disabled={isBusy || isTimelineDeleteBusy}
           >
             Delete Entry
           </button>
+        </div>,
+        document.body,
+      ) : null}
+      {timelineToast ? createPortal(
+        <div className="timeline-toast-stack" role="status" aria-live="polite">
+          <div key={timelineToast.id} className={`timeline-toast ${timelineToast.kind}`}>
+            <p>{timelineToast.message}</p>
+            <button
+              type="button"
+              className="timeline-toast-close"
+              onClick={() => setTimelineToast(null)}
+              aria-label="Dismiss notification"
+            >
+              x
+            </button>
+          </div>
         </div>,
         document.body,
       ) : null}
