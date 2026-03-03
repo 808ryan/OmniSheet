@@ -14,8 +14,6 @@ import type {
   IdResult,
   InterpretResult,
   InterpretTextInput,
-  RepairSuspiciousEntriesInput,
-  RepairSuspiciousEntriesResult,
   SettingsStatus,
   TimelineDaySummary,
   TimelineEntry,
@@ -225,13 +223,4 @@ export function diagnosticsList(
 
 export function diagnosticsCopyBundle(): Promise<DiagnosticsBundle> {
   return invokeCommand<DiagnosticsBundle>('diagnostics_copy_bundle')
-}
-
-export function maintenanceRepairSuspiciousEntries(
-  input: RepairSuspiciousEntriesInput = {},
-): Promise<RepairSuspiciousEntriesResult> {
-  return invokeCommand<RepairSuspiciousEntriesResult>(
-    'maintenance_repair_suspicious_entries',
-    { input },
-  )
 }

@@ -80,6 +80,7 @@ export interface InterpretResult {
   correlationId: string
   rawMessageId: string
   createdEntryIds: string[]
+  touchedMonthKeys: string[]
   warnings: Warning[]
   normalizationNotes: string[]
 }
@@ -152,16 +153,6 @@ export interface DiagnosticsEvent {
 
 export interface DiagnosticsBundle {
   text: string
-}
-
-export interface RepairSuspiciousEntriesInput {
-  limit?: number
-}
-
-export interface RepairSuspiciousEntriesResult {
-  scannedCount: number
-  repairedCount: number
-  repairedEntryIds: string[]
 }
 
 export interface DiagnosticsRecordInput {

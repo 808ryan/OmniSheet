@@ -59,7 +59,6 @@ pub fn run() {
             commands::diagnostics_record_frontend_event,
             commands::diagnostics_list,
             commands::diagnostics_copy_bundle,
-            commands::maintenance_repair_suspicious_entries,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
