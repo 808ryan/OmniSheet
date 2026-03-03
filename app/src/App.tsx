@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, MouseEvent as ReactMouseEvent } from 'react'
+import { createPortal } from 'react-dom'
 
 import {
   activityDelete,
@@ -14,6 +15,7 @@ import {
   isAppCommandError,
   settingsGetStatus,
   settingsSetOpenAiKey,
+  timelineDeleteEntry,
   timelineListForDate,
   timelineMonthSummary,
   timelineUpdateEntry,
@@ -127,6 +129,12 @@ interface CalendarDayCell {
   isCurrentMonth: boolean
 }
 
+interface TimelineContextMenuState {
+  entryId: string
+  x: number
+  y: number
+}
+
 interface RunActionOptions {
   formatError?: (error: unknown) => string
 }
@@ -196,10 +204,12 @@ function App() {
   const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([])
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
+  const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [monthSummaryCache, setMonthSummaryCache] = useState<MonthSummaryCache>({})
   const [monthSummaryLoadingMonth, setMonthSummaryLoadingMonth] = useState<string | null>(null)
   const [monthSummaryError, setMonthSummaryError] = useState<string | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
+  const timelineContextMenuRef = useRef<HTMLDivElement | null>(null)
   const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
@@ -439,15 +449,60 @@ function App() {
   }, [hasVisibleMonthSummary, loadTimelineMonthSummary, tauriRuntime, visibleMonth])
 
   useEffect(() => {
-    if (!selectedEntryId) {
-      return
-    }
-
-    if (timelineEntries.every((entry) => entry.id !== selectedEntryId)) {
+    if (selectedEntryId && timelineEntries.every((entry) => entry.id !== selectedEntryId)) {
       setSelectedEntryId(null)
       setEntryDraft(null)
     }
-  }, [selectedEntryId, timelineEntries])
+
+    if (
+      timelineContextMenu
+      && timelineEntries.every((entry) => entry.id !== timelineContextMenu.entryId)
+    ) {
+      setTimelineContextMenu(null)
+    }
+  }, [selectedEntryId, timelineContextMenu, timelineEntries])
+
+  useEffect(() => {
+    if (!timelineContextMenu) {
+      return
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) {
+        setTimelineContextMenu(null)
+        return
+      }
+
+      if (timelineContextMenuRef.current?.contains(target)) {
+        return
+      }
+
+      setTimelineContextMenu(null)
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setTimelineContextMenu(null)
+      }
+    }
+
+    const handleViewportChange = () => {
+      setTimelineContextMenu(null)
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown)
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('scroll', handleViewportChange, true)
+    window.addEventListener('resize', handleViewportChange)
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown)
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('scroll', handleViewportChange, true)
+      window.removeEventListener('resize', handleViewportChange)
+    }
+  }, [timelineContextMenu])
 
   useEffect(() => {
     if (!tauriRuntime || activeView !== 'diagnostics') {
@@ -456,6 +511,12 @@ function App() {
 
     void loadDiagnostics(diagnosticsFilter)
   }, [activeView, diagnosticsFilter, loadDiagnostics, tauriRuntime])
+
+  useEffect(() => {
+    if (activeView !== 'timeline' && timelineContextMenu) {
+      setTimelineContextMenu(null)
+    }
+  }, [activeView, timelineContextMenu])
 
   useEffect(() => {
     if (activeView !== 'timeline') {
@@ -721,6 +782,7 @@ function App() {
     setVisibleMonth(monthKeyFromDate(nextDate))
     setSelectedEntryId(null)
     setEntryDraft(null)
+    setTimelineContextMenu(null)
   }
 
   const onSelectCalendarDate = (nextDate: string) => {
@@ -729,6 +791,7 @@ function App() {
   }
 
   const onSelectEntry = (entry: TimelineEntry) => {
+    setTimelineContextMenu(null)
     setSelectedEntryId(entry.id)
     setEntryDraft({
       id: entry.id,
@@ -738,6 +801,21 @@ function App() {
       description: entry.description,
       startTime: minuteToTimeInput(entry.startMinute),
       endTime: minuteToTimeInput(entry.endMinute),
+    })
+  }
+
+  const onOpenTimelineContextMenu = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    entry: TimelineEntry,
+  ) => {
+    event.preventDefault()
+    onSelectEntry(entry)
+
+    const position = clampTimelineContextMenuPosition(event.clientX, event.clientY)
+    setTimelineContextMenu({
+      entryId: entry.id,
+      x: position.x,
+      y: position.y,
     })
   }
 
@@ -766,6 +844,20 @@ function App() {
       await loadTimeline(selectedDate)
       invalidateMonthSummaries([previousMonthKey, nextMonthKey])
       setSuccessMessage('Timeline entry updated.')
+    })
+  }
+
+  const onDeleteTimelineEntry = (id: string) => {
+    void runAction(async () => {
+      const existingEntry = timelineEntries.find((entry) => entry.id === id) ?? null
+      const entryDate = existingEntry?.date ?? selectedDate
+      const monthKey = monthKeyFromDate(entryDate)
+
+      await timelineDeleteEntry(id)
+      setTimelineContextMenu(null)
+      await loadTimeline(selectedDate)
+      invalidateMonthSummaries([monthKey])
+      setSuccessMessage('Timeline entry deleted.')
     })
   }
 
@@ -1045,8 +1137,10 @@ function App() {
                             color: textColor,
                           }}
                           onClick={() => onSelectEntry(entry)}
+                          onContextMenu={(event) => onOpenTimelineContextMenu(event, entry)}
                           title={`${blockLabel.fullLabel}\n${entry.description}`}
                           aria-label={`${blockLabel.fullLabel}. ${entry.description}`}
+                          aria-haspopup="menu"
                         >
                           <span className="timeline-block-label">{blockLabel.label}</span>
                         </button>
@@ -1180,6 +1274,14 @@ function App() {
                     <button type="submit" disabled={isBusy}>
                       Save Entry
                     </button>
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => onDeleteTimelineEntry(entryDraft.id)}
+                      disabled={isBusy}
+                    >
+                      Delete Entry
+                    </button>
                   </form>
                 ) : (
                   <p>Select a timeline block to edit engagement, activity, and timing.</p>
@@ -1191,6 +1293,7 @@ function App() {
                       Confidence: {(selectedEntry.confidence * 100).toFixed(0)}%
                     </p>
                     <p>Source: {selectedEntry.source}</p>
+                    <p>User Submission: {selectedEntry.userSubmissionText || 'Unavailable'}</p>
                     <p>Description: {selectedEntry.description}</p>
                     {selectedEntry.durationDefaulted ? (
                       <p>
@@ -1680,6 +1783,29 @@ function App() {
           </div>
         </main>
       </div>
+      {timelineContextMenu ? createPortal(
+        <div
+          ref={timelineContextMenuRef}
+          className="timeline-context-menu"
+          style={{
+            left: `${timelineContextMenu.x}px`,
+            top: `${timelineContextMenu.y}px`,
+          }}
+          role="menu"
+          aria-label="Timeline entry actions"
+        >
+          <button
+            type="button"
+            className="timeline-context-menu-item danger"
+            role="menuitem"
+            onClick={() => onDeleteTimelineEntry(timelineContextMenu.entryId)}
+            disabled={isBusy}
+          >
+            Delete Entry
+          </button>
+        </div>,
+        document.body,
+      ) : null}
     </div>
   )
 }
@@ -2145,6 +2271,19 @@ function buildTimelineBlockLabel(
     label: fullLabel,
     fullLabel,
     tier: 1,
+  }
+}
+
+function clampTimelineContextMenuPosition(clientX: number, clientY: number): { x: number; y: number } {
+  const viewportPadding = 8
+  const menuWidth = 170
+  const menuHeight = 46
+  const maxX = Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding)
+  const maxY = Math.max(viewportPadding, window.innerHeight - menuHeight - viewportPadding)
+
+  return {
+    x: Math.min(Math.max(clientX, viewportPadding), maxX),
+    y: Math.min(Math.max(clientY, viewportPadding), maxY),
   }
 }
 

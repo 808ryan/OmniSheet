@@ -14,9 +14,9 @@ use crate::models::{
     ActivityUpsertInput, ApiKeyInput, CodeContext, ContextActivity, ContextEngagement, DateInput,
     DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement,
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
-    LlmEntry, NormalizedEntry, RepairSuspiciousEntriesInput, RepairSuspiciousEntriesResult,
-    SettingsStatus, StatusLevel, StorageHealth, TimelineDaySummary, TimelineEntry,
-    TimelineMonthSummaryInput, TimelineUpdateInput, Warning, WarningType,
+    LlmAlternativeActivity, LlmEntry, NormalizedEntry, RepairSuspiciousEntriesInput,
+    RepairSuspiciousEntriesResult, SettingsStatus, StatusLevel, StorageHealth, TimelineDaySummary,
+    TimelineEntry, TimelineMonthSummaryInput, TimelineUpdateInput, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -152,6 +152,9 @@ struct NormalizedEntryResult {
     raw_start: Option<String>,
     raw_end: Option<String>,
     raw_duration: Option<i64>,
+    llm_activity_code: Option<String>,
+    llm_activity_reason: Option<String>,
+    llm_alternative_activities: Option<Vec<LlmAlternativeActivity>>,
     temporal_cue_type: TemporalCueType,
     temporal_source: &'static str,
 }
@@ -677,6 +680,22 @@ pub fn timeline_update_entry(
 
     Ok(())
 }
+
+#[tauri::command]
+pub fn timeline_delete_entry(state: State<'_, AppState>, input: IdInput) -> Result<(), String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+
+    let previous_date = db::get_entry_date(&connection, &input.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "timeline entry not found".to_string())?;
+
+    db::delete_timeline_entry(&connection, &input.id).map_err(|error| error.to_string())?;
+
+    let _ = db::recompute_overlap_warnings(&connection, &previous_date)
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
 fn truncate_for_bundle(value: &str, limit: usize) -> String {
     if value.len() <= limit {
         value.to_string()
@@ -862,8 +881,11 @@ pub async fn interpret_text_message(
     let mut fallback_count = 0;
 
     for mut result in normalization_results {
-        let activity_fallback =
-            apply_activity_fallback_if_needed(&mut result.entry, input.raw_text.trim(), &code_context);
+        let activity_fallback = apply_activity_fallback_if_needed(
+            &mut result.entry,
+            input.raw_text.trim(),
+            &code_context,
+        );
 
         if let Some(note) = result.note {
             normalization_notes.push(note);
@@ -893,6 +915,9 @@ pub async fn interpret_text_message(
           "savedDate": result.entry.date,
           "savedStartMinute": result.entry.start_minute,
           "savedEndMinute": result.entry.end_minute,
+          "llmChosenActivityCode": result.llm_activity_code,
+          "llmActivityReason": result.llm_activity_reason,
+          "llmAlternativeActivities": result.llm_alternative_activities,
           "savedEngagementCode": result.entry.engagement_code,
           "savedActivityCode": result.entry.activity_code,
           "savedConfidence": result.entry.confidence,
@@ -944,6 +969,9 @@ pub async fn interpret_text_message(
           "savedDate": temporal_reference.local_date.format("%Y-%m-%d").to_string(),
           "savedStartMinute": (temporal_reference.rounded_end_minute - 30).max(0),
           "savedEndMinute": temporal_reference.rounded_end_minute,
+          "llmChosenActivityCode": null,
+          "llmActivityReason": null,
+          "llmAlternativeActivities": null,
           "attemptedActivityFallback": false,
           "usedActivityFallback": false,
           "fallbackSummary": fallback_summary,
@@ -1458,6 +1486,7 @@ fn fallback_entry(reference: &TemporalReference, raw_text: &str) -> NormalizedEn
         end_minute,
         duration_minutes: end_minute - start_minute,
         description: raw_text.to_string(),
+        user_submission_text: raw_text.to_string(),
         confidence: 0.5,
         engagement_code: None,
         activity_code: None,
@@ -1488,6 +1517,36 @@ fn normalize_llm_entry(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let raw_duration = entry.duration_minutes;
+    let llm_activity_code = entry
+        .activity_code
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let llm_activity_reason = entry
+        .activity_reason
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let llm_alternative_activities = entry.alternative_activities.as_ref().map(|activities| {
+        activities
+            .iter()
+            .filter_map(|activity| {
+                let activity_code = activity.activity_code.trim();
+                let reason = activity.reason.trim();
+                if activity_code.is_empty() || reason.is_empty() {
+                    return None;
+                }
+
+                Some(LlmAlternativeActivity {
+                    activity_code: activity_code.to_string(),
+                    reason: reason.to_string(),
+                })
+            })
+            .take(3)
+            .collect::<Vec<_>>()
+    });
+    let llm_alternative_activities = llm_alternative_activities
+        .and_then(|activities| (!activities.is_empty()).then_some(activities));
 
     let parsed_start = raw_start.as_deref().and_then(parse_time_to_minutes);
     let parsed_end = raw_end.as_deref().and_then(parse_time_to_minutes);
@@ -1500,7 +1559,8 @@ fn normalize_llm_entry(
         .unwrap_or(30);
 
     let has_invalid_duration = matches!(raw_duration, Some(value) if value <= 0);
-    let duration_defaulted = raw_duration.is_none() && !(parsed_start.is_some() && parsed_end.is_some());
+    let duration_defaulted =
+        raw_duration.is_none() && !(parsed_start.is_some() && parsed_end.is_some());
     let has_midnight_zero_tuple = matches!(
         (parsed_start, parsed_end, raw_duration),
         (Some(0), Some(0), Some(value)) if value <= 0
@@ -1593,6 +1653,7 @@ fn normalize_llm_entry(
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| fallback_description.to_string()),
+            user_submission_text: fallback_description.to_string(),
             confidence: normalize_confidence(entry.confidence),
             engagement_code: entry.engagement_code.clone(),
             activity_code: entry.activity_code.clone(),
@@ -1604,6 +1665,9 @@ fn normalize_llm_entry(
         raw_start,
         raw_end,
         raw_duration,
+        llm_activity_code,
+        llm_activity_reason,
+        llm_alternative_activities,
         temporal_cue_type,
         temporal_source,
     }
@@ -1710,7 +1774,10 @@ fn is_better_activity_candidate(
     candidate.code < current.code
 }
 
-fn score_activity_candidate(message: &MatchingText, activity: &ContextActivity) -> ActivityCandidateMatch {
+fn score_activity_candidate(
+    message: &MatchingText,
+    activity: &ContextActivity,
+) -> ActivityCandidateMatch {
     let mut score = 0.0;
     let mut matched_terms = HashSet::<String>::new();
 
@@ -1816,7 +1883,8 @@ fn build_matching_text(value: &str) -> MatchingText {
 }
 
 fn normalize_for_matching(value: &str) -> String {
-    value.to_lowercase()
+    value
+        .to_lowercase()
         .chars()
         .map(|character| {
             if character.is_alphanumeric() {
@@ -2210,6 +2278,8 @@ mod tests {
             end_time: Some("00:00".to_string()),
             duration_minutes: Some(0),
             description: Some("Reviewed OS-01".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
             confidence: Some(0.7),
         };
         let reference = TemporalReference {
@@ -2236,6 +2306,8 @@ mod tests {
             end_time: None,
             duration_minutes: None,
             description: Some("FAIT TR sync".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
             confidence: Some(0.9),
         };
         let reference = TemporalReference {
@@ -2268,6 +2340,8 @@ mod tests {
             end_time: Some("13:30".to_string()),
             duration_minutes: Some(30),
             description: Some("Client meeting".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
             confidence: Some(0.9),
         };
         let reference = TemporalReference {
@@ -2298,6 +2372,8 @@ mod tests {
             end_time: Some("14:00".to_string()),
             duration_minutes: None,
             description: Some("Client meeting".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
             confidence: Some(0.9),
         };
         let reference = TemporalReference {
@@ -2329,6 +2405,8 @@ mod tests {
             end_time: Some("21:48".to_string()),
             duration_minutes: Some(60),
             description: Some("Meetings for RR ITACs".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
             confidence: Some(0.9),
         };
         let reference = TemporalReference {
@@ -2359,6 +2437,8 @@ mod tests {
             end_time: None,
             duration_minutes: Some(60),
             description: Some("Meetings for RR ITACs".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
             confidence: Some(0.9),
         };
         let reference = TemporalReference {
@@ -2391,6 +2471,8 @@ mod tests {
             end_time: None,
             duration_minutes: Some(60),
             description: Some("Meetings".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
             confidence: Some(0.9),
         };
         let reference = TemporalReference {
@@ -2418,6 +2500,8 @@ mod tests {
             end_time: None,
             duration_minutes: None,
             description: Some("Meetings".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
             confidence: Some(0.9),
         };
         let reference = TemporalReference {
@@ -2448,13 +2532,17 @@ mod tests {
                         code: "0001".to_string(),
                         name: "Report 1".to_string(),
                         tags: vec!["ExampleCo".to_string(), "detail review".to_string()],
-                        describe_when_to_use: Some("Use for reporting and detailed review work.".to_string()),
+                        describe_when_to_use: Some(
+                            "Use for reporting and detailed review work.".to_string(),
+                        ),
                     },
                     ContextActivity {
                         code: "0006".to_string(),
                         name: "Admin/Management".to_string(),
                         tags: vec!["Admin".to_string(), "Management".to_string()],
-                        describe_when_to_use: Some("Use for management and administrative effort.".to_string()),
+                        describe_when_to_use: Some(
+                            "Use for management and administrative effort.".to_string(),
+                        ),
                     },
                 ],
             }],
@@ -2466,6 +2554,8 @@ mod tests {
             end_minute: 1320,
             duration_minutes: 240,
             description: "Flight home from the client site for the ExampleCo data center visit.".to_string(),
+            user_submission_text: "Flight home from the client site for the ExampleCo data center visit."
+                .to_string(),
             confidence: 0.9,
             engagement_code: Some("ORANGE-FY26".to_string()),
             activity_code: None,
@@ -2515,6 +2605,7 @@ mod tests {
             end_minute: 90,
             duration_minutes: 30,
             description: "Unrelated message".to_string(),
+            user_submission_text: "Unrelated message".to_string(),
             confidence: 0.85,
             engagement_code: Some("E-1".to_string()),
             activity_code: None,
@@ -2570,6 +2661,7 @@ mod tests {
             end_minute: 90,
             duration_minutes: 30,
             description: "Walkthrough call".to_string(),
+            user_submission_text: "Walkthrough call".to_string(),
             confidence: 0.9,
             engagement_code: Some("E-2".to_string()),
             activity_code: None,

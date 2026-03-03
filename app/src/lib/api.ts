@@ -211,6 +211,12 @@ export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {
   return invokeCommand<void>('timeline_update_entry', { input })
 }
 
+export function timelineDeleteEntry(id: string): Promise<void> {
+  return invokeCommand<void>('timeline_delete_entry', {
+    input: { id },
+  })
+}
+
 export function diagnosticsList(
   input: DiagnosticsListInput = {},
 ): Promise<DiagnosticsEvent[]> {

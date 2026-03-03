@@ -161,6 +161,7 @@ pub struct TimelineEntry {
     pub end_minute: i64,
     pub duration_minutes: i64,
     pub description: String,
+    pub user_submission_text: String,
     pub source: String,
     pub confidence: f64,
     pub engagement_id: Option<String>,
@@ -301,7 +302,16 @@ pub struct LlmEntry {
     pub end_time: Option<String>,
     pub duration_minutes: Option<i64>,
     pub description: Option<String>,
+    pub activity_reason: Option<String>,
+    pub alternative_activities: Option<Vec<LlmAlternativeActivity>>,
     pub confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmAlternativeActivity {
+    pub activity_code: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -311,6 +321,7 @@ pub struct NormalizedEntry {
     pub end_minute: i64,
     pub duration_minutes: i64,
     pub description: String,
+    pub user_submission_text: String,
     pub confidence: f64,
     pub engagement_code: Option<String>,
     pub activity_code: Option<String>,

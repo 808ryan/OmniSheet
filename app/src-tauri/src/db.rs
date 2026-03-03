@@ -95,6 +95,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         end_minute INTEGER NOT NULL,
         duration_minutes INTEGER NOT NULL,
         description TEXT NOT NULL,
+        user_submission_text TEXT,
         source TEXT NOT NULL,
         raw_message_id TEXT,
         confidence REAL NOT NULL,
@@ -177,6 +178,7 @@ fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column_exists(conn, "timesheet_entries", "fallback_summary", "TEXT")?;
+    ensure_column_exists(conn, "timesheet_entries", "user_submission_text", "TEXT")?;
     Ok(())
 }
 
@@ -318,6 +320,11 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
 
 pub fn delete_activity(conn: &Connection, id: &str) -> AppResult<()> {
     conn.execute("DELETE FROM activities WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn delete_timeline_entry(conn: &Connection, id: &str) -> AppResult<()> {
+    conn.execute("DELETE FROM timesheet_entries WHERE id = ?1", params![id])?;
     Ok(())
 }
 
@@ -473,11 +480,11 @@ pub fn insert_timesheet_entry(
         r#"
       INSERT INTO timesheet_entries (
         id, engagement_id, activity_id, date, start_minute, end_minute,
-        duration_minutes, description, source, raw_message_id, confidence,
+        duration_minutes, description, user_submission_text, source, raw_message_id, confidence,
         used_activity_fallback, used_temporal_fallback, duration_defaulted,
         fallback_summary, created_at, updated_at
       )
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17)
     "#,
         params![
             id,
@@ -488,6 +495,7 @@ pub fn insert_timesheet_entry(
             entry.end_minute,
             entry.duration_minutes,
             entry.description,
+            entry.user_submission_text,
             source,
             raw_message_id,
             entry.confidence,
@@ -636,6 +644,7 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         te.end_minute,
         te.duration_minutes,
         te.description,
+        COALESCE(te.user_submission_text, rm.raw_text, '') AS user_submission_text,
         te.source,
         te.confidence,
         te.engagement_id,
@@ -651,6 +660,7 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
+      LEFT JOIN raw_messages rm ON rm.id = te.raw_message_id
       WHERE te.date = ?1
       ORDER BY te.start_minute
     "#,
@@ -665,18 +675,19 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
                 end_minute: row.get(3)?,
                 duration_minutes: row.get(4)?,
                 description: row.get(5)?,
-                source: row.get(6)?,
-                confidence: row.get(7)?,
-                engagement_id: row.get(8)?,
-                activity_id: row.get(9)?,
-                engagement_code: row.get(10)?,
-                engagement_name: row.get(11)?,
-                activity_code: row.get(12)?,
-                activity_name: row.get(13)?,
-                used_activity_fallback: row.get::<_, i64>(14)? == 1,
-                used_temporal_fallback: row.get::<_, i64>(15)? == 1,
-                duration_defaulted: row.get::<_, i64>(16)? == 1,
-                fallback_summary: row.get(17)?,
+                user_submission_text: row.get(6)?,
+                source: row.get(7)?,
+                confidence: row.get(8)?,
+                engagement_id: row.get(9)?,
+                activity_id: row.get(10)?,
+                engagement_code: row.get(11)?,
+                engagement_name: row.get(12)?,
+                activity_code: row.get(13)?,
+                activity_name: row.get(14)?,
+                used_activity_fallback: row.get::<_, i64>(15)? == 1,
+                used_temporal_fallback: row.get::<_, i64>(16)? == 1,
+                duration_defaulted: row.get::<_, i64>(17)? == 1,
+                fallback_summary: row.get(18)?,
                 warning_flags: Vec::new(),
             })
         })?

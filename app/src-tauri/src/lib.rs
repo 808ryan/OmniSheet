@@ -54,6 +54,7 @@ pub fn run() {
             commands::timeline_list_for_date,
             commands::timeline_month_summary,
             commands::timeline_update_entry,
+            commands::timeline_delete_entry,
             commands::interpret_text_message,
             commands::diagnostics_record_frontend_event,
             commands::diagnostics_list,
