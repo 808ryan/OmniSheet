@@ -1,10 +1,27 @@
 use serde_json::{json, Value};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{CodeContext, LlmResponse};
 
 const OPENAI_MODEL: &str = "gpt-5-nano";
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_MAX_ATTEMPTS: usize = 3;
+const OPENAI_RETRY_BASE_DELAY_MS: u64 = 700;
+
+#[derive(Debug, Clone)]
+pub struct LlmAttemptTelemetry {
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub duration_ms: i64,
+    pub outcome: &'static str,
+    pub http_status: Option<u16>,
+    pub retryable: bool,
+    pub retry_delay_ms: Option<u64>,
+    pub error_class: Option<&'static str>,
+    pub error_message: Option<String>,
+}
 
 fn build_system_prompt() -> &'static str {
     r#"
@@ -47,6 +64,10 @@ Temporal inference rules (priority order):
    - Set startTime/endTime/durationMinutes to null.
 
 Additional rules:
+- Identify all distinct work events in the message.
+- Return one entry per distinct work event.
+- Preserve the order that events appear in the message.
+- Do not split a single event into multiple entries unless intent or time window clearly changes.
 - Infer date from capture context and inferred time window.
 - Never default missing times to 00:00.
 - If uncertain, set lower confidence.
@@ -81,6 +102,7 @@ pub async fn interpret_message(
     client_utc_offset_minutes: i64,
     timezone: &str,
     code_context: &CodeContext,
+    attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
 ) -> AppResult<LlmResponse> {
     let system_prompt = build_system_prompt();
 
@@ -94,49 +116,225 @@ pub async fn interpret_message(
       "engagementActivityContext": code_context,
     });
 
-    let response = client
-        .post(OPENAI_CHAT_COMPLETIONS_URL)
-        .bearer_auth(api_key)
-        .json(&json!({
-          "model": OPENAI_MODEL,
-          "response_format": { "type": "json_object" },
-          "messages": [
-            { "role": "system", "content": system_prompt },
-            { "role": "user", "content": user_prompt.to_string() }
-          ]
-        }))
-        .send()
-        .await?;
+    let request_body = json!({
+      "model": OPENAI_MODEL,
+      "response_format": { "type": "json_object" },
+      "messages": [
+        { "role": "system", "content": system_prompt },
+        { "role": "user", "content": user_prompt.to_string() }
+      ]
+    });
 
-    let status = response.status();
-    let response_json: Value = response.json().await?;
+    for attempt in 0..OPENAI_MAX_ATTEMPTS {
+        let attempt_number = attempt + 1;
+        let attempt_started_at = Instant::now();
 
-    if !status.is_success() {
-        return Err(AppError::Service(format!(
-            "OpenAI API error ({status}): {response_json}"
-        )));
+        let response = client
+            .post(OPENAI_CHAT_COMPLETIONS_URL)
+            .bearer_auth(api_key)
+            .json(&request_body)
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(value) => value,
+            Err(error) => {
+                let retryable =
+                    attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_transport_error(&error);
+                let delay_ms = if retryable {
+                    Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+                } else {
+                    None
+                };
+
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "transport_error",
+                    http_status: None,
+                    retryable,
+                    retry_delay_ms: delay_ms,
+                    error_class: Some(transport_error_class(&error)),
+                    error_message: Some(error.to_string()),
+                });
+
+                if let Some(delay_ms) = delay_ms {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    continue;
+                }
+                return Err(AppError::Network(error));
+            }
+        };
+
+        let status = response.status();
+        let response_text = match response.text().await {
+            Ok(value) => value,
+            Err(error) => {
+                let retryable =
+                    attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_transport_error(&error);
+                let delay_ms = if retryable {
+                    Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+                } else {
+                    None
+                };
+
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "transport_error",
+                    http_status: Some(status.as_u16()),
+                    retryable,
+                    retry_delay_ms: delay_ms,
+                    error_class: Some(transport_error_class(&error)),
+                    error_message: Some(error.to_string()),
+                });
+
+                if let Some(delay_ms) = delay_ms {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    continue;
+                }
+
+                return Err(AppError::Network(error));
+            }
+        };
+
+        if !status.is_success() {
+            let retryable =
+                attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_status(status.as_u16());
+            let delay_ms = if retryable {
+                Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+            } else {
+                None
+            };
+
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "http_error",
+                http_status: Some(status.as_u16()),
+                retryable,
+                retry_delay_ms: delay_ms,
+                error_class: None,
+                error_message: Some(format!("OpenAI API error ({status})")),
+            });
+
+            if let Some(delay_ms) = delay_ms {
+                thread::sleep(Duration::from_millis(delay_ms));
+                continue;
+            }
+
+            return Err(AppError::Service(format!(
+                "OpenAI API error ({status}): {response_text}"
+            )));
+        }
+
+        let response_json: Value = serde_json::from_str(&response_text).map_err(|error| {
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "parse_error",
+                http_status: Some(status.as_u16()),
+                retryable: false,
+                retry_delay_ms: None,
+                error_class: None,
+                error_message: Some(error.to_string()),
+            });
+
+            AppError::Service(format!(
+                "Failed to parse OpenAI response JSON: {error}. Raw response: {response_text}"
+            ))
+        })?;
+
+        let content = response_json
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "parse_error",
+                    http_status: Some(status.as_u16()),
+                    retryable: false,
+                    retry_delay_ms: None,
+                    error_class: None,
+                    error_message: Some("OpenAI response missing message content".to_string()),
+                });
+                AppError::Service("OpenAI response missing message content".to_string())
+            })?;
+
+        let parsed = serde_json::from_str::<LlmResponse>(content).map_err(|error| {
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "parse_error",
+                http_status: Some(status.as_u16()),
+                retryable: false,
+                retry_delay_ms: None,
+                error_class: None,
+                error_message: Some(error.to_string()),
+            });
+
+            AppError::Service(format!(
+                "Failed to parse structured LLM response: {error}. Raw content: {content}"
+            ))
+        })?;
+
+        attempt_telemetry.push(LlmAttemptTelemetry {
+            attempt: attempt_number,
+            max_attempts: OPENAI_MAX_ATTEMPTS,
+            duration_ms: attempt_duration_ms(attempt_started_at),
+            outcome: "success",
+            http_status: Some(status.as_u16()),
+            retryable: false,
+            retry_delay_ms: None,
+            error_class: None,
+            error_message: None,
+        });
+
+        return Ok(parsed);
     }
 
-    let content = response_json
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::Service("OpenAI response missing message content".to_string()))?;
+    Err(AppError::Service(
+        "OpenAI request exhausted retry attempts".to_string(),
+    ))
+}
 
-    let parsed = serde_json::from_str::<LlmResponse>(content).map_err(|error| {
-        AppError::Service(format!(
-            "Failed to parse structured LLM response: {error}. Raw content: {content}"
-        ))
-    })?;
+fn attempt_duration_ms(started_at: Instant) -> i64 {
+    started_at.elapsed().as_millis() as i64
+}
 
-    Ok(parsed)
+fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
+}
+
+fn transport_error_class(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else {
+        "other"
+    }
+}
+
+fn is_retryable_status(status_code: u16) -> bool {
+    status_code == 408 || status_code == 429 || (500..=599).contains(&status_code)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_system_prompt;
+    use super::{build_system_prompt, is_retryable_status};
 
     #[test]
     fn prompt_includes_relative_duration_inference_rules() {
@@ -176,5 +374,21 @@ mod tests {
         assert!(prompt.contains("\"alternativeActivities\""));
         assert!(prompt.contains("include activityReason"));
         assert!(prompt.contains("rejected codes"));
+    }
+
+    #[test]
+    fn prompt_requests_multi_event_splitting_in_order() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("distinct work events"));
+        assert!(prompt.contains("one entry per distinct work event"));
+        assert!(prompt.contains("Preserve the order"));
+    }
+
+    #[test]
+    fn retryable_status_includes_backoff_eligible_codes() {
+        assert!(is_retryable_status(408));
+        assert!(is_retryable_status(429));
+        assert!(is_retryable_status(500));
+        assert!(!is_retryable_status(400));
     }
 }

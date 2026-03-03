@@ -80,6 +80,11 @@ export interface InterpretResult {
   correlationId: string
   rawMessageId: string
   createdEntryIds: string[]
+  interpretedEntryCount: number
+  uniqueEntryCount: number
+  savedEntryCount: number
+  truncatedEntryCount: number
+  containsMultipleEvents: boolean
   touchedMonthKeys: string[]
   warnings: Warning[]
   normalizationNotes: string[]
@@ -105,6 +110,8 @@ export interface TimelineEntry {
   usedTemporalFallback: boolean
   durationDefaulted: boolean
   fallbackSummary: string | null
+  sourceMessageEntryIndex: number | null
+  sourceMessageEntryCount: number | null
   warningFlags: WarningType[]
 }
 

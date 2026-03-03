@@ -585,6 +585,11 @@ button.danger {
   color: #1e5aa7;
 }
 
+.warning-badge.provenance {
+  background: #e6f6eb;
+  color: #19673e;
+}
+
 .timeline-panel {
   gap: 1rem;
   grid-template-rows: auto minmax(0, 1fr);
