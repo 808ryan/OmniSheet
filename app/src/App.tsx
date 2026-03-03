@@ -11,7 +11,6 @@ import {
   engagementList,
   engagementUpsert,
   interpretTextMessage,
-  maintenanceRepairSuspiciousEntries,
   isAppCommandError,
   settingsGetStatus,
   settingsSetOpenAiKey,
@@ -681,7 +680,11 @@ function App() {
           correlationId: result.correlationId,
         })
         setSuccessMessage('Message interpretation finished.')
-        invalidateMonthSummaries([monthKeyFromDate(selectedDate)])
+        invalidateMonthSummaries(
+          result.touchedMonthKeys.length > 0
+            ? result.touchedMonthKeys
+            : [monthKeyFromDate(selectedDate)],
+        )
       } catch (error) {
         if (isAppCommandError(error)) {
           setCaptureStatus({
@@ -968,17 +971,6 @@ function App() {
       } catch {
         setSuccessMessage('Diagnostics bundle generated below (clipboard not available).')
       }
-    })
-  }
-
-  const onRepairSuspiciousEntries = () => {
-    void runAction(async () => {
-      const result = await maintenanceRepairSuspiciousEntries({ limit: 300 })
-      await Promise.all([loadTimeline(selectedDate), loadDiagnostics(diagnosticsFilter)])
-      invalidateMonthSummaries([monthKeyFromDate(selectedDate)])
-      setSuccessMessage(
-        `Temporal repair complete. Repaired ${result.repairedCount} of ${result.scannedCount} suspicious entries.`,
-      )
     })
   }
 
@@ -1790,9 +1782,6 @@ function App() {
                 </button>
                 <button type="button" onClick={onCopyDiagnostics} disabled={isBusy}>
                   Copy Diagnostics
-                </button>
-                <button type="button" onClick={onRepairSuspiciousEntries} disabled={isBusy}>
-                  Repair Midnight Entries
                 </button>
               </div>
             </div>

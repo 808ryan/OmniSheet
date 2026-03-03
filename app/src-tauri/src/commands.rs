@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use chrono::{DateTime, Local, NaiveDate, NaiveTime, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, NaiveTime};
 use keyring::{Entry, Error as KeyringError};
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use tauri::State;
 use uuid::Uuid;
@@ -14,9 +14,9 @@ use crate::models::{
     ActivityUpsertInput, ApiKeyInput, CodeContext, ContextActivity, ContextEngagement, DateInput,
     DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement,
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
-    LlmAlternativeActivity, LlmEntry, NormalizedEntry, RepairSuspiciousEntriesInput,
-    RepairSuspiciousEntriesResult, SettingsStatus, StatusLevel, StorageHealth, TimelineDaySummary,
-    TimelineEntry, TimelineMonthSummaryInput, TimelineUpdateInput, Warning, WarningType,
+    LlmAlternativeActivity, LlmEntry, NormalizedEntry, SettingsStatus, StatusLevel, StorageHealth,
+    TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput, TimelineUpdateInput, Warning,
+    WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -98,6 +98,20 @@ fn timeline_month_bounds(month: &str) -> Result<(String, String), String> {
         start.format("%Y-%m-%d").to_string(),
         end_exclusive.format("%Y-%m-%d").to_string(),
     ))
+}
+
+fn month_key_from_iso_date(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.len() < 7 {
+        return None;
+    }
+
+    let month_key = &trimmed[..7];
+    if NaiveDate::parse_from_str(&format!("{month_key}-01"), "%Y-%m-%d").is_ok() {
+        Some(month_key.to_string())
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -996,7 +1010,7 @@ pub async fn interpret_text_message(
         .execute_batch("BEGIN IMMEDIATE TRANSACTION")
         .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
 
-    let write_result: Result<(), String> = (|| {
+    let write_result: Result<Vec<String>, String> = (|| {
         db::insert_raw_message(
             &connection,
             &raw_message_id,
@@ -1058,30 +1072,40 @@ pub async fn interpret_text_message(
             }
         }
 
-        for date in touched_dates {
-            let overlap_warnings = db::recompute_overlap_warnings(&connection, &date)
+        let mut touched_month_keys = touched_dates
+            .iter()
+            .filter_map(|date| month_key_from_iso_date(date))
+            .collect::<Vec<_>>();
+        touched_month_keys.sort();
+        touched_month_keys.dedup();
+
+        for date in &touched_dates {
+            let overlap_warnings = db::recompute_overlap_warnings(&connection, date)
                 .map_err(|error| error.to_string())?;
             warnings.extend(overlap_warnings);
         }
 
-        Ok(())
+        Ok(touched_month_keys)
     })();
 
-    if let Err(message) = write_result {
-        let _ = connection.execute_batch("ROLLBACK");
-        record_backend_event(
-            &connection,
-            state.inner(),
-            &correlation_id,
-            "command_error",
-            command,
-            "error",
-            Some(duration_ms(started_at)),
-            Some(input.raw_text.trim()),
-            json!({ "message": message }),
-        );
-        return Err(format_command_error(&correlation_id, message));
-    }
+    let touched_month_keys = match write_result {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                Some(input.raw_text.trim()),
+                json!({ "message": message }),
+            );
+            return Err(format_command_error(&correlation_id, message));
+        }
+    };
 
     connection
         .execute_batch("COMMIT")
@@ -1099,6 +1123,7 @@ pub async fn interpret_text_message(
         json!({
           "rawMessageId": raw_message_id,
           "createdEntryCount": created_entry_ids.len(),
+          "touchedMonthKeys": touched_month_keys,
           "warningCount": warnings.len(),
           "normalizationFallbackCount": fallback_count,
           "normalizationNotes": normalization_notes,
@@ -1110,6 +1135,7 @@ pub async fn interpret_text_message(
         correlation_id,
         raw_message_id,
         created_entry_ids,
+        touched_month_keys,
         warnings,
         normalization_notes,
     })
@@ -1245,213 +1271,6 @@ pub fn diagnostics_copy_bundle(state: State<'_, AppState>) -> Result<Diagnostics
     })
 }
 
-#[tauri::command]
-pub fn maintenance_repair_suspicious_entries(
-    state: State<'_, AppState>,
-    input: RepairSuspiciousEntriesInput,
-) -> Result<RepairSuspiciousEntriesResult, String> {
-    let command = "maintenance_repair_suspicious_entries";
-    let correlation_id = Uuid::new_v4().to_string();
-    let started_at = Instant::now();
-    let limit = input.limit.unwrap_or(200).clamp(1, 1_000);
-
-    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-
-    #[derive(Debug)]
-    struct CandidateEntry {
-        id: String,
-        date: String,
-        start_minute: i64,
-        end_minute: i64,
-        duration_minutes: i64,
-        description: String,
-        engagement_id: Option<String>,
-        activity_id: Option<String>,
-        raw_text: String,
-        message_timestamp: i64,
-    }
-
-    let mut statement = connection
-        .prepare(
-            r#"
-          SELECT
-            te.id,
-            te.date,
-            te.start_minute,
-            te.end_minute,
-            te.duration_minutes,
-            te.description,
-            te.engagement_id,
-            te.activity_id,
-            rm.raw_text,
-            rm.message_timestamp
-          FROM timesheet_entries te
-          JOIN raw_messages rm ON rm.id = te.raw_message_id
-          WHERE te.source = 'text'
-          ORDER BY te.created_at DESC
-          LIMIT ?1
-        "#,
-        )
-        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
-
-    let candidates = statement
-        .query_map(params![limit], |row| {
-            Ok(CandidateEntry {
-                id: row.get(0)?,
-                date: row.get(1)?,
-                start_minute: row.get(2)?,
-                end_minute: row.get(3)?,
-                duration_minutes: row.get(4)?,
-                description: row.get(5)?,
-                engagement_id: row.get(6)?,
-                activity_id: row.get(7)?,
-                raw_text: row.get(8)?,
-                message_timestamp: row.get(9)?,
-            })
-        })
-        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
-    drop(statement);
-
-    let scanned_count = candidates.len() as i64;
-
-    connection
-        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
-        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
-
-    let repair_result: Result<Vec<String>, String> = (|| {
-        let mut repaired_entry_ids = Vec::<String>::new();
-
-        for candidate in candidates {
-            if message_has_explicit_clock_time_cue(&candidate.raw_text) {
-                continue;
-            }
-
-            let Some(reference_timestamp) =
-                Local.timestamp_opt(candidate.message_timestamp, 0).single()
-            else {
-                continue;
-            };
-
-            let temporal_reference = TemporalReference {
-                local_date: reference_timestamp.date_naive(),
-                rounded_end_minute: round_to_nearest_30(minutes_from_time(
-                    reference_timestamp.time(),
-                ) as i64)
-                .clamp(30, MINUTES_IN_DAY),
-            };
-
-            let repaired_entry = fallback_entry(&temporal_reference, &candidate.description);
-            let has_large_timing_drift =
-                (candidate.start_minute - repaired_entry.start_minute).abs() >= 60
-                    || (candidate.end_minute - repaired_entry.end_minute).abs() >= 60;
-            let has_date_drift = candidate.date != repaired_entry.date;
-            let has_midnight_default = candidate.start_minute == 0 && candidate.end_minute == 30;
-            let is_suspicious = has_large_timing_drift || has_date_drift || has_midnight_default;
-
-            if !is_suspicious {
-                continue;
-            }
-
-            if candidate.date == repaired_entry.date
-                && candidate.start_minute == repaired_entry.start_minute
-                && candidate.end_minute == repaired_entry.end_minute
-                && candidate.duration_minutes == repaired_entry.duration_minutes
-            {
-                continue;
-            }
-
-            db::update_timeline_entry(
-                &connection,
-                &candidate.id,
-                &repaired_entry.date,
-                repaired_entry.start_minute,
-                repaired_entry.end_minute,
-                repaired_entry.duration_minutes,
-                &candidate.description,
-                candidate.engagement_id.as_deref(),
-                candidate.activity_id.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
-
-            db::clear_entry_warnings(
-                &connection,
-                &candidate.id,
-                &[WarningType::Overlap, WarningType::Unmatched],
-            )
-            .map_err(|error| error.to_string())?;
-
-            if candidate.engagement_id.is_none() || candidate.activity_id.is_none() {
-                db::add_warning(
-                    &connection,
-                    &candidate.id,
-                    WarningType::Unmatched,
-                    Some("Entry is uncategorized".to_string()),
-                )
-                .map_err(|error| error.to_string())?;
-            }
-
-            let _ = db::recompute_overlap_warnings(&connection, &candidate.date)
-                .map_err(|error| error.to_string())?;
-            if candidate.date != repaired_entry.date {
-                let _ = db::recompute_overlap_warnings(&connection, &repaired_entry.date)
-                    .map_err(|error| error.to_string())?;
-            }
-
-            repaired_entry_ids.push(candidate.id);
-        }
-
-        Ok(repaired_entry_ids)
-    })();
-
-    let repaired_entry_ids = match repair_result {
-        Ok(value) => value,
-        Err(message) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            record_backend_event(
-                &connection,
-                state.inner(),
-                &correlation_id,
-                "command_error",
-                command,
-                "error",
-                Some(duration_ms(started_at)),
-                None,
-                json!({ "message": message }),
-            );
-            return Err(format_command_error(&correlation_id, message));
-        }
-    };
-
-    connection
-        .execute_batch("COMMIT")
-        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
-
-    let result = RepairSuspiciousEntriesResult {
-        scanned_count,
-        repaired_count: repaired_entry_ids.len() as i64,
-        repaired_entry_ids: repaired_entry_ids.clone(),
-    };
-
-    record_backend_event(
-        &connection,
-        state.inner(),
-        &correlation_id,
-        "command_success",
-        command,
-        "ok",
-        Some(duration_ms(started_at)),
-        None,
-        json!({
-          "scannedCount": result.scanned_count,
-          "repairedCount": result.repaired_count,
-          "repairedEntryIds": result.repaired_entry_ids,
-        }),
-    );
-
-    Ok(result)
-}
 fn parse_client_timestamp(timestamp: &str) -> DateTime<Local> {
     DateTime::parse_from_rfc3339(timestamp)
         .map(|value| value.with_timezone(&Local))

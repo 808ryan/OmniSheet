@@ -132,6 +132,7 @@ pub struct InterpretResult {
     pub correlation_id: String,
     pub raw_message_id: String,
     pub created_entry_ids: Vec<String>,
+    pub touched_month_keys: Vec<String>,
     pub warnings: Vec<Warning>,
     pub normalization_notes: Vec<String>,
 }
@@ -243,20 +244,6 @@ pub struct DiagnosticsEvent {
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticsBundle {
     pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepairSuspiciousEntriesInput {
-    pub limit: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepairSuspiciousEntriesResult {
-    pub scanned_count: i64,
-    pub repaired_count: i64,
-    pub repaired_entry_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
