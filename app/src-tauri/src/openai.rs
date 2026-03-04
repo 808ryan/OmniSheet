@@ -52,15 +52,19 @@ Return strict JSON with this shape:
 Temporal inference rules (priority order):
 1) Explicit clock times in the message:
    - Use those times directly (normalized to HH:MM 24-hour format).
-2) Relative duration cues (for example: "for the past hour", "last 45 minutes", "for 2 hours"):
+2) Contextual day-part cues without explicit clock times (for example: "in the morning", "this afternoon", "tonight"):
+   - Use a reasonable time window that matches the cue in the user's local day.
+   - For "morning", default to a window between 08:00 and 12:00 local time.
+   - If day-part and duration cues both exist, keep the entry inside the day-part window and use durationMinutes only to size the block (do not anchor to clientLocalTime).
+3) Relative duration cues (for example: "for the past hour", "last 45 minutes", "for 2 hours"):
    - Infer endTime from clientLocalTime.
    - Infer startTime as endTime - durationMinutes.
    - Set durationMinutes consistently.
-3) Relative anchor cues (for example: "since lunch", "since 1pm"):
+4) Relative anchor cues (for example: "since lunch", "since 1pm"):
    - Infer a reasonable start from the anchor.
    - Infer endTime from clientLocalTime.
    - Set durationMinutes consistently.
-4) Only when no usable temporal intent exists:
+5) Only when no usable temporal intent exists:
    - Set startTime/endTime/durationMinutes to null.
 
 Additional rules:
@@ -87,6 +91,9 @@ Examples:
 - Message: "for the past hour i've been in meetings for RR ITACs"
   clientLocalTime: "21:48"
   Expected temporal intent: startTime "20:48", endTime "21:48", durationMinutes 60.
+- Message: "in the morning i spent 30 minutes on a PCC related meeting"
+  clientLocalTime: "22:13"
+  Expected temporal intent: startTime "09:30", endTime "10:00", durationMinutes 30.
 - Message: "worked on controls testing"
   Expected temporal intent: startTime null, endTime null, durationMinutes null.
 "#
@@ -350,6 +357,23 @@ mod tests {
         assert!(prompt.contains("Only when no usable temporal intent exists"));
         assert!(prompt.contains("Set startTime/endTime/durationMinutes to null"));
         assert!(prompt.contains("Never default missing times to 00:00"));
+    }
+
+    #[test]
+    fn prompt_includes_day_part_guidance_with_morning_defaults() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("Contextual day-part cues without explicit clock times"));
+        assert!(prompt.contains("default to a window between 08:00 and 12:00 local time"));
+        assert!(prompt.contains("do not anchor to clientLocalTime"));
+    }
+
+    #[test]
+    fn prompt_includes_morning_duration_example() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains(
+            "\"in the morning i spent 30 minutes on a PCC related meeting\""
+        ));
+        assert!(prompt.contains("Expected temporal intent: startTime \"09:30\", endTime \"10:00\", durationMinutes 30."));
     }
 
     #[test]
