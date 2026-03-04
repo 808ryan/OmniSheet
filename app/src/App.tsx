@@ -132,6 +132,12 @@ interface CalendarDayCell {
   isCurrentMonth: boolean
 }
 
+interface TimelineHeaderDate {
+  monthDay: string
+  year: string
+  weekday: string
+}
+
 interface TimelineContextMenuState {
   entryId: string
   x: number
@@ -301,6 +307,10 @@ function App() {
   }, [summaryNotesModal, weeklySummary])
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
+  const timelineHeaderDate = useMemo(
+    () => formatTimelineHeaderDate(selectedDate),
+    [selectedDate],
+  )
 
   const timelineWindowMinutes = timelineWindow.endMinute - timelineWindow.startMinute
   const timelineCanvasHeight = (
@@ -960,6 +970,10 @@ function App() {
     setTimelineContextMenu(null)
   }
 
+  const onJumpToToday = () => {
+    onSetDate(formatDate(new Date()))
+  }
+
   const onSelectCalendarDate = (nextDate: string) => {
     onSetDate(nextDate)
   }
@@ -1291,32 +1305,38 @@ function App() {
           <section className="panel timeline-panel">
             <div className="timeline-toolbar">
               <div>
-                <h2>Daily Timeline</h2>
+                <h2 className="timeline-date-heading">
+                  <strong>{timelineHeaderDate.monthDay}</strong>, {timelineHeaderDate.year}
+                </h2>
                 <p className="timeline-range">
-                  Visible range: {minuteToLabel(timelineWindow.startMinute)} -{' '}
-                  {formatTimelineRangeEndLabel(timelineWindow.endMinute)}
+                  {timelineHeaderDate.weekday}
                 </p>
               </div>
               <div className="timeline-controls">
                 <button
                   type="button"
+                  className="timeline-arrow-button"
+                  aria-label="Previous day"
                   onClick={() => onSetDate(shiftDate(selectedDate, -1))}
                   disabled={isBusy || isTimelineLoading}
                 >
-                  Previous
+                  {'<'}
                 </button>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  disabled={isBusy || isTimelineLoading}
-                  onChange={(event) => onSetDate(event.target.value)}
-                />
                 <button
                   type="button"
+                  onClick={onJumpToToday}
+                  disabled={isBusy || isTimelineLoading}
+                >
+                  Today
+                </button>
+                <button
+                  type="button"
+                  className="timeline-arrow-button"
+                  aria-label="Next day"
                   onClick={() => onSetDate(shiftDate(selectedDate, 1))}
                   disabled={isBusy || isTimelineLoading}
                 >
-                  Next
+                  {'>'}
                 </button>
               </div>
             </div>
@@ -2430,14 +2450,6 @@ function formatCodesMutationError(error: unknown): string {
   return 'We could not save your changes. Please review your input and try again.'
 }
 
-function formatTimelineRangeEndLabel(minute: number): string {
-  if (minute >= MINUTES_IN_DAY) {
-    return '12:00 AM'
-  }
-
-  return minuteToLabel(minute)
-}
-
 function formatMinutesAsHours(minutes: number): string {
   return (minutes / 60).toFixed(2)
 }
@@ -2452,6 +2464,22 @@ function formatMonthDay(date: string): string {
     month: '2-digit',
     day: '2-digit',
   }).format(value)
+}
+
+function formatTimelineHeaderDate(date: string): TimelineHeaderDate {
+  const value = new Date(`${date}T00:00:00`)
+  return {
+    monthDay: new Intl.DateTimeFormat('en-US', {
+      month: 'long',
+      day: 'numeric',
+    }).format(value),
+    year: new Intl.DateTimeFormat('en-US', {
+      year: 'numeric',
+    }).format(value),
+    weekday: new Intl.DateTimeFormat('en-US', {
+      weekday: 'long',
+    }).format(value),
+  }
 }
 
 function formatSummaryNotesForClipboard(notes: TimelineWeeklySummaryNote[]): string {
