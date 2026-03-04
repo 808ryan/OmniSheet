@@ -17,6 +17,7 @@ import {
   timelineDeleteEntry,
   timelineListForDate,
   timelineMonthSummary,
+  timelineWeeklySummary,
   timelineUpdateEntry,
 } from './lib/api'
 import { isTauriRuntime } from './lib/runtime'
@@ -37,11 +38,13 @@ import type {
   SettingsStatus,
   TimelineDaySummary,
   TimelineEntry,
+  TimelineWeeklySummary,
+  TimelineWeeklySummaryNote,
   WarningType,
 } from './lib/types'
 import './App.css'
 
-type View = 'timeline' | 'codes' | 'settings' | 'diagnostics'
+type View = 'timeline' | 'codes' | 'settings' | 'diagnostics' | 'summary'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 
@@ -116,6 +119,7 @@ interface MiniCalendarProps {
   visibleMonth: string
   todayDate: string
   daysWithEntries: Set<string>
+  highlightedDates: Set<string>
   isLoading: boolean
   errorMessage: string | null
   onVisibleMonthChange: (nextMonth: string) => void
@@ -138,6 +142,11 @@ interface TimelineToast {
   id: number
   kind: 'success' | 'error'
   message: string
+}
+
+interface SummaryNotesModalState {
+  rowIndex: number
+  dayIndex: number
 }
 
 interface RunActionOptions {
@@ -179,8 +188,23 @@ const EMPTY_CAPTURE_STATUS: CaptureStatus = {
   state: 'idle',
   message: 'No capture submitted yet.',
 }
-const SEGMENTED_VIEWS: View[] = ['timeline', 'codes', 'settings', 'diagnostics']
+const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
+  { id: 'timeline', label: 'Timeline' },
+  { id: 'codes', label: 'Codes' },
+  { id: 'settings', label: 'Settings' },
+  { id: 'diagnostics', label: 'Diagnostics' },
+  { id: 'summary', label: 'Summary View' },
+]
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const
+const SUMMARY_DAY_NAMES = [
+  'Saturday',
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+] as const
 
 function App() {
   const tauriRuntime = isTauriRuntime()
@@ -224,6 +248,11 @@ function App() {
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
+  const [weeklySummary, setWeeklySummary] = useState<TimelineWeeklySummary | null>(null)
+  const [isWeeklySummaryLoading, setIsWeeklySummaryLoading] = useState(false)
+  const [weeklySummaryError, setWeeklySummaryError] = useState<string | null>(null)
+  const [summaryNotesModal, setSummaryNotesModal] = useState<SummaryNotesModalState | null>(null)
+  const summaryNotesModalRef = useRef<HTMLDivElement | null>(null)
 
   const selectedEntry = useMemo(
     () => timelineEntries.find((entry) => entry.id === selectedEntryId) ?? null,
@@ -240,6 +269,36 @@ function App() {
   )
   const visibleMonthSummaryError = monthSummaryCache[visibleMonth] ? null : monthSummaryError
   const hasVisibleMonthSummary = monthSummaryCache[visibleMonth] !== undefined
+  const summaryWeekHighlightedDates = useMemo(() => {
+    if (activeView !== 'summary' || !weeklySummary) {
+      return new Set<string>()
+    }
+
+    return new Set(weeklySummary.days.map((day) => day.date))
+  }, [activeView, weeklySummary])
+  const selectedSummaryNotesContext = useMemo(() => {
+    if (!weeklySummary || !summaryNotesModal) {
+      return null
+    }
+
+    const row = weeklySummary.rows[summaryNotesModal.rowIndex]
+    const day = weeklySummary.days[summaryNotesModal.dayIndex]
+    if (!row || !day) {
+      return null
+    }
+
+    const cell = row.cells[summaryNotesModal.dayIndex]
+    if (!cell || cell.notes.length === 0) {
+      return null
+    }
+
+    return {
+      row,
+      day,
+      dayIndex: summaryNotesModal.dayIndex,
+      notes: cell.notes,
+    }
+  }, [summaryNotesModal, weeklySummary])
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
 
@@ -342,6 +401,12 @@ function App() {
       [month]: rows,
     }))
     return rows
+  }, [])
+
+  const loadWeeklySummary = useCallback(async (date: string) => {
+    const summary = await timelineWeeklySummary({ date })
+    setWeeklySummary(summary)
+    return summary
   }, [])
 
   const invalidateMonthSummaries = useCallback((monthKeys: string[]) => {
@@ -523,10 +588,73 @@ function App() {
   }, [activeView, diagnosticsFilter, loadDiagnostics, tauriRuntime])
 
   useEffect(() => {
+    if (!tauriRuntime || !hasInitializedRef.current || activeView !== 'summary') {
+      return
+    }
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        setIsWeeklySummaryLoading(true)
+        setWeeklySummaryError(null)
+        await loadWeeklySummary(selectedDate)
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+        if (isAppCommandError(error)) {
+          setWeeklySummaryError(
+            `${error.message} (command: ${error.command}, correlationId: ${error.correlationId})`,
+          )
+        } else {
+          setWeeklySummaryError((error as Error).message)
+        }
+      } finally {
+        if (!cancelled) {
+          setIsWeeklySummaryLoading(false)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeView, loadWeeklySummary, selectedDate, tauriRuntime])
+
+  useEffect(() => {
     if (activeView !== 'timeline' && timelineContextMenu) {
       setTimelineContextMenu(null)
     }
   }, [activeView, timelineContextMenu])
+
+  useEffect(() => {
+    if (activeView !== 'summary' && summaryNotesModal) {
+      setSummaryNotesModal(null)
+    }
+  }, [activeView, summaryNotesModal])
+
+  useEffect(() => {
+    if (!summaryNotesModal) {
+      return
+    }
+
+    if (!selectedSummaryNotesContext) {
+      setSummaryNotesModal(null)
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSummaryNotesModal(null)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [selectedSummaryNotesContext, summaryNotesModal])
 
   useEffect(() => {
     if (activeView !== 'timeline') {
@@ -605,8 +733,13 @@ function App() {
   }, [timelineToast])
 
   const refreshAfterMutation = useCallback(async () => {
-    await Promise.all([loadEngagements(), loadTimeline(selectedDate), loadSettings()])
-  }, [loadEngagements, loadSettings, loadTimeline, selectedDate])
+    await Promise.all([
+      loadEngagements(),
+      loadTimeline(selectedDate),
+      loadSettings(),
+      loadWeeklySummary(selectedDate),
+    ])
+  }, [loadEngagements, loadSettings, loadTimeline, loadWeeklySummary, selectedDate])
 
   const runAction = useCallback(
     async (action: () => Promise<void>, options?: RunActionOptions) => {
@@ -661,6 +794,7 @@ function App() {
         })
 
         const selectedDayEntries = await loadTimeline(selectedDate)
+        await loadWeeklySummary(selectedDate)
         const createdOnSelectedDate = selectedDayEntries.filter((entry) =>
           result.createdEntryIds.includes(entry.id),
         ).length
@@ -827,7 +961,6 @@ function App() {
   }
 
   const onSelectCalendarDate = (nextDate: string) => {
-    setActiveView('timeline')
     onSetDate(nextDate)
   }
 
@@ -883,6 +1016,7 @@ function App() {
       })
 
       await loadTimeline(selectedDate)
+      await loadWeeklySummary(selectedDate)
       invalidateMonthSummaries([previousMonthKey, nextMonthKey])
       setSuccessMessage('Timeline entry updated.')
     })
@@ -904,6 +1038,7 @@ function App() {
         setTimelineContextMenu(null)
         await timelineDeleteEntry(id)
         await loadTimeline(selectedDate)
+        await loadWeeklySummary(selectedDate)
 
         window.requestAnimationFrame(() => {
           const grid = timelineGridRef.current
@@ -977,6 +1112,37 @@ function App() {
         setSuccessMessage('Diagnostics bundle copied to clipboard.')
       } catch {
         setSuccessMessage('Diagnostics bundle generated below (clipboard not available).')
+      }
+    })
+  }
+
+  const onShiftSummaryWeek = (weekDelta: number) => {
+    onSetDate(shiftDate(selectedDate, weekDelta * 7))
+  }
+
+  const onOpenSummaryNotes = (rowIndex: number, dayIndex: number) => {
+    setSummaryNotesModal({
+      rowIndex,
+      dayIndex,
+    })
+  }
+
+  const onCloseSummaryNotes = () => {
+    setSummaryNotesModal(null)
+  }
+
+  const onCopySummaryNotes = () => {
+    if (!selectedSummaryNotesContext) {
+      return
+    }
+
+    const text = formatSummaryNotesForClipboard(selectedSummaryNotesContext.notes)
+    void runAction(async () => {
+      try {
+        await navigator.clipboard.writeText(text)
+        setSuccessMessage('Summary notes copied to clipboard.')
+      } catch {
+        setErrorMessage('Clipboard is not available in this environment.')
       }
     })
   }
@@ -1065,6 +1231,7 @@ function App() {
               visibleMonth={visibleMonth}
               todayDate={todayDate}
               daysWithEntries={visibleMonthDaysWithEntries}
+              highlightedDates={summaryWeekHighlightedDates}
               isLoading={monthSummaryLoadingMonth === visibleMonth}
               errorMessage={visibleMonthSummaryError}
               onVisibleMonthChange={setVisibleMonth}
@@ -1077,14 +1244,14 @@ function App() {
           <div className="segmented-control" role="tablist" aria-label="Main views">
             {SEGMENTED_VIEWS.map((view) => (
               <button
-                key={view}
+                key={view.id}
                 type="button"
                 role="tab"
-                aria-selected={activeView === view}
-                className={activeView === view ? 'active' : ''}
-                onClick={() => setActiveView(view)}
+                aria-selected={activeView === view.id}
+                className={activeView === view.id ? 'active' : ''}
+                onClick={() => setActiveView(view.id)}
               >
-                {view[0].toUpperCase() + view.slice(1)}
+                {view.label}
               </button>
             ))}
           </div>
@@ -1858,6 +2025,133 @@ function App() {
             ) : null}
           </section>
         ) : null}
+
+        {activeView === 'summary' ? (
+          <section className="panel summary-panel">
+            <div className="summary-toolbar">
+              <div className="summary-title-block">
+                <h2>Weekly Summary</h2>
+                {weeklySummary ? (
+                  <p className="summary-week-range">
+                    Week: {weeklySummary.weekStartDate} - {weeklySummary.weekEndDate}
+                  </p>
+                ) : (
+                  <p className="summary-week-range">Week: {selectedDate}</p>
+                )}
+              </div>
+              <div className="summary-week-controls">
+                <button
+                  type="button"
+                  onClick={() => onShiftSummaryWeek(-1)}
+                  disabled={isBusy || isWeeklySummaryLoading}
+                >
+                  Previous Week
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onShiftSummaryWeek(1)}
+                  disabled={isBusy || isWeeklySummaryLoading}
+                >
+                  Next Week
+                </button>
+              </div>
+            </div>
+
+            <div className="summary-week-total">
+              <span>Week Total Hours</span>
+              <strong>
+                {weeklySummary
+                  ? formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+                  : '--'}
+              </strong>
+            </div>
+
+            {weeklySummaryError ? (
+              <p className="mini-calendar-error">{weeklySummaryError}</p>
+            ) : null}
+
+            <div className="summary-table-wrap" aria-busy={isWeeklySummaryLoading}>
+              {isWeeklySummaryLoading ? (
+                <p>Loading weekly summary...</p>
+              ) : weeklySummary ? (
+                <table className="summary-table">
+                  <thead>
+                    <tr>
+                      <th>Engagement Code</th>
+                      <th>Activity Code</th>
+                      <th>Activity Name</th>
+                      <th>Engagement Name</th>
+                      <th>Client Name</th>
+                      {weeklySummary.days.map((day, dayIndex) => (
+                        <th key={day.date}>
+                          {SUMMARY_DAY_NAMES[dayIndex]} ({formatMonthDay(day.date)})
+                        </th>
+                      ))}
+                      <th>Row Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {weeklySummary.rows.length === 0 ? (
+                      <tr>
+                        <td colSpan={13} className="summary-empty-row">
+                          No time entries for this week.
+                        </td>
+                      </tr>
+                    ) : (
+                      weeklySummary.rows.map((row, rowIndex) => (
+                        <tr key={`${row.engagementCode}-${row.activityCode}-${rowIndex}`}>
+                          <td className={row.engagementCode === 'UNCAT' ? 'summary-uncategorized' : ''}>
+                            {row.engagementCode}
+                          </td>
+                          <td className={row.activityCode === 'UNCAT' ? 'summary-uncategorized' : ''}>
+                            {row.activityCode}
+                          </td>
+                          <td>{row.activityName}</td>
+                          <td>{row.engagementName}</td>
+                          <td>{row.clientName || '-'}</td>
+                          {row.cells.map((cell, dayIndex) => (
+                            <td key={`${rowIndex}-${dayIndex}`}>
+                              {cell.totalMinutes > 0 ? (
+                                <div className="summary-cell-value-wrap">
+                                  <span>{formatMinutesAsHours(cell.totalMinutes)}</span>
+                                  <button
+                                    type="button"
+                                    className="ghost summary-notes-button"
+                                    onClick={() => onOpenSummaryNotes(rowIndex, dayIndex)}
+                                  >
+                                    Notes
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="summary-zero">-</span>
+                              )}
+                            </td>
+                          ))}
+                          <td className="summary-row-total">
+                            {formatMinutesAsHours(row.rowTotalMinutes)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                  <tfoot>
+                    <tr className="summary-total-row">
+                      <th colSpan={5}>Day Totals</th>
+                      {weeklySummary.dayTotalMinutes.map((totalMinutes, dayIndex) => (
+                        <td key={`total-${dayIndex}`}>
+                          {formatMinutesAsHours(totalMinutes)}
+                        </td>
+                      ))}
+                      <td>{formatMinutesAsHours(weeklySummary.weekTotalMinutes)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              ) : (
+                <p>No summary data available.</p>
+              )}
+            </div>
+          </section>
+        ) : null}
           </div>
         </main>
       </div>
@@ -1900,6 +2194,52 @@ function App() {
         </div>,
         document.body,
       ) : null}
+      {selectedSummaryNotesContext ? createPortal(
+        <div
+          className="summary-notes-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              onCloseSummaryNotes()
+            }
+          }}
+        >
+          <div
+            ref={summaryNotesModalRef}
+            className="summary-notes-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Summary notes details"
+          >
+            <div className="summary-notes-header">
+              <h3>Notes</h3>
+              <button
+                type="button"
+                className="ghost"
+                onClick={onCloseSummaryNotes}
+              >
+                Close
+              </button>
+            </div>
+            <p className="summary-notes-context">
+              {selectedSummaryNotesContext.row.engagementCode} / {selectedSummaryNotesContext.row.activityCode}
+              {' '}on {SUMMARY_DAY_NAMES[selectedSummaryNotesContext.dayIndex]} ({formatMonthDay(selectedSummaryNotesContext.day.date)})
+            </p>
+            <div className="summary-notes-list">
+              {selectedSummaryNotesContext.notes.map((note, index) => (
+                <p key={`${note.startMinute}-${note.endMinute}-${index}`}>
+                  {formatMinutesAsHours(note.durationMinutes)} Hours: {note.description}
+                </p>
+              ))}
+            </div>
+            <div className="summary-notes-actions">
+              <button type="button" onClick={onCopySummaryNotes}>
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
     </div>
   )
 }
@@ -1909,6 +2249,7 @@ function MiniCalendar({
   visibleMonth,
   todayDate,
   daysWithEntries,
+  highlightedDates,
   isLoading,
   errorMessage,
   onVisibleMonthChange,
@@ -1952,12 +2293,14 @@ function MiniCalendar({
           const isSelected = cell.date === selectedDate
           const isToday = cell.date === todayDate
           const hasEntries = daysWithEntries.has(cell.date)
+          const isInHighlightedWeek = highlightedDates.has(cell.date)
           const classes = [
             'mini-calendar-day',
             cell.isCurrentMonth ? 'current-month' : 'outside-month',
             isSelected ? 'is-selected' : '',
             isToday ? 'is-today' : '',
             hasEntries ? 'has-entries' : '',
+            isInHighlightedWeek ? 'in-summary-week' : '',
           ]
             .filter(Boolean)
             .join(' ')
@@ -1973,6 +2316,7 @@ function MiniCalendar({
                 isSelected,
                 isToday,
                 hasEntries,
+                isInHighlightedWeek,
               })}
               onClick={() => onSelectDate(cell.date)}
             >
@@ -2094,6 +2438,28 @@ function formatTimelineRangeEndLabel(minute: number): string {
   return minuteToLabel(minute)
 }
 
+function formatMinutesAsHours(minutes: number): string {
+  return (minutes / 60).toFixed(2)
+}
+
+function formatMonthDay(date: string): string {
+  const [yearToken, monthToken, dayToken] = date.split('-')
+  const year = Number(yearToken)
+  const monthIndex = Number(monthToken) - 1
+  const day = Number(dayToken)
+  const value = new Date(year, monthIndex, day)
+  return new Intl.DateTimeFormat('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+  }).format(value)
+}
+
+function formatSummaryNotesForClipboard(notes: TimelineWeeklySummaryNote[]): string {
+  return notes
+    .map((note) => `${formatMinutesAsHours(note.durationMinutes)} Hours: ${note.description}`)
+    .join('\n')
+}
+
 function monthKeyFromDate(date: string): string {
   return date.slice(0, 7)
 }
@@ -2145,7 +2511,12 @@ function buildCalendarDayCells(monthKey: string): CalendarDayCell[] {
 
 function formatCalendarDayAriaLabel(
   date: string,
-  state: { isSelected: boolean; isToday: boolean; hasEntries: boolean },
+  state: {
+    isSelected: boolean
+    isToday: boolean
+    hasEntries: boolean
+    isInHighlightedWeek: boolean
+  },
 ): string {
   const value = new Date(`${date}T00:00:00`)
   const parts = [
@@ -2167,6 +2538,10 @@ function formatCalendarDayAriaLabel(
 
   if (state.hasEntries) {
     parts.push('has entries')
+  }
+
+  if (state.isInHighlightedWeek) {
+    parts.push('in summary week')
   }
 
   return parts.join(', ')

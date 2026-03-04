@@ -193,6 +193,52 @@ pub struct TimelineDaySummary {
     pub total_minutes: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineWeeklySummary {
+    pub week_start_date: String,
+    pub week_end_date: String,
+    pub days: Vec<TimelineWeeklySummaryDay>,
+    pub rows: Vec<TimelineWeeklySummaryRow>,
+    pub day_total_minutes: Vec<i64>,
+    pub week_total_minutes: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineWeeklySummaryDay {
+    pub date: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineWeeklySummaryRow {
+    pub engagement_code: String,
+    pub activity_code: String,
+    pub activity_name: String,
+    pub engagement_name: String,
+    pub client_name: String,
+    pub is_uncategorized: bool,
+    pub cells: Vec<TimelineWeeklySummaryCell>,
+    pub row_total_minutes: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineWeeklySummaryCell {
+    pub total_minutes: i64,
+    pub notes: Vec<TimelineWeeklySummaryNote>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineWeeklySummaryNote {
+    pub start_minute: i64,
+    pub end_minute: i64,
+    pub duration_minutes: i64,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineUpdateInput {

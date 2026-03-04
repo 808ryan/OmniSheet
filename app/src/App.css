@@ -169,7 +169,7 @@
 
 .segmented-control {
   display: inline-grid;
-  grid-template-columns: repeat(4, minmax(0, max-content));
+  grid-template-columns: repeat(5, minmax(0, max-content));
   justify-content: start;
   align-items: center;
   gap: 0.25rem;
@@ -528,6 +528,14 @@ button.danger {
   border-radius: 0.34rem;
   background: var(--calendar-entry-fill);
   opacity: 1;
+}
+
+.mini-calendar-day.in-summary-week:not(.is-selected) > span {
+  background: rgba(255, 59, 48, 0.14);
+}
+
+.mini-calendar-day.in-summary-week.has-entries:not(.is-selected)::before {
+  background: rgba(255, 59, 48, 0.18);
 }
 
 .mini-calendar-day.is-today:not(.is-selected)::after {
@@ -1040,6 +1048,192 @@ button.danger {
   font-size: 0.84rem;
 }
 
+.summary-panel {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.summary-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.summary-title-block {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.summary-week-range {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--ink-soft);
+}
+
+.summary-week-controls {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.summary-week-total {
+  border: 1px solid var(--outline);
+  border-radius: 12px;
+  background: #f6f9ff;
+  padding: 0.65rem 0.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.summary-week-total span {
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.summary-week-total strong {
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.summary-table-wrap {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--outline);
+  border-radius: 12px;
+  background: #fbfdff;
+}
+
+.summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 1080px;
+}
+
+.summary-table th,
+.summary-table td {
+  border-bottom: 1px solid var(--outline);
+  padding: 0.5rem 0.55rem;
+  font-size: 0.8rem;
+  color: var(--ink);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.summary-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f4f8ff;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.summary-cell-value-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.summary-notes-button {
+  padding: 0.18rem 0.42rem;
+  font-size: 0.7rem;
+}
+
+.summary-row-total {
+  font-weight: 700;
+}
+
+.summary-total-row th,
+.summary-total-row td {
+  background: #eef4ff;
+  font-weight: 700;
+}
+
+.summary-uncategorized {
+  background: #fff4e5;
+  color: #93370d;
+  font-weight: 700;
+}
+
+.summary-zero {
+  color: #94a3b8;
+}
+
+.summary-empty-row {
+  text-align: center;
+  color: var(--ink-soft);
+}
+
+.summary-notes-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  background: rgba(15, 23, 42, 0.32);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.summary-notes-modal {
+  width: min(40rem, 100%);
+  max-height: min(72vh, 34rem);
+  border-radius: 14px;
+  border: 1px solid var(--outline-strong);
+  background: #ffffff;
+  box-shadow: 0 20px 40px rgba(16, 24, 40, 0.24);
+  padding: 0.8rem;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 0.6rem;
+}
+
+.summary-notes-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.summary-notes-header h3 {
+  margin: 0;
+}
+
+.summary-notes-context {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.summary-notes-list {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 0.65rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.summary-notes-list p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+
+.summary-notes-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
 .runtime-shell {
   min-height: 100vh;
   display: grid;
@@ -1075,6 +1269,15 @@ button.danger {
   .timeline-layout,
   .code-panel {
     grid-template-columns: 1fr;
+  }
+
+  .summary-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .summary-week-controls {
+    justify-content: flex-start;
   }
 }
 

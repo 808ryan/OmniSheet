@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use chrono::{DateTime, Local, NaiveDate, NaiveTime};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime};
 use keyring::{Entry, Error as KeyringError};
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -15,8 +15,8 @@ use crate::models::{
     DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement,
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
     LlmAlternativeActivity, LlmEntry, NormalizedEntry, SettingsStatus, StatusLevel, StorageHealth,
-    TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput, TimelineUpdateInput, Warning,
-    WarningType,
+    TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput, TimelineUpdateInput,
+    TimelineWeeklySummary, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -98,6 +98,19 @@ fn timeline_month_bounds(month: &str) -> Result<(String, String), String> {
     Ok((
         start.format("%Y-%m-%d").to_string(),
         end_exclusive.format("%Y-%m-%d").to_string(),
+    ))
+}
+
+fn timeline_week_bounds(date: &str) -> Result<(String, String), String> {
+    let selected_date = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
+        .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
+    let days_since_saturday = (selected_date.weekday().num_days_from_sunday() + 1) % 7;
+    let week_start = selected_date - Duration::days(days_since_saturday as i64);
+    let week_end_exclusive = week_start + Duration::days(7);
+
+    Ok((
+        week_start.format("%Y-%m-%d").to_string(),
+        week_end_exclusive.format("%Y-%m-%d").to_string(),
     ))
 }
 
@@ -741,6 +754,18 @@ pub fn timeline_month_summary(
     let (start_date, end_date_exclusive) = timeline_month_bounds(&input.month)?;
 
     db::list_timeline_day_summaries_for_month(&connection, &start_date, &end_date_exclusive)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn timeline_weekly_summary(
+    state: State<'_, AppState>,
+    input: DateInput,
+) -> Result<TimelineWeeklySummary, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    let (start_date, end_date_exclusive) = timeline_week_bounds(&input.date)?;
+
+    db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
         .map_err(|error| error.to_string())
 }
 
@@ -2156,8 +2181,8 @@ mod tests {
         apply_activity_fallback_if_needed, dedupe_prepared_entries, derive_key_status_level,
         llm_attempt_event_status, message_has_explicit_clock_time_cue,
         message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
-        normalize_update_window, round_to_nearest_30, PreparedEntry, TemporalCueType,
-        TemporalReference,
+        normalize_update_window, round_to_nearest_30, timeline_week_bounds, PreparedEntry,
+        TemporalCueType, TemporalReference,
     };
 
     #[test]
@@ -2166,6 +2191,13 @@ mod tests {
         assert_eq!(round_to_nearest_30(15), 30);
         assert_eq!(round_to_nearest_30(44), 30);
         assert_eq!(round_to_nearest_30(45), 60);
+    }
+
+    #[test]
+    fn timeline_week_bounds_uses_saturday_start_and_friday_end() {
+        let (start, end_exclusive) = timeline_week_bounds("2026-03-04").expect("valid bounds");
+        assert_eq!(start, "2026-02-28");
+        assert_eq!(end_exclusive, "2026-03-07");
     }
 
     #[test]
