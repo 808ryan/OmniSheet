@@ -611,9 +611,19 @@ button.danger {
   gap: 0.75rem;
 }
 
+.timeline-date-heading {
+  margin: 0;
+  font-weight: 400;
+}
+
+.timeline-date-heading strong {
+  font-weight: 700;
+}
+
 .timeline-range {
   margin: 0.2rem 0 0;
-  font-size: 0.82rem;
+  font-size: 0.94rem;
+  font-weight: 500;
   color: var(--ink-soft);
 }
 
@@ -621,6 +631,12 @@ button.danger {
   display: flex;
   gap: 0.4rem;
   align-items: center;
+}
+
+.timeline-arrow-button {
+  width: 2.3rem;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .timeline-layout {
