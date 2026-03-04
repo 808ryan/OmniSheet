@@ -17,6 +17,7 @@ import type {
   SettingsStatus,
   TimelineDaySummary,
   TimelineEntry,
+  TimelineWeeklySummary,
   TimelineMonthSummaryInput,
   TimelineUpdateInput,
 } from './types'
@@ -203,6 +204,10 @@ export function timelineMonthSummary(
   input: TimelineMonthSummaryInput,
 ): Promise<TimelineDaySummary[]> {
   return invokeCommand<TimelineDaySummary[]>('timeline_month_summary', { input })
+}
+
+export function timelineWeeklySummary(input: DateInput): Promise<TimelineWeeklySummary> {
+  return invokeCommand<TimelineWeeklySummary>('timeline_weekly_summary', { input })
 }
 
 export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {

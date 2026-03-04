@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::NaiveDate;
 use rusqlite::{params, Connection};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
@@ -10,7 +11,8 @@ use crate::error::{AppError, AppResult};
 use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
     DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, TimelineDaySummary,
-    TimelineEntry, Warning, WarningType,
+    TimelineEntry, TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
+    TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, Warning, WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
@@ -797,6 +799,245 @@ pub fn list_timeline_day_summaries_for_month(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(rows)
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct WeeklySummaryRowKey {
+    engagement_code: String,
+    activity_code: String,
+    activity_name: String,
+    engagement_name: String,
+    client_name: String,
+    is_uncategorized: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WeeklySummaryRowAccumulator {
+    engagement_code: String,
+    activity_code: String,
+    activity_name: String,
+    engagement_name: String,
+    client_name: String,
+    is_uncategorized: bool,
+    day_minutes: [i64; 7],
+    day_notes: [Vec<TimelineWeeklySummaryNote>; 7],
+}
+
+pub fn list_timeline_weekly_summary(
+    conn: &Connection,
+    start_date: &str,
+    end_date_exclusive: &str,
+) -> AppResult<TimelineWeeklySummary> {
+    let week_start = NaiveDate::parse_from_str(start_date, "%Y-%m-%d").map_err(|_| {
+        AppError::InvalidInput("start_date must be in YYYY-MM-DD format".to_string())
+    })?;
+
+    let mut statement = conn.prepare(
+        r#"
+      SELECT
+        te.date,
+        te.start_minute,
+        te.end_minute,
+        te.duration_minutes,
+        te.description,
+        e.code,
+        e.name,
+        e.client,
+        a.code,
+        a.name
+      FROM timesheet_entries te
+      LEFT JOIN engagements e ON e.id = te.engagement_id
+      LEFT JOIN activities a ON a.id = te.activity_id
+      WHERE te.date >= ?1 AND te.date < ?2
+      ORDER BY te.date, te.start_minute, te.id
+    "#,
+    )?;
+
+    let mut rows_by_key: HashMap<WeeklySummaryRowKey, WeeklySummaryRowAccumulator> = HashMap::new();
+
+    let query_rows = statement.query_map(params![start_date, end_date_exclusive], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+        ))
+    })?;
+
+    for row in query_rows {
+        let (
+            date,
+            start_minute,
+            end_minute,
+            duration_minutes,
+            description,
+            engagement_code_raw,
+            engagement_name_raw,
+            client_name_raw,
+            activity_code_raw,
+            activity_name_raw,
+        ) = row?;
+
+        let parsed_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(|_| {
+            AppError::InvalidInput(format!("timesheet entry contains invalid date: {date}"))
+        })?;
+        let day_index = (parsed_date - week_start).num_days();
+        if !(0..=6).contains(&day_index) {
+            continue;
+        }
+        let day_index = day_index as usize;
+
+        let engagement_code_trimmed = engagement_code_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let activity_code_trimmed = activity_code_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let engagement_name_trimmed = engagement_name_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let activity_name_trimmed = activity_name_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let client_name_trimmed = client_name_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let is_uncategorized = engagement_code_trimmed.is_none() || activity_code_trimmed.is_none();
+
+        let engagement_code = engagement_code_trimmed.unwrap_or("UNCAT").to_string();
+        let activity_code = activity_code_trimmed.unwrap_or("UNCAT").to_string();
+        let activity_name = activity_name_trimmed.unwrap_or("Uncategorized").to_string();
+        let engagement_name = engagement_name_trimmed.unwrap_or("Uncategorized").to_string();
+        let client_name = client_name_trimmed.unwrap_or("").to_string();
+
+        let key = WeeklySummaryRowKey {
+            engagement_code: engagement_code.clone(),
+            activity_code: activity_code.clone(),
+            activity_name: activity_name.clone(),
+            engagement_name: engagement_name.clone(),
+            client_name: client_name.clone(),
+            is_uncategorized,
+        };
+
+        let accumulator = rows_by_key
+            .entry(key)
+            .or_insert_with(|| WeeklySummaryRowAccumulator {
+                engagement_code: engagement_code.clone(),
+                activity_code: activity_code.clone(),
+                activity_name: activity_name.clone(),
+                engagement_name: engagement_name.clone(),
+                client_name: client_name.clone(),
+                is_uncategorized,
+                day_minutes: [0; 7],
+                day_notes: std::array::from_fn(|_| Vec::new()),
+            });
+
+        accumulator.day_minutes[day_index] += duration_minutes;
+        accumulator.day_notes[day_index].push(TimelineWeeklySummaryNote {
+            start_minute,
+            end_minute,
+            duration_minutes,
+            description: if description.trim().is_empty() {
+                "No description provided.".to_string()
+            } else {
+                description.trim().to_string()
+            },
+        });
+    }
+
+    let mut rows = rows_by_key
+        .into_values()
+        .map(|accumulator| {
+            let cells = (0..7)
+                .map(|index| TimelineWeeklySummaryCell {
+                    total_minutes: accumulator.day_minutes[index],
+                    notes: accumulator.day_notes[index].clone(),
+                })
+                .collect::<Vec<_>>();
+
+            TimelineWeeklySummaryRow {
+                engagement_code: accumulator.engagement_code,
+                activity_code: accumulator.activity_code,
+                activity_name: accumulator.activity_name,
+                engagement_name: accumulator.engagement_name,
+                client_name: accumulator.client_name,
+                is_uncategorized: accumulator.is_uncategorized,
+                row_total_minutes: accumulator.day_minutes.iter().sum(),
+                cells,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|left, right| {
+        if left.is_uncategorized != right.is_uncategorized {
+            return if left.is_uncategorized {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            };
+        }
+
+        left.engagement_code
+            .to_lowercase()
+            .cmp(&right.engagement_code.to_lowercase())
+            .then_with(|| {
+                left.activity_code
+                    .to_lowercase()
+                    .cmp(&right.activity_code.to_lowercase())
+            })
+            .then_with(|| {
+                left.engagement_name
+                    .to_lowercase()
+                    .cmp(&right.engagement_name.to_lowercase())
+            })
+            .then_with(|| {
+                left.activity_name
+                    .to_lowercase()
+                    .cmp(&right.activity_name.to_lowercase())
+            })
+    });
+
+    let mut day_total_minutes = vec![0; 7];
+    for row in &rows {
+        for (index, cell) in row.cells.iter().enumerate() {
+            day_total_minutes[index] += cell.total_minutes;
+        }
+    }
+    let week_total_minutes = day_total_minutes.iter().sum();
+
+    let days = (0..7)
+        .map(|index| TimelineWeeklySummaryDay {
+            date: (week_start + chrono::Duration::days(index as i64))
+                .format("%Y-%m-%d")
+                .to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    let week_end_date = days
+        .last()
+        .map(|day| day.date.clone())
+        .unwrap_or_else(|| start_date.to_string());
+
+    Ok(TimelineWeeklySummary {
+        week_start_date: start_date.to_string(),
+        week_end_date,
+        days,
+        rows,
+        day_total_minutes,
+        week_total_minutes,
+    })
 }
 
 pub fn list_warning_flags(conn: &Connection, entry_id: &str) -> AppResult<Vec<WarningType>> {

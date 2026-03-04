@@ -121,6 +121,42 @@ export interface TimelineDaySummary {
   totalMinutes: number
 }
 
+export interface TimelineWeeklySummary {
+  weekStartDate: string
+  weekEndDate: string
+  days: TimelineWeeklySummaryDay[]
+  rows: TimelineWeeklySummaryRow[]
+  dayTotalMinutes: number[]
+  weekTotalMinutes: number
+}
+
+export interface TimelineWeeklySummaryDay {
+  date: string
+}
+
+export interface TimelineWeeklySummaryRow {
+  engagementCode: string
+  activityCode: string
+  activityName: string
+  engagementName: string
+  clientName: string
+  isUncategorized: boolean
+  cells: TimelineWeeklySummaryCell[]
+  rowTotalMinutes: number
+}
+
+export interface TimelineWeeklySummaryCell {
+  totalMinutes: number
+  notes: TimelineWeeklySummaryNote[]
+}
+
+export interface TimelineWeeklySummaryNote {
+  startMinute: number
+  endMinute: number
+  durationMinutes: number
+  description: string
+}
+
 export interface TimelineUpdateInput {
   id: string
   engagementId: string | null
