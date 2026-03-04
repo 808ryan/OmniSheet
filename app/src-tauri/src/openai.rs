@@ -52,6 +52,8 @@ Return strict JSON with this shape:
 Temporal inference rules (priority order):
 1) Explicit clock times in the message:
    - Use those times directly (normalized to HH:MM 24-hour format).
+   - If the message includes exactly one explicit clock time plus duration and the phrasing is neutral or start-anchored (for example: "at 6pm", "starting at 6pm", "spend 30 minutes at 6pm"), treat that explicit time as startTime and compute endTime = startTime + durationMinutes.
+   - Only treat an explicit time as endTime when there is clear end-anchor wording (for example: "until 6pm", "ending at 6pm", "finished at 6pm", "done by 6pm").
 2) Contextual day-part cues without explicit clock times (for example: "in the morning", "this afternoon", "tonight"):
    - Use a reasonable time window that matches the cue in the user's local day.
    - For "morning", default to a window between 08:00 and 12:00 local time.
@@ -94,6 +96,10 @@ Examples:
 - Message: "in the morning i spent 30 minutes on a ExampleCo related meeting"
   clientLocalTime: "22:13"
   Expected temporal intent: startTime "09:30", endTime "10:00", durationMinutes 30.
+- Message: "going to spend 30 minutes at 6pm for exampleco"
+  Expected temporal intent: startTime "18:00", endTime "18:30", durationMinutes 30.
+- Message: "finished a 30-minute meeting at 6pm"
+  Expected temporal intent: startTime "17:30", endTime "18:00", durationMinutes 30.
 - Message: "worked on controls testing"
   Expected temporal intent: startTime null, endTime null, durationMinutes null.
 "#
@@ -374,6 +380,24 @@ mod tests {
             "\"in the morning i spent 30 minutes on a ExampleCo related meeting\""
         ));
         assert!(prompt.contains("Expected temporal intent: startTime \"09:30\", endTime \"10:00\", durationMinutes 30."));
+    }
+
+    #[test]
+    fn prompt_disambiguates_single_time_duration_anchor_defaults() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains(
+            "message includes exactly one explicit clock time plus duration"
+        ));
+        assert!(prompt.contains("treat that explicit time as startTime"));
+        assert!(prompt.contains("clear end-anchor wording"));
+        assert!(prompt.contains("\"going to spend 30 minutes at 6pm for exampleco\""));
+        assert!(prompt.contains(
+            "Expected temporal intent: startTime \"18:00\", endTime \"18:30\", durationMinutes 30."
+        ));
+        assert!(prompt.contains("\"finished a 30-minute meeting at 6pm\""));
+        assert!(prompt.contains(
+            "Expected temporal intent: startTime \"17:30\", endTime \"18:00\", durationMinutes 30."
+        ));
     }
 
     #[test]
