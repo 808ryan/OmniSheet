@@ -621,8 +621,9 @@ pub fn settings_set_openai_key(
     let command = "settings_set_openai_key";
     let correlation_id = Uuid::new_v4().to_string();
     let started_at = Instant::now();
+    let trimmed_api_key = input.api_key.trim();
 
-    if input.api_key.trim().is_empty() {
+    if trimmed_api_key.is_empty() {
         let message = "API key cannot be empty";
         record_backend_event_with_state(
             &state,
@@ -641,7 +642,7 @@ pub fn settings_set_openai_key(
     let set_result: AppResult<()> = (|| {
         let entry = keyring_entry()?;
         entry
-            .set_password(input.api_key.trim())
+            .set_password(trimmed_api_key)
             .map_err(|error| AppError::Config(format!("failed to store API key: {error}")))?;
 
         let verified = entry.get_password().map_err(|error| {
@@ -654,7 +655,7 @@ pub fn settings_set_openai_key(
             ));
         }
 
-        if verified.trim() != input.api_key.trim() {
+        if verified.trim() != trimmed_api_key {
             return Err(AppError::Config(
                 "API key storage verification failed: value mismatch".to_string(),
             ));
@@ -666,7 +667,7 @@ pub fn settings_set_openai_key(
     match set_result {
         Ok(()) => {
             if let Ok(mut cache) = state.api_key_cache.lock() {
-                *cache = Some(input.api_key.trim().to_string());
+                *cache = Some(trimmed_api_key.to_string());
             }
 
             record_backend_event_with_state(
@@ -677,23 +678,32 @@ pub fn settings_set_openai_key(
                 "ok",
                 Some(duration_ms(started_at)),
                 None,
-                json!({ "verified": true }),
+                json!({ "verified": true, "keySource": "keyring" }),
             );
             Ok(())
         }
         Err(error) => {
             let message = error.to_string();
+            if let Ok(mut cache) = state.api_key_cache.lock() {
+                *cache = Some(trimmed_api_key.to_string());
+            }
+
             record_backend_event_with_state(
                 &state,
                 &correlation_id,
                 "key_save_verify",
                 command,
-                "error",
+                "warning",
                 Some(duration_ms(started_at)),
                 None,
-                json!({ "message": message }),
+                json!({
+                    "message": message,
+                    "verified": false,
+                    "fallback": "session_cache",
+                    "keySource": "session_cache"
+                }),
             );
-            Err(format_command_error(&correlation_id, message))
+            Ok(())
         }
     }
 }

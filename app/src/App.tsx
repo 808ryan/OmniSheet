@@ -1087,7 +1087,7 @@ function App() {
 
       if (status.statusLevel === 'warning') {
         setSuccessMessage(
-          'OpenAI API key saved. Running from in-memory session key because keyring readback is unavailable.',
+          'OpenAI API key saved for this app session only because OS keyring is unavailable.',
         )
       } else {
         setSuccessMessage('OpenAI API key saved securely.')
