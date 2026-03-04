@@ -34,7 +34,6 @@ import type {
   Activity,
   DiagnosticsEvent,
   Engagement,
-  InterpretResult,
   SettingsStatus,
   TimelineDaySummary,
   TimelineEntry,
@@ -48,10 +47,23 @@ type View = 'timeline' | 'codes' | 'settings' | 'diagnostics' | 'summary'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 
-interface CaptureStatus {
-  state: 'idle' | 'running' | 'success' | 'error'
-  message: string
+type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
+type SubmissionQueueStatusTone = SubmissionQueueItemState | 'idle'
+
+interface SubmissionQueueItem {
+  id: string
+  rawText: string
+  submittedAtMs: number
+  clientTimestampIso: string
+  clientLocalDate: string
+  clientLocalTime: string
+  clientUtcOffsetMinutes: number
+  timezone: string
+  state: SubmissionQueueItemState
+  statusMessage: string
   correlationId?: string
+  createdEntryCount?: number
+  completedAtMs?: number
 }
 
 interface EngagementFormState {
@@ -190,10 +202,8 @@ const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
   startMinute: 0,
   endMinute: MINUTES_IN_DAY,
 }
-const EMPTY_CAPTURE_STATUS: CaptureStatus = {
-  state: 'idle',
-  message: 'No capture submitted yet.',
-}
+const MAX_CONCURRENT_SUBMISSIONS = 5
+const MAX_FINISHED_QUEUE_HISTORY = 10
 const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'codes', label: 'Codes' },
@@ -231,8 +241,8 @@ function App() {
   const [activityForm, setActivityForm] = useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
 
   const [captureMessage, setCaptureMessage] = useState('')
-  const [interpretResult, setInterpretResult] = useState<InterpretResult | null>(null)
-  const [captureStatus, setCaptureStatus] = useState<CaptureStatus>(EMPTY_CAPTURE_STATUS)
+  const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
+  const [isSubmissionQueueOpen, setIsSubmissionQueueOpen] = useState(false)
 
   const [selectedDate, setSelectedDate] = useState(todayDate)
   const [visibleMonth, setVisibleMonth] = useState(() => monthKeyFromDate(todayDate))
@@ -250,7 +260,9 @@ function App() {
   const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
+  const selectedDateRef = useRef(selectedDate)
   const timelineToastIdRef = useRef(0)
+  const inFlightSubmissionIdsRef = useRef<Set<string>>(new Set())
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
@@ -305,6 +317,74 @@ function App() {
       notes: cell.notes,
     }
   }, [summaryNotesModal, weeklySummary])
+  const submissionQueueProcessingCount = useMemo(
+    () => submissionQueue.filter((item) => item.state === 'running').length,
+    [submissionQueue],
+  )
+  const submissionQueuePendingCount = useMemo(
+    () => submissionQueue.filter((item) => item.state === 'pending').length,
+    [submissionQueue],
+  )
+  const submissionQueueDisplayItems = useMemo(() => {
+    const processing = submissionQueue.filter((item) => item.state === 'running')
+    const pending = submissionQueue.filter((item) => item.state === 'pending')
+    const finished = submissionQueue
+      .filter((item) => item.state === 'success' || item.state === 'error')
+      .sort(
+        (left, right) =>
+          (right.completedAtMs ?? right.submittedAtMs) - (left.completedAtMs ?? left.submittedAtMs),
+      )
+
+    return [...processing, ...pending, ...finished]
+  }, [submissionQueue])
+  const latestFinishedSubmission = useMemo(() => {
+    const finished = submissionQueue.filter(
+      (item) => item.state === 'success' || item.state === 'error',
+    )
+    if (finished.length === 0) {
+      return null
+    }
+
+    return finished.reduce((latest, current) => {
+      const latestTimestamp = latest.completedAtMs ?? latest.submittedAtMs
+      const currentTimestamp = current.completedAtMs ?? current.submittedAtMs
+      return currentTimestamp > latestTimestamp ? current : latest
+    })
+  }, [submissionQueue])
+  const submissionQueueStatus = useMemo<{ tone: SubmissionQueueStatusTone; message: string }>(() => {
+    if (submissionQueueProcessingCount > 0) {
+      return {
+        tone: 'running',
+        message: 'Your message is sent and is being processed.',
+      }
+    }
+
+    if (submissionQueuePendingCount > 0) {
+      return {
+        tone: 'pending',
+        message: 'Your message is sent and waiting in the queue.',
+      }
+    }
+
+    if (latestFinishedSubmission?.state === 'success') {
+      return {
+        tone: 'success',
+        message: latestFinishedSubmission.statusMessage,
+      }
+    }
+
+    if (latestFinishedSubmission?.state === 'error') {
+      return {
+        tone: 'error',
+        message: latestFinishedSubmission.statusMessage,
+      }
+    }
+
+    return {
+      tone: 'idle',
+      message: 'No submissions yet.',
+    }
+  }, [latestFinishedSubmission, submissionQueuePendingCount, submissionQueueProcessingCount])
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
   const timelineHeaderDate = useMemo(
@@ -778,86 +858,157 @@ function App() {
     [],
   )
 
-  const onSubmitCapture = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
+  const trimSubmissionQueue = useCallback((items: SubmissionQueueItem[]) => {
+    const activeItems = items.filter((item) => item.state === 'pending' || item.state === 'running')
+    const recentFinishedItems = items
+      .filter((item) => item.state === 'success' || item.state === 'error')
+      .sort(
+        (left, right) =>
+          (right.completedAtMs ?? right.submittedAtMs) - (left.completedAtMs ?? left.submittedAtMs),
+      )
+      .slice(0, MAX_FINISHED_QUEUE_HISTORY)
 
-    void (async () => {
-      const messageToSend = captureMessage
+    return [...activeItems, ...recentFinishedItems]
+  }, [])
 
+  const processSubmissionQueueItem = useCallback(
+    async (item: SubmissionQueueItem) => {
       try {
-        setIsBusy(true)
-        setErrorMessage(null)
-        setSuccessMessage(null)
-        setCaptureStatus({
-          state: 'running',
-          message: 'Submitting message for interpretation...',
-        })
-
-        const submittedAt = new Date()
         const result = await interpretTextMessage({
-          rawText: messageToSend,
-          clientTimestampIso: submittedAt.toISOString(),
-          clientLocalDate: formatDate(submittedAt),
-          clientLocalTime: formatLocalTime(submittedAt),
-          clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+          rawText: item.rawText,
+          clientTimestampIso: item.clientTimestampIso,
+          clientLocalDate: item.clientLocalDate,
+          clientLocalTime: item.clientLocalTime,
+          clientUtcOffsetMinutes: item.clientUtcOffsetMinutes,
+          timezone: item.timezone,
         })
 
-        const selectedDayEntries = await loadTimeline(selectedDate)
-        await loadWeeklySummary(selectedDate)
-        const createdOnSelectedDate = selectedDayEntries.filter((entry) =>
-          result.createdEntryIds.includes(entry.id),
-        ).length
+        const completedAt = Date.now()
+        setSubmissionQueue((previous) =>
+          trimSubmissionQueue(
+            previous.map((candidate) =>
+              candidate.id === item.id
+                ? {
+                    ...candidate,
+                    state: 'success',
+                    statusMessage: formatSubmissionQueueSuccessMessage(
+                      result.createdEntryIds.length,
+                      new Date(completedAt),
+                    ),
+                    correlationId: result.correlationId,
+                    createdEntryCount: result.createdEntryIds.length,
+                    completedAtMs: completedAt,
+                  }
+                : candidate,
+            ),
+          ),
+        )
 
-        setInterpretResult(result)
-        setCaptureMessage('')
-        const normalizationNote =
-          result.normalizationNotes.length > 0
-            ? ` ${result.normalizationNotes[0]}`
-            : ''
-        const multiEventNote = result.containsMultipleEvents
-          ? ` Parsed as ${result.savedEntryCount} events from one message.`
-          : ''
-        const truncationNote = result.truncatedEntryCount > 0
-          ? ` Kept the first ${result.savedEntryCount} events and dropped ${result.truncatedEntryCount}.`
-          : ''
-
-        setCaptureStatus({
-          state: 'success',
-          message:
-            createdOnSelectedDate > 0
-              ? `Interpretation completed. ${createdOnSelectedDate} new timeline entr${createdOnSelectedDate === 1 ? 'y' : 'ies'} on selected day.${normalizationNote}${multiEventNote}${truncationNote}`
-              : `Interpretation completed, but no new entries landed on the selected day.${normalizationNote}${multiEventNote}${truncationNote}`,
-          correlationId: result.correlationId,
-        })
-        setSuccessMessage('Message interpretation finished.')
+        const refreshDate = selectedDateRef.current
         invalidateMonthSummaries(
           result.touchedMonthKeys.length > 0
             ? result.touchedMonthKeys
-            : [monthKeyFromDate(selectedDate)],
+            : [monthKeyFromDate(refreshDate)],
         )
+
+        await Promise.allSettled([
+          loadTimeline(refreshDate),
+          loadWeeklySummary(refreshDate),
+        ])
       } catch (error) {
-        if (isAppCommandError(error)) {
-          setCaptureStatus({
-            state: 'error',
-            message: error.message,
-            correlationId: error.correlationId,
-          })
-          setErrorMessage(
-            `${error.message} (command: ${error.command}, correlationId: ${error.correlationId})`,
-          )
-        } else {
-          const message = (error as Error).message
-          setCaptureStatus({
-            state: 'error',
-            message,
-          })
-          setErrorMessage(message)
-        }
+        const completedAt = Date.now()
+        const correlationId = isAppCommandError(error) ? error.correlationId : undefined
+        setSubmissionQueue((previous) =>
+          trimSubmissionQueue(
+            previous.map((candidate) =>
+              candidate.id === item.id
+                ? {
+                    ...candidate,
+                    state: 'error',
+                    statusMessage: extractErrorMessage(error),
+                    correlationId,
+                    completedAtMs: completedAt,
+                  }
+                : candidate,
+            ),
+          ),
+        )
       } finally {
-        setIsBusy(false)
+        inFlightSubmissionIdsRef.current.delete(item.id)
       }
-    })()
+    },
+    [
+      invalidateMonthSummaries,
+      loadTimeline,
+      loadWeeklySummary,
+      trimSubmissionQueue,
+    ],
+  )
+
+  useEffect(() => {
+    selectedDateRef.current = selectedDate
+  }, [selectedDate])
+
+  useEffect(() => {
+    const availableSlots = MAX_CONCURRENT_SUBMISSIONS - inFlightSubmissionIdsRef.current.size
+    if (availableSlots <= 0) {
+      return
+    }
+
+    const pendingItems = submissionQueue
+      .filter(
+        (item) =>
+          item.state === 'pending' && !inFlightSubmissionIdsRef.current.has(item.id),
+      )
+      .slice(0, availableSlots)
+
+    if (pendingItems.length === 0) {
+      return
+    }
+
+    const pendingIds = new Set(pendingItems.map((item) => item.id))
+    setSubmissionQueue((previous) =>
+      previous.map((item) =>
+        pendingIds.has(item.id)
+          ? {
+              ...item,
+              state: 'running',
+              statusMessage: 'Your message is sent and is being processed.',
+            }
+          : item,
+      ),
+    )
+
+    for (const pendingItem of pendingItems) {
+      inFlightSubmissionIdsRef.current.add(pendingItem.id)
+      void processSubmissionQueueItem(pendingItem)
+    }
+  }, [processSubmissionQueueItem, submissionQueue])
+
+  const onSubmitCapture = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const messageToSend = captureMessage.trim()
+    if (messageToSend.length === 0) {
+      return
+    }
+
+    const submittedAt = new Date()
+    const queueItem: SubmissionQueueItem = {
+      id: generateSubmissionQueueId(),
+      rawText: messageToSend,
+      submittedAtMs: submittedAt.getTime(),
+      clientTimestampIso: submittedAt.toISOString(),
+      clientLocalDate: formatDate(submittedAt),
+      clientLocalTime: formatLocalTime(submittedAt),
+      clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      state: 'pending',
+      statusMessage: 'Queued for processing.',
+    }
+
+    setCaptureMessage('')
+    setSubmissionQueue((previous) => [...previous, queueItem])
+    setIsSubmissionQueueOpen(true)
   }
 
   const onSubmitEngagement = (event: FormEvent<HTMLFormElement>) => {
@@ -1175,21 +1326,10 @@ function App() {
     <div className="app-shell">
       <div className={`workspace-shell ${activeView === 'timeline' ? 'with-timeline' : 'without-timeline'}`}>
         <aside className="sidebar-panel">
-          <div className="sidebar-header">
-            <div>
-              <p className="app-eyebrow">OmniSheet</p>
-              <h1>Capture + Timeline</h1>
-            </div>
-            <div className="sidebar-header-meta">
-              <span>{selectedDate}</span>
-              {isBusy ? <span className="status-chip">Working...</span> : null}
-            </div>
-          </div>
-
           <section className="sidebar-section sidebar-capture">
             <div className="sidebar-section-header">
-              <h2>Capture</h2>
-              <p>Submit a message from any view.</p>
+              <h2>Submit an entry</h2>
+              <p>Submit what you worked on.</p>
             </div>
             <form onSubmit={onSubmitCapture} className="stack">
               <textarea
@@ -1199,44 +1339,66 @@ function App() {
                 rows={4}
                 required
               />
-              <button type="submit" disabled={isBusy || captureMessage.trim().length === 0}>
-                Interpret + Save
+              <button type="submit" disabled={captureMessage.trim().length === 0}>
+                Send
               </button>
             </form>
 
-            <div className={`result-card capture-status compact ${captureStatus.state}`}>
-              <h3>Capture Status</h3>
-              <p>{captureStatus.message}</p>
-              {captureStatus.correlationId ? (
-                <p>
-                  Correlation ID: <code>{captureStatus.correlationId}</code>
-                </p>
-              ) : null}
-              {interpretResult ? (
-                <div className="sidebar-capture-summary">
-                  <p>Entries created: {interpretResult.createdEntryIds.length}</p>
-                  {interpretResult.containsMultipleEvents ? (
-                    <p>
-                      Multi-event capture: {interpretResult.savedEntryCount} events saved from one
-                      message.
-                    </p>
-                  ) : null}
-                  {interpretResult.truncatedEntryCount > 0 ? (
-                    <p>Truncated: {interpretResult.truncatedEntryCount} event(s) dropped (cap: 8).</p>
-                  ) : null}
-                  {interpretResult.warnings.length > 0 ? (
-                    <div className="warning-row">
-                      {interpretResult.warnings.map((warning) => (
-                        <WarningBadge
-                          key={`${warning.entryId}-${warning.warningType}`}
-                          type={warning.warningType}
-                        />
-                      ))}
-                    </div>
-                  ) : null}
+            <div className="submission-queue">
+              <button
+                type="button"
+                className="submission-queue-toggle"
+                aria-expanded={isSubmissionQueueOpen}
+                onClick={() => setIsSubmissionQueueOpen((previous) => !previous)}
+              >
+                <span>Submission Queue</span>
+                <span className="submission-queue-toggle-meta">
+                  {submissionQueueProcessingCount} processing | {submissionQueuePendingCount} queued
+                </span>
+              </button>
+
+              {isSubmissionQueueOpen ? (
+                <div className="submission-queue-list" role="list" aria-label="Submission queue items">
+                  {submissionQueueDisplayItems.length === 0 ? (
+                    <p className="submission-queue-empty">No submissions yet.</p>
+                  ) : (
+                    submissionQueueDisplayItems.map((item) => (
+                      <div key={item.id} className={`submission-queue-item ${item.state}`} role="listitem">
+                        <div className="submission-queue-item-header">
+                          <p className="submission-queue-item-text">{item.rawText}</p>
+                          <span className={`submission-queue-item-badge ${item.state}`}>
+                            {formatSubmissionQueueStateLabel(item.state)}
+                          </span>
+                        </div>
+                        <p className="submission-queue-item-meta">
+                          Submitted {formatSubmissionQueueTimestamp(item.submittedAtMs)}
+                        </p>
+                        <p className="submission-queue-item-status">{item.statusMessage}</p>
+                        {item.state === 'success' && item.createdEntryCount !== undefined ? (
+                          <p className="submission-queue-item-meta">
+                            Entries created: {item.createdEntryCount}
+                          </p>
+                        ) : null}
+                        {item.correlationId ? (
+                          <p className="submission-queue-item-meta">
+                            Correlation ID: <code>{item.correlationId}</code>
+                          </p>
+                        ) : null}
+                      </div>
+                    ))
+                  )}
                 </div>
               ) : null}
             </div>
+
+            <p className={`submission-queue-note ${submissionQueueStatus.tone}`}>
+              {submissionQueueStatus.message}
+            </p>
+            {submissionQueuePendingCount > 0 ? (
+              <p className="submission-queue-note muted">
+                New submissions stay queued once 5 are in-flight.
+              </p>
+            ) : null}
           </section>
 
           <section className="sidebar-section sidebar-calendar">
@@ -2370,6 +2532,52 @@ function formatLocalTime(value: Date): string {
   const hours = `${value.getHours()}`.padStart(2, '0')
   const minutes = `${value.getMinutes()}`.padStart(2, '0')
   return `${hours}:${minutes}`
+}
+
+function generateSubmissionQueueId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+
+  return `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function formatSubmissionQueueStateLabel(state: SubmissionQueueItemState): string {
+  if (state === 'pending') {
+    return 'Queued'
+  }
+
+  if (state === 'running') {
+    return 'Processing'
+  }
+
+  if (state === 'success') {
+    return 'Completed'
+  }
+
+  return 'Failed'
+}
+
+function formatSubmissionQueueSuccessMessage(createdEntryCount: number, completedAt: Date): string {
+  return `Added ${createdEntryCount} new entr${createdEntryCount === 1 ? 'y' : 'ies'} on ${formatSubmissionQueueOutcomeTimestamp(completedAt)}.`
+}
+
+function formatSubmissionQueueOutcomeTimestamp(value: Date): string {
+  const date = new Intl.DateTimeFormat('en-US', {
+    month: 'numeric',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(value)
+  const showMinutes = value.getMinutes() !== 0
+  const time = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: showMinutes ? '2-digit' : undefined,
+  }).format(value)
+  return `${date} at ${time}`
+}
+
+function formatSubmissionQueueTimestamp(timestampMs: number): string {
+  return formatSubmissionQueueOutcomeTimestamp(new Date(timestampMs))
 }
 
 function formatKeySource(value: SettingsStatus['keySource'] | undefined): string {
