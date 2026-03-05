@@ -1295,8 +1295,11 @@ function App() {
                 onClick={() => setIsSubmissionQueueOpen((previous) => !previous)}
               >
                 <span>Submission Queue</span>
-                <span className="submission-queue-toggle-icon" aria-hidden="true">
-                  {isSubmissionQueueOpen ? 'V' : '<'}
+                <span
+                  className={`submission-queue-toggle-icon ${isSubmissionQueueOpen ? 'open' : ''}`}
+                  aria-hidden="true"
+                >
+                  ▾
                 </span>
               </button>
 

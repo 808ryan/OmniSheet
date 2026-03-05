@@ -140,11 +140,17 @@
 }
 
 .submission-queue-toggle-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
   color: var(--ink-soft);
   font-size: 0.82rem;
-  white-space: nowrap;
-  min-width: 1ch;
-  text-align: right;
+  transition: transform 160ms ease, color 160ms ease;
+}
+
+.submission-queue-toggle-icon.open {
+  transform: rotate(180deg);
 }
 
 .submission-queue-list {
