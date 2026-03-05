@@ -48,7 +48,6 @@ type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 
 type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
-type SubmissionQueueStatusTone = SubmissionQueueItemState | 'idle'
 
 interface SubmissionQueueItem {
   id: string
@@ -317,14 +316,6 @@ function App() {
       notes: cell.notes,
     }
   }, [summaryNotesModal, weeklySummary])
-  const submissionQueueProcessingCount = useMemo(
-    () => submissionQueue.filter((item) => item.state === 'running').length,
-    [submissionQueue],
-  )
-  const submissionQueuePendingCount = useMemo(
-    () => submissionQueue.filter((item) => item.state === 'pending').length,
-    [submissionQueue],
-  )
   const submissionQueueDisplayItems = useMemo(() => {
     const processing = submissionQueue.filter((item) => item.state === 'running')
     const pending = submissionQueue.filter((item) => item.state === 'pending')
@@ -337,54 +328,6 @@ function App() {
 
     return [...processing, ...pending, ...finished]
   }, [submissionQueue])
-  const latestFinishedSubmission = useMemo(() => {
-    const finished = submissionQueue.filter(
-      (item) => item.state === 'success' || item.state === 'error',
-    )
-    if (finished.length === 0) {
-      return null
-    }
-
-    return finished.reduce((latest, current) => {
-      const latestTimestamp = latest.completedAtMs ?? latest.submittedAtMs
-      const currentTimestamp = current.completedAtMs ?? current.submittedAtMs
-      return currentTimestamp > latestTimestamp ? current : latest
-    })
-  }, [submissionQueue])
-  const submissionQueueStatus = useMemo<{ tone: SubmissionQueueStatusTone; message: string }>(() => {
-    if (submissionQueueProcessingCount > 0) {
-      return {
-        tone: 'running',
-        message: 'Your message is sent and is being processed.',
-      }
-    }
-
-    if (submissionQueuePendingCount > 0) {
-      return {
-        tone: 'pending',
-        message: 'Your message is sent and waiting in the queue.',
-      }
-    }
-
-    if (latestFinishedSubmission?.state === 'success') {
-      return {
-        tone: 'success',
-        message: latestFinishedSubmission.statusMessage,
-      }
-    }
-
-    if (latestFinishedSubmission?.state === 'error') {
-      return {
-        tone: 'error',
-        message: latestFinishedSubmission.statusMessage,
-      }
-    }
-
-    return {
-      tone: 'idle',
-      message: 'No submissions yet.',
-    }
-  }, [latestFinishedSubmission, submissionQueuePendingCount, submissionQueueProcessingCount])
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
   const timelineHeaderDate = useMemo(
@@ -1352,15 +1295,15 @@ function App() {
                 onClick={() => setIsSubmissionQueueOpen((previous) => !previous)}
               >
                 <span>Submission Queue</span>
-                <span className="submission-queue-toggle-meta">
-                  {submissionQueueProcessingCount} processing | {submissionQueuePendingCount} queued
+                <span className="submission-queue-toggle-icon" aria-hidden="true">
+                  {isSubmissionQueueOpen ? 'V' : '<'}
                 </span>
               </button>
 
               {isSubmissionQueueOpen ? (
                 <div className="submission-queue-list" role="list" aria-label="Submission queue items">
                   {submissionQueueDisplayItems.length === 0 ? (
-                    <p className="submission-queue-empty">No submissions yet.</p>
+                    <p className="submission-queue-empty">Submission queue is empty</p>
                   ) : (
                     submissionQueueDisplayItems.map((item) => (
                       <div key={item.id} className={`submission-queue-item ${item.state}`} role="listitem">
@@ -1390,15 +1333,6 @@ function App() {
                 </div>
               ) : null}
             </div>
-
-            <p className={`submission-queue-note ${submissionQueueStatus.tone}`}>
-              {submissionQueueStatus.message}
-            </p>
-            {submissionQueuePendingCount > 0 ? (
-              <p className="submission-queue-note muted">
-                New submissions stay queued once 5 are in-flight.
-              </p>
-            ) : null}
           </section>
 
           <section className="sidebar-section sidebar-calendar">
