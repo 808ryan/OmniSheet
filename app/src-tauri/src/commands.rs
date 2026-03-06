@@ -22,6 +22,8 @@ use crate::openai;
 use crate::state::AppState;
 
 const MINUTES_IN_DAY: i64 = 24 * 60;
+const TIME_INCREMENT_MINUTES: i64 = 15;
+const DEFAULT_FALLBACK_DURATION_MINUTES: i64 = 30;
 const ACTIVITY_FALLBACK_CONFIDENCE_CAP: f64 = 0.60;
 const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
@@ -1130,7 +1132,9 @@ pub async fn interpret_text_message(
         fallback_count += 1;
         let note = format!(
             "No LLM entries returned. Defaulted to {} - {} based on capture time.",
-            minute_to_hhmm((temporal_reference.rounded_end_minute - 30).max(0)),
+            minute_to_hhmm(
+                (temporal_reference.rounded_end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0),
+            ),
             minute_to_hhmm(temporal_reference.rounded_end_minute)
         );
         normalization_notes.push(note.clone());
@@ -1141,7 +1145,7 @@ pub async fn interpret_text_message(
           "temporalSource": "fallback",
           "durationDefaulted": false,
           "savedDate": temporal_reference.local_date.format("%Y-%m-%d").to_string(),
-          "savedStartMinute": (temporal_reference.rounded_end_minute - 30).max(0),
+          "savedStartMinute": (temporal_reference.rounded_end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0),
           "savedEndMinute": temporal_reference.rounded_end_minute,
           "llmChosenActivityCode": null,
           "llmActivityReason": null,
@@ -1479,8 +1483,8 @@ fn build_temporal_reference(
         parse_date(input.client_local_date.trim()).unwrap_or_else(|| parsed_timestamp.date_naive());
     let local_time =
         parse_time(input.client_local_time.trim()).unwrap_or_else(|| parsed_timestamp.time());
-    let rounded_end_minute =
-        round_to_nearest_30(minutes_from_time(local_time) as i64).clamp(30, MINUTES_IN_DAY);
+    let rounded_end_minute = round_to_nearest_15(minutes_from_time(local_time) as i64)
+        .clamp(TIME_INCREMENT_MINUTES, MINUTES_IN_DAY);
 
     TemporalReference {
         local_date,
@@ -1491,7 +1495,7 @@ fn build_temporal_reference(
 fn fallback_entry(reference: &TemporalReference, raw_text: &str) -> NormalizedEntry {
     let date = reference.local_date.format("%Y-%m-%d").to_string();
     let end_minute = reference.rounded_end_minute;
-    let start_minute = (end_minute - 30).max(0);
+    let start_minute = (end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0);
 
     NormalizedEntry {
         date,
@@ -1564,12 +1568,12 @@ fn normalize_llm_entry(
     let parsed_start = raw_start.as_deref().and_then(parse_time_to_minutes);
     let parsed_end = raw_end.as_deref().and_then(parse_time_to_minutes);
 
-    let fallback_start = (reference.rounded_end_minute - 30).max(0);
+    let fallback_start = (reference.rounded_end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0);
     let fallback_end = reference.rounded_end_minute;
     let normalized_duration = raw_duration
         .filter(|value| *value > 0)
         .map(normalize_duration)
-        .unwrap_or(30);
+        .unwrap_or(DEFAULT_FALLBACK_DURATION_MINUTES);
 
     let has_invalid_duration = matches!(raw_duration, Some(value) if value <= 0);
     let duration_defaulted =
@@ -2109,8 +2113,12 @@ fn minutes_from_time(value: NaiveTime) -> u32 {
     value.hour() * 60 + value.minute()
 }
 
-fn round_to_nearest_30(value: i64) -> i64 {
-    ((value as f64 / 30.0).round() as i64) * 30
+fn round_to_nearest_increment(value: i64, increment: i64) -> i64 {
+    ((value as f64 / increment as f64).round() as i64) * increment
+}
+
+fn round_to_nearest_15(value: i64) -> i64 {
+    round_to_nearest_increment(value, TIME_INCREMENT_MINUTES)
 }
 
 fn minute_to_hhmm(value: i64) -> String {
@@ -2126,8 +2134,8 @@ fn minute_to_hhmm(value: i64) -> String {
 }
 
 fn normalize_duration(duration: i64) -> i64 {
-    let rounded = round_to_nearest_30(duration.max(30));
-    rounded.clamp(30, MINUTES_IN_DAY)
+    let rounded = round_to_nearest_15(duration.max(TIME_INCREMENT_MINUTES));
+    rounded.clamp(TIME_INCREMENT_MINUTES, MINUTES_IN_DAY)
 }
 
 fn normalize_confidence(raw_value: Option<f64>) -> f64 {
@@ -2147,18 +2155,20 @@ fn normalize_confidence(raw_value: Option<f64>) -> f64 {
 }
 
 fn normalize_update_window(start_minute: i64, end_minute: i64) -> (i64, i64, i64) {
-    let mut normalized_start = round_to_nearest_30(start_minute).clamp(0, MINUTES_IN_DAY);
-    let mut normalized_end = round_to_nearest_30(end_minute).clamp(0, MINUTES_IN_DAY);
+    let mut normalized_start = round_to_nearest_15(start_minute).clamp(0, MINUTES_IN_DAY);
+    let mut normalized_end = round_to_nearest_15(end_minute).clamp(0, MINUTES_IN_DAY);
 
     if normalized_end <= normalized_start {
-        normalized_end = (normalized_start + 30).min(MINUTES_IN_DAY);
+        normalized_end = (normalized_start + TIME_INCREMENT_MINUTES).min(MINUTES_IN_DAY);
     }
 
-    if normalized_end == MINUTES_IN_DAY && normalized_end - normalized_start < 30 {
-        normalized_start = (MINUTES_IN_DAY - 30).max(0);
+    if normalized_end == MINUTES_IN_DAY
+        && normalized_end - normalized_start < TIME_INCREMENT_MINUTES
+    {
+        normalized_start = (MINUTES_IN_DAY - TIME_INCREMENT_MINUTES).max(0);
     }
 
-    let duration_minutes = (normalized_end - normalized_start).max(30);
+    let duration_minutes = (normalized_end - normalized_start).max(TIME_INCREMENT_MINUTES);
     (normalized_start, normalized_end, duration_minutes)
 }
 
@@ -2191,16 +2201,16 @@ mod tests {
         apply_activity_fallback_if_needed, dedupe_prepared_entries, derive_key_status_level,
         llm_attempt_event_status, message_has_explicit_clock_time_cue,
         message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
-        normalize_update_window, round_to_nearest_30, timeline_week_bounds, PreparedEntry,
+        normalize_update_window, round_to_nearest_15, timeline_week_bounds, PreparedEntry,
         TemporalCueType, TemporalReference,
     };
 
     #[test]
-    fn rounds_to_nearest_half_hour() {
-        assert_eq!(round_to_nearest_30(14), 0);
-        assert_eq!(round_to_nearest_30(15), 30);
-        assert_eq!(round_to_nearest_30(44), 30);
-        assert_eq!(round_to_nearest_30(45), 60);
+    fn rounds_to_nearest_quarter_hour() {
+        assert_eq!(round_to_nearest_15(7), 0);
+        assert_eq!(round_to_nearest_15(8), 15);
+        assert_eq!(round_to_nearest_15(44), 45);
+        assert_eq!(round_to_nearest_15(53), 60);
     }
 
     #[test]
@@ -2211,19 +2221,19 @@ mod tests {
     }
 
     #[test]
-    fn update_window_enforces_minimum_half_hour() {
+    fn update_window_enforces_minimum_quarter_hour() {
         let (start, end, duration) = normalize_update_window(150, 150);
         assert_eq!(start, 150);
-        assert_eq!(end, 180);
-        assert_eq!(duration, 30);
+        assert_eq!(end, 165);
+        assert_eq!(duration, 15);
     }
 
     #[test]
     fn update_window_clamps_to_day_end() {
         let (start, end, duration) = normalize_update_window(1439, 1600);
-        assert_eq!(start, 1410);
+        assert_eq!(start, 1425);
         assert_eq!(end, 1440);
-        assert_eq!(duration, 30);
+        assert_eq!(duration, 15);
     }
 
     #[test]
@@ -2353,6 +2363,39 @@ mod tests {
     }
 
     #[test]
+    fn normalization_preserves_quarter_hour_duration() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-15".to_string()),
+            start_time: Some("12:00".to_string()),
+            end_time: None,
+            duration_minutes: Some(15),
+            description: Some("Quick check-in".to_string()),
+            activity_reason: None,
+            alternative_activities: None,
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date"),
+            rounded_end_minute: 1320,
+        };
+
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "fallback",
+            TemporalCueType::ExplicitClock,
+        );
+
+        assert!(!result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
+        assert_eq!(result.entry.start_minute, 720);
+        assert_eq!(result.entry.end_minute, 735);
+        assert_eq!(result.entry.duration_minutes, 15);
+    }
+
+    #[test]
     fn normalization_keeps_explicit_clock_times() {
         let entry = LlmEntry {
             engagement_code: Some("E-123".to_string()),
@@ -2444,8 +2487,8 @@ mod tests {
         );
 
         assert!(!result.used_temporal_fallback);
-        assert_eq!(result.entry.start_minute, 1260);
-        assert_eq!(result.entry.end_minute, 1320);
+        assert_eq!(result.entry.start_minute, 1245);
+        assert_eq!(result.entry.end_minute, 1305);
         assert_eq!(result.entry.duration_minutes, 60);
     }
 
