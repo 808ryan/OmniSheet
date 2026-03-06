@@ -774,6 +774,7 @@ button.danger {
   cursor: grab;
   user-select: none;
   touch-action: none;
+  z-index: 2;
 }
 
 .timeline-block:hover {
@@ -788,6 +789,16 @@ button.danger {
   outline: 2px solid #facc15;
 }
 
+.timeline-block.drag-origin-ghost {
+  opacity: 0.34;
+  filter: saturate(0.52) brightness(0.98);
+  box-shadow: none;
+  transform: none;
+  transition: none;
+  pointer-events: none;
+  z-index: 1;
+}
+
 .timeline-block.drag-preview {
   border-width: 2px;
   border-style: dashed;
@@ -797,6 +808,7 @@ button.danger {
   transform: none;
   transition: none;
   pointer-events: none;
+  z-index: 3;
 }
 
 .timeline-block-label {

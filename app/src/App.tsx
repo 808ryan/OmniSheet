@@ -169,6 +169,7 @@ interface TimelineDragState {
   entryId: string
   pointerId: number
   initialClientY: number
+  lockedLaneIndex: number
   pointerOffsetMinutes: number
   durationMinutes: number
   originalStartMinute: number
@@ -181,6 +182,13 @@ interface TimelineDragState {
 interface SummaryNotesModalState {
   rowIndex: number
   dayIndex: number
+}
+
+interface PositionTimelineEntriesOptions {
+  lockedEntryId?: string
+  lockedLaneIndex?: number
+  preferredLaneByEntryId?: Map<string, number>
+  preferredLaneOrder?: string[]
 }
 
 interface RunActionOptions {
@@ -271,6 +279,10 @@ function App() {
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
   const [timelineToast, setTimelineToast] = useState<TimelineToast | null>(null)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
+  const [timelineLanePreferences, setTimelineLanePreferences] = useState(() => ({
+    byEntryId: new Map<string, number>(),
+    order: [] as string[],
+  }))
   const [monthSummaryCache, setMonthSummaryCache] = useState<MonthSummaryCache>({})
   const [monthSummaryLoadingMonth, setMonthSummaryLoadingMonth] = useState<string | null>(null)
   const [monthSummaryError, setMonthSummaryError] = useState<string | null>(null)
@@ -364,14 +376,55 @@ function App() {
       + TIMELINE_CANVAS_TOP_PADDING
       + TIMELINE_CANVAS_BOTTOM_PADDING
   )
+  const timelinePositioningPreferences = useMemo(
+    () => ({
+      preferredLaneByEntryId: timelineLanePreferences.byEntryId,
+      preferredLaneOrder: timelineLanePreferences.order,
+    }),
+    [timelineLanePreferences],
+  )
+  const baselinePositionedTimelineEntries = useMemo(
+    () => positionTimelineEntries(
+      timelineEntries,
+      timelineWindow,
+      timelinePositioningPreferences,
+    ),
+    [timelineEntries, timelinePositioningPreferences, timelineWindow],
+  )
   const timelineEntriesForLayout = useMemo(
     () => applyDragPreviewToTimelineEntries(timelineEntries, timelineDragState),
     [timelineDragState, timelineEntries],
   )
-  const positionedTimelineEntries = useMemo(
-    () => positionTimelineEntries(timelineEntriesForLayout, timelineWindow),
-    [timelineEntriesForLayout, timelineWindow],
+  const previewPositionedTimelineEntries = useMemo(
+    () => positionTimelineEntries(
+      timelineEntriesForLayout,
+      timelineWindow,
+      {
+        ...timelinePositioningPreferences,
+        ...(timelineDragState?.isDragging
+          ? {
+            lockedEntryId: timelineDragState.entryId,
+            lockedLaneIndex: timelineDragState.lockedLaneIndex,
+          }
+          : {}),
+      },
+    ),
+    [
+      timelineDragState,
+      timelineEntriesForLayout,
+      timelinePositioningPreferences,
+      timelineWindow,
+    ],
   )
+  const draggedEntryOriginPosition = useMemo(() => {
+    if (!timelineDragState?.isDragging) {
+      return null
+    }
+
+    return baselinePositionedTimelineEntries.find(
+      (positionedEntry) => positionedEntry.entry.id === timelineDragState.entryId,
+    ) ?? null
+  }, [baselinePositionedTimelineEntries, timelineDragState])
 
   const timelineHourMarks = useMemo(() => {
     const marks: number[] = []
@@ -735,13 +788,13 @@ function App() {
     }
 
     const frame = window.requestAnimationFrame(() => {
-      if (positionedTimelineEntries.length === 0) {
+      if (baselinePositionedTimelineEntries.length === 0) {
         grid.scrollTop = 0
         pendingAutoCenterDateRef.current = null
         return
       }
 
-      const earliestEntry = positionedTimelineEntries.reduce((earliest, current) =>
+      const earliestEntry = baselinePositionedTimelineEntries.reduce((earliest, current) =>
         current.top < earliest.top ? current : earliest,
       )
       const targetTop = (
@@ -762,7 +815,7 @@ function App() {
     return () => {
       window.cancelAnimationFrame(frame)
     }
-  }, [activeView, positionedTimelineEntries, selectedDate])
+  }, [activeView, baselinePositionedTimelineEntries, selectedDate])
 
   useEffect(() => {
     if (!successMessage) {
@@ -868,6 +921,19 @@ function App() {
           description: draggedEntry.description,
         })
 
+        setTimelineLanePreferences((previous) => {
+          const nextByEntryId = new Map(previous.byEntryId)
+          nextByEntryId.set(draggedEntry.id, dragState.lockedLaneIndex)
+          const nextOrder = [
+            ...previous.order.filter((entryId) => entryId !== draggedEntry.id),
+            draggedEntry.id,
+          ]
+          return {
+            byEntryId: nextByEntryId,
+            order: nextOrder,
+          }
+        })
+
         await loadTimeline(selectedDateRef.current)
         await loadWeeklySummary(selectedDateRef.current)
         invalidateMonthSummaries([monthKey])
@@ -883,7 +949,13 @@ function App() {
         setSuccessMessage('Timeline entry moved.')
       })
     },
-    [invalidateMonthSummaries, loadTimeline, loadWeeklySummary, runAction],
+    [
+      invalidateMonthSummaries,
+      loadTimeline,
+      loadWeeklySummary,
+      runAction,
+      setTimelineLanePreferences,
+    ],
   )
 
   const trimSubmissionQueue = useCallback((items: SubmissionQueueItem[]) => {
@@ -979,6 +1051,35 @@ function App() {
 
   useEffect(() => {
     timelineEntriesRef.current = timelineEntries
+  }, [timelineEntries])
+
+  useEffect(() => {
+    const presentEntryIds = new Set(timelineEntries.map((entry) => entry.id))
+    setTimelineLanePreferences((previous) => {
+      let changed = false
+      const nextByEntryId = new Map<string, number>()
+      for (const [entryId, laneIndex] of previous.byEntryId.entries()) {
+        if (presentEntryIds.has(entryId)) {
+          nextByEntryId.set(entryId, laneIndex)
+        } else {
+          changed = true
+        }
+      }
+
+      const nextOrder = previous.order.filter((entryId) => presentEntryIds.has(entryId))
+      if (nextOrder.length !== previous.order.length) {
+        changed = true
+      }
+
+      if (!changed) {
+        return previous
+      }
+
+      return {
+        byEntryId: nextByEntryId,
+        order: nextOrder,
+      }
+    })
   }, [timelineEntries])
 
   const activeTimelineDragPointerId = timelineDragState?.pointerId ?? null
@@ -1324,11 +1425,15 @@ function App() {
     event.preventDefault()
     suppressTimelineClickRef.current = false
     onSelectEntry(entry)
+    const lockedLaneIndex = baselinePositionedTimelineEntries.find(
+      (positionedEntry) => positionedEntry.entry.id === entry.id,
+    )?.laneIndex ?? 0
 
     setTimelineDragStateWithRef(() => ({
       entryId: entry.id,
       pointerId: event.pointerId,
       initialClientY: event.clientY,
+      lockedLaneIndex,
       pointerOffsetMinutes,
       durationMinutes,
       originalStartMinute: entry.startMinute,
@@ -1720,7 +1825,39 @@ function App() {
                   ))}
 
                   <div className="timeline-entry-layer">
-                    {positionedTimelineEntries.map((positionedEntry) => {
+                    {draggedEntryOriginPosition
+                      ? (() => {
+                        const ghostEntry = draggedEntryOriginPosition.entry
+                        const ghostColor = resolveTimelineBlockColor(
+                          ghostEntry,
+                          activityColorById,
+                          engagementColorById,
+                        )
+                        const ghostLabel = buildTimelineBlockLabel(
+                          ghostEntry,
+                          draggedEntryOriginPosition.widthPercent,
+                          draggedEntryOriginPosition.height,
+                        )
+
+                        return (
+                          <div
+                            className={`timeline-block drag-origin-ghost tier-${ghostLabel.tier}`}
+                            style={{
+                              top: draggedEntryOriginPosition.top,
+                              height: draggedEntryOriginPosition.height,
+                              left: `${draggedEntryOriginPosition.leftPercent}%`,
+                              width: `${draggedEntryOriginPosition.widthPercent}%`,
+                              backgroundColor: ghostColor,
+                              color: colorForBackground(ghostColor),
+                            }}
+                            aria-hidden="true"
+                          >
+                            <span className="timeline-block-label">{ghostLabel.label}</span>
+                          </div>
+                        )
+                      })()
+                      : null}
+                    {previewPositionedTimelineEntries.map((positionedEntry) => {
                       const { entry } = positionedEntry
                       const blockColor = resolveTimelineBlockColor(
                         entry,
@@ -3064,6 +3201,7 @@ function clientYToTimelineMinute(
 function positionTimelineEntries(
   entries: TimelineEntry[],
   timelineWindow: TimelineWindow,
+  options?: PositionTimelineEntriesOptions,
 ): PositionedTimelineEntry[] {
   const clippedEntries: ClippedTimelineEntry[] = entries
     .map((entry) => {
@@ -3134,11 +3272,92 @@ function positionTimelineEntries(
 
   for (const group of groups) {
     const laneCount = Math.max(...group.map((entry) => entry.laneIndex)) + 1
+    let layoutGroup = group
+    const preferredLaneByEntryId = options?.preferredLaneByEntryId
+    const preferredLaneOrder = options?.preferredLaneOrder ?? []
+
+    if (
+      preferredLaneByEntryId
+      && preferredLaneByEntryId.size > 0
+      && preferredLaneOrder.length > 0
+    ) {
+      const groupEntryIds = new Set(group.map((entry) => entry.entry.id))
+      const orderedGroupEntryIds = preferredLaneOrder.filter((entryId) => groupEntryIds.has(entryId))
+
+      for (const entryId of orderedGroupEntryIds) {
+        const preferredLaneIndex = preferredLaneByEntryId.get(entryId)
+        if (
+          typeof preferredLaneIndex !== 'number'
+          || preferredLaneIndex < 0
+          || preferredLaneIndex >= laneCount
+        ) {
+          continue
+        }
+
+        const preferredEntry = layoutGroup.find((entry) => entry.entry.id === entryId) ?? null
+        if (!preferredEntry || preferredEntry.laneIndex === preferredLaneIndex) {
+          continue
+        }
+
+        const currentLaneIndex = preferredEntry.laneIndex
+        layoutGroup = layoutGroup.map((groupEntry) => {
+          if (groupEntry.entry.id === entryId) {
+            return {
+              ...groupEntry,
+              laneIndex: preferredLaneIndex,
+            }
+          }
+
+          if (groupEntry.laneIndex === preferredLaneIndex) {
+            return {
+              ...groupEntry,
+              laneIndex: currentLaneIndex,
+            }
+          }
+
+          return groupEntry
+        })
+      }
+    }
+
+    const lockedEntryId = options?.lockedEntryId
+    const lockedLaneIndex = options?.lockedLaneIndex
+    const lockedEntry = lockedEntryId
+      ? layoutGroup.find((entry) => entry.entry.id === lockedEntryId) ?? null
+      : null
+
+    if (
+      lockedEntry
+      && typeof lockedLaneIndex === 'number'
+      && lockedLaneIndex >= 0
+      && lockedLaneIndex < laneCount
+      && lockedEntry.laneIndex !== lockedLaneIndex
+    ) {
+      const currentLaneIndex = lockedEntry.laneIndex
+      layoutGroup = layoutGroup.map((groupEntry) => {
+        if (groupEntry.entry.id === lockedEntry.entry.id) {
+          return {
+            ...groupEntry,
+            laneIndex: lockedLaneIndex,
+          }
+        }
+
+        if (groupEntry.laneIndex === lockedLaneIndex) {
+          return {
+            ...groupEntry,
+            laneIndex: currentLaneIndex,
+          }
+        }
+
+        return groupEntry
+      })
+    }
+
     const laneGapPercent = laneCount > 1 ? TIMELINE_OVERLAP_GAP_PERCENT : 0
     const totalGapPercent = laneGapPercent * Math.max(0, laneCount - 1)
     const widthPercent = (100 - totalGapPercent) / laneCount
 
-    for (const groupEntry of group) {
+    for (const groupEntry of layoutGroup) {
       positionedEntries.push({
         ...groupEntry,
         laneCount,
