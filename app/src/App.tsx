@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent, MouseEvent as ReactMouseEvent } from 'react'
+import type {
+  FormEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react'
 import { createPortal } from 'react-dom'
 
 import {
@@ -161,6 +165,19 @@ interface TimelineToast {
   message: string
 }
 
+interface TimelineDragState {
+  entryId: string
+  pointerId: number
+  initialClientY: number
+  pointerOffsetMinutes: number
+  durationMinutes: number
+  originalStartMinute: number
+  originalEndMinute: number
+  previewStartMinute: number
+  previewEndMinute: number
+  isDragging: boolean
+}
+
 interface SummaryNotesModalState {
   rowIndex: number
   dayIndex: number
@@ -197,6 +214,8 @@ const TIMELINE_CANVAS_TOP_PADDING = 18
 const TIMELINE_CANVAS_BOTTOM_PADDING = 20
 const TIMELINE_OVERLAP_GAP_PERCENT = 1.2
 const TIMELINE_NEUTRAL_COLOR = '#6F7B89'
+const TIMELINE_DRAG_SNAP_MINUTES = 15
+const TIMELINE_DRAG_ACTIVATION_PX = 4
 const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
   startMinute: 0,
   endMinute: MINUTES_IN_DAY,
@@ -251,6 +270,7 @@ function App() {
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
   const [timelineToast, setTimelineToast] = useState<TimelineToast | null>(null)
+  const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
   const [monthSummaryCache, setMonthSummaryCache] = useState<MonthSummaryCache>({})
   const [monthSummaryLoadingMonth, setMonthSummaryLoadingMonth] = useState<string | null>(null)
   const [monthSummaryError, setMonthSummaryError] = useState<string | null>(null)
@@ -261,6 +281,9 @@ function App() {
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
   const selectedDateRef = useRef(selectedDate)
   const timelineToastIdRef = useRef(0)
+  const timelineDragStateRef = useRef<TimelineDragState | null>(null)
+  const timelineEntriesRef = useRef<TimelineEntry[]>([])
+  const suppressTimelineClickRef = useRef(false)
   const inFlightSubmissionIdsRef = useRef<Set<string>>(new Set())
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
@@ -341,9 +364,13 @@ function App() {
       + TIMELINE_CANVAS_TOP_PADDING
       + TIMELINE_CANVAS_BOTTOM_PADDING
   )
+  const timelineEntriesForLayout = useMemo(
+    () => applyDragPreviewToTimelineEntries(timelineEntries, timelineDragState),
+    [timelineDragState, timelineEntries],
+  )
   const positionedTimelineEntries = useMemo(
-    () => positionTimelineEntries(timelineEntries, timelineWindow),
-    [timelineEntries, timelineWindow],
+    () => positionTimelineEntries(timelineEntriesForLayout, timelineWindow),
+    [timelineEntriesForLayout, timelineWindow],
   )
 
   const timelineHourMarks = useMemo(() => {
@@ -801,6 +828,64 @@ function App() {
     [],
   )
 
+  const setTimelineDragStateWithRef = useCallback(
+    (updater: (previous: TimelineDragState | null) => TimelineDragState | null) => {
+      setTimelineDragState((previous) => {
+        const next = updater(previous)
+        timelineDragStateRef.current = next
+        return next
+      })
+    },
+    [],
+  )
+
+  const commitTimelineDragDrop = useCallback(
+    (dragState: TimelineDragState) => {
+      const draggedEntry = timelineEntriesRef.current.find((entry) => entry.id === dragState.entryId) ?? null
+      if (!draggedEntry) {
+        return
+      }
+
+      const hasMoved =
+        dragState.previewStartMinute !== dragState.originalStartMinute
+        || dragState.previewEndMinute !== dragState.originalEndMinute
+      if (!hasMoved) {
+        return
+      }
+
+      const monthKey = monthKeyFromDate(draggedEntry.date)
+      const nextStartMinute = dragState.previewStartMinute
+      const nextEndMinute = dragState.previewEndMinute
+
+      void runAction(async () => {
+        await timelineUpdateEntry({
+          id: draggedEntry.id,
+          engagementId: draggedEntry.engagementId,
+          activityId: draggedEntry.activityId,
+          date: draggedEntry.date,
+          startMinute: nextStartMinute,
+          endMinute: nextEndMinute,
+          description: draggedEntry.description,
+        })
+
+        await loadTimeline(selectedDateRef.current)
+        await loadWeeklySummary(selectedDateRef.current)
+        invalidateMonthSummaries([monthKey])
+        setEntryDraft((previous) =>
+          previous && previous.id === draggedEntry.id
+            ? {
+                ...previous,
+                startTime: minuteToTimeInput(nextStartMinute),
+                endTime: minuteToTimeInput(nextEndMinute),
+              }
+            : previous,
+        )
+        setSuccessMessage('Timeline entry moved.')
+      })
+    },
+    [invalidateMonthSummaries, loadTimeline, loadWeeklySummary, runAction],
+  )
+
   const trimSubmissionQueue = useCallback((items: SubmissionQueueItem[]) => {
     const activeItems = items.filter((item) => item.state === 'pending' || item.state === 'running')
     const recentFinishedItems = items
@@ -891,6 +976,123 @@ function App() {
   useEffect(() => {
     selectedDateRef.current = selectedDate
   }, [selectedDate])
+
+  useEffect(() => {
+    timelineEntriesRef.current = timelineEntries
+  }, [timelineEntries])
+
+  const activeTimelineDragPointerId = timelineDragState?.pointerId ?? null
+
+  useEffect(() => {
+    if (activeTimelineDragPointerId === null) {
+      return
+    }
+
+    const finishDrag = (pointerId: number, shouldCommit: boolean) => {
+      const current = timelineDragStateRef.current
+      if (!current || current.pointerId !== pointerId) {
+        return
+      }
+
+      if (current.isDragging) {
+        suppressTimelineClickRef.current = true
+      }
+      setTimelineDragStateWithRef(() => null)
+
+      if (shouldCommit && current.isDragging) {
+        commitTimelineDragDrop(current)
+      }
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const current = timelineDragStateRef.current
+      if (!current || event.pointerId !== current.pointerId) {
+        return
+      }
+
+      const grid = timelineGridRef.current
+      if (!grid) {
+        return
+      }
+
+      if (
+        !current.isDragging
+        && Math.abs(event.clientY - current.initialClientY) < TIMELINE_DRAG_ACTIVATION_PX
+      ) {
+        return
+      }
+
+      const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+      const rawStartMinute = pointerMinute - current.pointerOffsetMinutes
+      const snappedStartMinute = snapMinute(rawStartMinute, TIMELINE_DRAG_SNAP_MINUTES)
+      const clampedStartMinute = clampStartMinuteForDuration(
+        snappedStartMinute,
+        current.durationMinutes,
+        timelineWindow,
+      )
+      const nextEndMinute = clampedStartMinute + current.durationMinutes
+
+      setTimelineDragStateWithRef((previous) => {
+        if (!previous || previous.pointerId !== event.pointerId) {
+          return previous
+        }
+
+        if (
+          previous.isDragging
+          && previous.previewStartMinute === clampedStartMinute
+          && previous.previewEndMinute === nextEndMinute
+        ) {
+          return previous
+        }
+
+        return {
+          ...previous,
+          isDragging: true,
+          previewStartMinute: clampedStartMinute,
+          previewEndMinute: nextEndMinute,
+        }
+      })
+    }
+
+    const handlePointerUp = (event: PointerEvent) => {
+      finishDrag(event.pointerId, true)
+    }
+
+    const handlePointerCancel = (event: PointerEvent) => {
+      finishDrag(event.pointerId, false)
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+
+      const current = timelineDragStateRef.current
+      if (!current) {
+        return
+      }
+
+      event.preventDefault()
+      finishDrag(current.pointerId, false)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerCancel)
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerCancel)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [
+    activeTimelineDragPointerId,
+    commitTimelineDragDrop,
+    setTimelineDragStateWithRef,
+    timelineWindow,
+  ])
 
   useEffect(() => {
     const availableSlots = MAX_CONCURRENT_SUBMISSIONS - inFlightSubmissionIdsRef.current.size
@@ -1062,6 +1264,7 @@ function App() {
     setSelectedEntryId(null)
     setEntryDraft(null)
     setTimelineContextMenu(null)
+    setTimelineDragStateWithRef(() => null)
   }
 
   const onJumpToToday = () => {
@@ -1084,6 +1287,56 @@ function App() {
       startTime: minuteToTimeInput(entry.startMinute),
       endTime: minuteToTimeInput(entry.endMinute),
     })
+  }
+
+  const onSelectTimelineBlock = (entry: TimelineEntry) => {
+    if (suppressTimelineClickRef.current) {
+      suppressTimelineClickRef.current = false
+      return
+    }
+
+    onSelectEntry(entry)
+  }
+
+  const onStartTimelineDrag = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    entry: TimelineEntry,
+  ) => {
+    if (event.button !== 0 || isBusy || isTimelineLoading || isTimelineDeleteBusy) {
+      return
+    }
+
+    const grid = timelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const durationMinutes = Math.max(
+      entry.endMinute - entry.startMinute,
+      TIMELINE_DRAG_SNAP_MINUTES,
+    )
+    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    const pointerOffsetMinutes = Math.min(
+      durationMinutes,
+      Math.max(0, pointerMinute - entry.startMinute),
+    )
+
+    event.preventDefault()
+    suppressTimelineClickRef.current = false
+    onSelectEntry(entry)
+
+    setTimelineDragStateWithRef(() => ({
+      entryId: entry.id,
+      pointerId: event.pointerId,
+      initialClientY: event.clientY,
+      pointerOffsetMinutes,
+      durationMinutes,
+      originalStartMinute: entry.startMinute,
+      originalEndMinute: entry.endMinute,
+      previewStartMinute: entry.startMinute,
+      previewEndMinute: entry.endMinute,
+      isDragging: false,
+    }))
   }
 
   const onOpenTimelineContextMenu = (
@@ -1442,7 +1695,7 @@ function App() {
 
             <div className="timeline-layout">
               <div
-                className="timeline-grid"
+                className={`timeline-grid ${timelineDragState?.isDragging ? 'dragging' : ''}`}
                 role="list"
                 aria-label="Timeline entries"
                 aria-busy={isTimelineLoading}
@@ -1479,7 +1732,29 @@ function App() {
                         positionedEntry.widthPercent,
                         positionedEntry.height,
                       )
+                      const isDragPreview =
+                        timelineDragState?.isDragging
+                        && timelineDragState.entryId === entry.id
                       const textColor = colorForBackground(blockColor)
+
+                      if (isDragPreview) {
+                        return (
+                          <div
+                            key={entry.id}
+                            className={`timeline-block drag-preview tier-${blockLabel.tier}`}
+                            style={{
+                              top: positionedEntry.top,
+                              height: positionedEntry.height,
+                              left: `${positionedEntry.leftPercent}%`,
+                              width: `${positionedEntry.widthPercent}%`,
+                              borderColor: blockColor,
+                            }}
+                            aria-hidden="true"
+                          >
+                            <span className="timeline-block-label">{blockLabel.label}</span>
+                          </div>
+                        )
+                      }
 
                       return (
                         <button
@@ -1494,8 +1769,15 @@ function App() {
                             backgroundColor: blockColor,
                             color: textColor,
                           }}
-                          onClick={() => onSelectEntry(entry)}
-                          onContextMenu={(event) => onOpenTimelineContextMenu(event, entry)}
+                          onClick={() => onSelectTimelineBlock(entry)}
+                          onPointerDown={(event) => onStartTimelineDrag(event, entry)}
+                          onContextMenu={(event) => {
+                            if (timelineDragState?.isDragging) {
+                              event.preventDefault()
+                              return
+                            }
+                            onOpenTimelineContextMenu(event, entry)
+                          }}
                           title={`${blockLabel.fullLabel}\n${entry.description}`}
                           aria-label={`${blockLabel.fullLabel}. ${entry.description}`}
                           aria-haspopup="menu"
@@ -1580,7 +1862,7 @@ function App() {
                       Start
                       <input
                         type="time"
-                        step={1800}
+                        step={900}
                         value={entryDraft.startTime}
                         onChange={(event) =>
                           setEntryDraft((previous) =>
@@ -1598,7 +1880,7 @@ function App() {
                       End
                       <input
                         type="time"
-                        step={1800}
+                        step={900}
                         value={entryDraft.endTime}
                         onChange={(event) =>
                           setEntryDraft((previous) =>
@@ -2718,6 +3000,65 @@ function formatCalendarDayAriaLabel(
   }
 
   return parts.join(', ')
+}
+
+function applyDragPreviewToTimelineEntries(
+  entries: TimelineEntry[],
+  dragState: TimelineDragState | null,
+): TimelineEntry[] {
+  if (!dragState || !dragState.isDragging) {
+    return entries
+  }
+
+  const previewDuration = dragState.previewEndMinute - dragState.previewStartMinute
+  return entries.map((entry) =>
+    entry.id === dragState.entryId
+      ? {
+          ...entry,
+          startMinute: dragState.previewStartMinute,
+          endMinute: dragState.previewEndMinute,
+          durationMinutes: previewDuration,
+        }
+      : entry,
+  )
+}
+
+function snapMinute(value: number, increment: number): number {
+  if (increment <= 0) {
+    return value
+  }
+
+  return Math.round(value / increment) * increment
+}
+
+function clampStartMinuteForDuration(
+  startMinute: number,
+  durationMinutes: number,
+  timelineWindow: TimelineWindow,
+): number {
+  const safeDuration = Math.max(durationMinutes, TIMELINE_DRAG_SNAP_MINUTES)
+  const maxStartMinute = Math.max(
+    timelineWindow.startMinute,
+    timelineWindow.endMinute - safeDuration,
+  )
+
+  return Math.min(
+    Math.max(startMinute, timelineWindow.startMinute),
+    maxStartMinute,
+  )
+}
+
+function clientYToTimelineMinute(
+  clientY: number,
+  grid: HTMLDivElement,
+  timelineWindow: TimelineWindow,
+): number {
+  const gridRect = grid.getBoundingClientRect()
+  const relativeY =
+    clientY - gridRect.top + grid.scrollTop - TIMELINE_CANVAS_TOP_PADDING
+  const pixelsPerMinute = PIXELS_PER_MINUTE > 0 ? PIXELS_PER_MINUTE : 1
+
+  return timelineWindow.startMinute + (relativeY / pixelsPerMinute)
 }
 
 function positionTimelineEntries(
