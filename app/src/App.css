@@ -723,6 +723,11 @@ button.danger {
   scrollbar-gutter: stable;
 }
 
+.timeline-grid.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
 .timeline-canvas {
   position: relative;
   min-height: 100%;
@@ -766,14 +771,32 @@ button.danger {
   box-shadow: 0 8px 12px rgba(0, 0, 0, 0.16);
   transform: translateY(0);
   transition: transform 140ms ease;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
 }
 
 .timeline-block:hover {
   transform: translateY(-1px);
 }
 
+.timeline-grid.dragging .timeline-block {
+  cursor: grabbing;
+}
+
 .timeline-block.selected {
   outline: 2px solid #facc15;
+}
+
+.timeline-block.drag-preview {
+  border-width: 2px;
+  border-style: dashed;
+  background: rgba(255, 255, 255, 0.72);
+  color: #0f172a;
+  box-shadow: none;
+  transform: none;
+  transition: none;
+  pointer-events: none;
 }
 
 .timeline-block-label {
