@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
+  CSSProperties,
   FormEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -222,6 +223,10 @@ const TIMELINE_CANVAS_TOP_PADDING = 18
 const TIMELINE_CANVAS_BOTTOM_PADDING = 20
 const TIMELINE_OVERLAP_GAP_PERCENT = 1.2
 const TIMELINE_NEUTRAL_COLOR = '#6F7B89'
+const TIMELINE_ACCENT_BRIGHTNESS_THRESHOLD = 0.8
+const TIMELINE_ACCENT_DARKEN_FACTOR = 0.72
+const TIMELINE_ACCENT_SATURATION_BOOST = 1.18
+const TIMELINE_ACCENT_LIGHTEN_RATIO = 0.24
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
@@ -1838,6 +1843,7 @@ function App() {
                           draggedEntryOriginPosition.widthPercent,
                           draggedEntryOriginPosition.height,
                         )
+                        const ghostAccentColor = deriveTimelineAccentColor(ghostColor)
 
                         return (
                           <div
@@ -1847,9 +1853,11 @@ function App() {
                               height: draggedEntryOriginPosition.height,
                               left: `${draggedEntryOriginPosition.leftPercent}%`,
                               width: `${draggedEntryOriginPosition.widthPercent}%`,
+                              '--timeline-block-color': ghostColor,
+                              '--timeline-block-accent': ghostAccentColor,
                               backgroundColor: ghostColor,
                               color: colorForBackground(ghostColor),
-                            }}
+                            } as CSSProperties}
                             aria-hidden="true"
                           >
                             <span className="timeline-block-label">{ghostLabel.label}</span>
@@ -1873,6 +1881,7 @@ function App() {
                         timelineDragState?.isDragging
                         && timelineDragState.entryId === entry.id
                       const textColor = colorForBackground(blockColor)
+                      const blockAccentColor = deriveTimelineAccentColor(blockColor)
 
                       if (isDragPreview) {
                         return (
@@ -1884,8 +1893,10 @@ function App() {
                               height: positionedEntry.height,
                               left: `${positionedEntry.leftPercent}%`,
                               width: `${positionedEntry.widthPercent}%`,
+                              '--timeline-block-color': blockColor,
+                              '--timeline-block-accent': blockAccentColor,
                               borderColor: blockColor,
-                            }}
+                            } as CSSProperties}
                             aria-hidden="true"
                           >
                             <span className="timeline-block-label">{blockLabel.label}</span>
@@ -1903,9 +1914,11 @@ function App() {
                             height: positionedEntry.height,
                             left: `${positionedEntry.leftPercent}%`,
                             width: `${positionedEntry.widthPercent}%`,
+                            '--timeline-block-color': blockColor,
+                            '--timeline-block-accent': blockAccentColor,
                             backgroundColor: blockColor,
                             color: textColor,
-                          }}
+                          } as CSSProperties}
                           onClick={() => onSelectTimelineBlock(entry)}
                           onPointerDown={(event) => onStartTimelineDrag(event, entry)}
                           onContextMenu={(event) => {
@@ -3426,6 +3439,49 @@ function colorForBackground(backgroundHex: string): string {
   const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255
 
   return luminance > 0.62 ? '#0F172A' : '#F8FAFC'
+}
+
+function deriveTimelineAccentColor(backgroundHex: string): string {
+  const normalized = normalizeColorHexInput(backgroundHex) ?? TIMELINE_NEUTRAL_COLOR
+  const red = Number.parseInt(normalized.slice(1, 3), 16)
+  const green = Number.parseInt(normalized.slice(3, 5), 16)
+  const blue = Number.parseInt(normalized.slice(5, 7), 16)
+  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255
+  const average = (red + green + blue) / 3
+  const saturateChannel = (value: number) =>
+    clampColorChannel(average + ((value - average) * TIMELINE_ACCENT_SATURATION_BOOST))
+
+  const saturatedRed = saturateChannel(red)
+  const saturatedGreen = saturateChannel(green)
+  const saturatedBlue = saturateChannel(blue)
+
+  if (luminance >= TIMELINE_ACCENT_BRIGHTNESS_THRESHOLD) {
+    const darkenedRed = clampColorChannel(saturatedRed * TIMELINE_ACCENT_DARKEN_FACTOR)
+    const darkenedGreen = clampColorChannel(saturatedGreen * TIMELINE_ACCENT_DARKEN_FACTOR)
+    const darkenedBlue = clampColorChannel(saturatedBlue * TIMELINE_ACCENT_DARKEN_FACTOR)
+
+    return `#${colorChannelToHex(darkenedRed)}${colorChannelToHex(darkenedGreen)}${colorChannelToHex(darkenedBlue)}`
+  }
+
+  const brightenedRed = clampColorChannel(
+    saturatedRed + ((255 - saturatedRed) * TIMELINE_ACCENT_LIGHTEN_RATIO),
+  )
+  const brightenedGreen = clampColorChannel(
+    saturatedGreen + ((255 - saturatedGreen) * TIMELINE_ACCENT_LIGHTEN_RATIO),
+  )
+  const brightenedBlue = clampColorChannel(
+    saturatedBlue + ((255 - saturatedBlue) * TIMELINE_ACCENT_LIGHTEN_RATIO),
+  )
+
+  return `#${colorChannelToHex(brightenedRed)}${colorChannelToHex(brightenedGreen)}${colorChannelToHex(brightenedBlue)}`
+}
+
+function clampColorChannel(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)))
+}
+
+function colorChannelToHex(value: number): string {
+  return value.toString(16).padStart(2, '0').toUpperCase()
 }
 
 function buildTimelineBlockLabel(
