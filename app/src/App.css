@@ -1200,6 +1200,7 @@ button.danger {
   display: flex;
   gap: 0.45rem;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .summary-week-total {

@@ -239,6 +239,16 @@ pub struct TimelineWeeklySummaryNote {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryExportResult {
+    pub file_path: String,
+    pub file_name: String,
+    pub auto_open_attempted: bool,
+    pub auto_open_succeeded: bool,
+    pub auto_open_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineUpdateInput {
