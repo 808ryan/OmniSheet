@@ -157,6 +157,14 @@ export interface TimelineWeeklySummaryNote {
   description: string
 }
 
+export interface SummaryExportResult {
+  filePath: string
+  fileName: string
+  autoOpenAttempted: boolean
+  autoOpenSucceeded: boolean
+  autoOpenError: string | null
+}
+
 export interface TimelineUpdateInput {
   id: string
   engagementId: string | null

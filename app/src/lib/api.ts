@@ -15,6 +15,7 @@ import type {
   InterpretResult,
   InterpretTextInput,
   SettingsStatus,
+  SummaryExportResult,
   TimelineDaySummary,
   TimelineEntry,
   TimelineWeeklySummary,
@@ -208,6 +209,10 @@ export function timelineMonthSummary(
 
 export function timelineWeeklySummary(input: DateInput): Promise<TimelineWeeklySummary> {
   return invokeCommand<TimelineWeeklySummary>('timeline_weekly_summary', { input })
+}
+
+export function summaryExportWeeklyExcel(input: DateInput): Promise<SummaryExportResult> {
+  return invokeCommand<SummaryExportResult>('summary_export_weekly_excel', { input })
 }
 
 export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {

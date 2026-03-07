@@ -1,11 +1,14 @@
 use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime};
 use keyring::{Entry, Error as KeyringError};
+use rust_xlsxwriter::{Format, Workbook, XlsxError};
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{Manager, State};
 use uuid::Uuid;
 
 use crate::db;
@@ -15,8 +18,8 @@ use crate::models::{
     DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement,
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
     LlmAlternativeActivity, LlmEntry, NormalizedEntry, SettingsStatus, StatusLevel, StorageHealth,
-    TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput, TimelineUpdateInput,
-    TimelineWeeklySummary, Warning, WarningType,
+    SummaryExportResult, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
+    TimelineUpdateInput, TimelineWeeklySummary, TimelineWeeklySummaryNote, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -27,6 +30,15 @@ const DEFAULT_FALLBACK_DURATION_MINUTES: i64 = 30;
 const ACTIVITY_FALLBACK_CONFIDENCE_CAP: f64 = 0.60;
 const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
+const SUMMARY_DAY_NAMES: [&str; 7] = [
+    "Saturday",
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+];
 
 fn state_lock_error() -> String {
     "application state lock poisoned".to_string()
@@ -128,6 +140,253 @@ fn month_key_from_iso_date(value: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn summary_day_header(day_index: usize, iso_date: &str) -> String {
+    let day_name = SUMMARY_DAY_NAMES.get(day_index).copied().unwrap_or("Day");
+    match NaiveDate::parse_from_str(iso_date.trim(), "%Y-%m-%d") {
+        Ok(value) => format!("{day_name} ({})", value.format("%m/%d")),
+        Err(_) => format!("{day_name} ({iso_date})"),
+    }
+}
+
+fn format_minutes_as_hours(minutes: i64) -> f64 {
+    (minutes as f64) / 60.0
+}
+
+fn format_summary_notes_for_export(notes: &[TimelineWeeklySummaryNote]) -> String {
+    notes
+        .iter()
+        .map(|note| format!("{:.2} Hours: {}", format_minutes_as_hours(note.duration_minutes), note.description))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn resolve_downloads_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let downloads_dir = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("failed to resolve Downloads folder: {error}"))?;
+
+    fs::create_dir_all(&downloads_dir)
+        .map_err(|error| format!("failed to create Downloads folder: {error}"))?;
+
+    Ok(downloads_dir)
+}
+
+fn choose_export_file_path(downloads_dir: &Path, base_name: &str) -> PathBuf {
+    let initial_path = downloads_dir.join(format!("{base_name}.xlsx"));
+    if !initial_path.exists() {
+        return initial_path;
+    }
+
+    let mut suffix = 2usize;
+    loop {
+        let candidate = downloads_dir.join(format!("{base_name} ({suffix}).xlsx"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn write_weekly_hours_sheet(
+    workbook: &mut Workbook,
+    summary: &TimelineWeeklySummary,
+) -> Result<(), XlsxError> {
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("Weekly Hours")?;
+    worksheet.set_freeze_panes(1, 0)?;
+
+    let header_format = Format::new().set_bold();
+    let hours_format = Format::new().set_num_format("0.00");
+
+    let mut col: u16 = 0;
+    let static_headers = [
+        "Engagement Code",
+        "Activity Code",
+        "Activity Name",
+        "Engagement Name",
+        "Client Name",
+    ];
+    for header in static_headers {
+        worksheet.write_with_format(0, col, header, &header_format)?;
+        col += 1;
+    }
+
+    for (day_index, day) in summary.days.iter().enumerate() {
+        worksheet.write_with_format(0, col, summary_day_header(day_index, &day.date), &header_format)?;
+        col += 1;
+    }
+
+    worksheet.write_with_format(0, col, "Row Total", &header_format)?;
+
+    worksheet.set_column_width(0, 16)?;
+    worksheet.set_column_width(1, 14)?;
+    worksheet.set_column_width(2, 24)?;
+    worksheet.set_column_width(3, 24)?;
+    worksheet.set_column_width(4, 20)?;
+    for day_offset in 0..summary.days.len() {
+        worksheet.set_column_width(5 + day_offset as u16, 12)?;
+    }
+    worksheet.set_column_width(5 + summary.days.len() as u16, 12)?;
+
+    let mut row_index: u32 = 1;
+    for row in &summary.rows {
+        worksheet.write(row_index, 0, row.engagement_code.as_str())?;
+        worksheet.write(row_index, 1, row.activity_code.as_str())?;
+        worksheet.write(row_index, 2, row.activity_name.as_str())?;
+        worksheet.write(row_index, 3, row.engagement_name.as_str())?;
+        let client_name = if row.client_name.trim().is_empty() {
+            "-"
+        } else {
+            row.client_name.as_str()
+        };
+        worksheet.write(row_index, 4, client_name)?;
+
+        for (day_index, cell) in row.cells.iter().enumerate() {
+            worksheet.write_with_format(
+                row_index,
+                5 + day_index as u16,
+                format_minutes_as_hours(cell.total_minutes),
+                &hours_format,
+            )?;
+        }
+
+        worksheet.write_with_format(
+            row_index,
+            5 + summary.days.len() as u16,
+            format_minutes_as_hours(row.row_total_minutes),
+            &hours_format,
+        )?;
+
+        row_index += 1;
+    }
+
+    worksheet.write_with_format(row_index, 0, "Day Totals", &header_format)?;
+    for (day_index, total_minutes) in summary.day_total_minutes.iter().enumerate() {
+        worksheet.write_with_format(
+            row_index,
+            5 + day_index as u16,
+            format_minutes_as_hours(*total_minutes),
+            &hours_format,
+        )?;
+    }
+    worksheet.write_with_format(
+        row_index,
+        5 + summary.days.len() as u16,
+        format_minutes_as_hours(summary.week_total_minutes),
+        &hours_format,
+    )?;
+
+    Ok(())
+}
+
+fn write_weekly_hours_and_notes_sheet(
+    workbook: &mut Workbook,
+    summary: &TimelineWeeklySummary,
+) -> Result<(), XlsxError> {
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("Weekly Hours + Notes")?;
+    worksheet.set_freeze_panes(1, 0)?;
+
+    let header_format = Format::new().set_bold();
+    let hours_format = Format::new().set_num_format("0.00");
+    let notes_format = Format::new().set_text_wrap();
+
+    let mut col: u16 = 0;
+    let static_headers = [
+        "Engagement Code",
+        "Activity Code",
+        "Activity Name",
+        "Engagement Name",
+        "Client Name",
+    ];
+    for header in static_headers {
+        worksheet.write_with_format(0, col, header, &header_format)?;
+        col += 1;
+    }
+
+    for (day_index, day) in summary.days.iter().enumerate() {
+        let header = summary_day_header(day_index, &day.date);
+        worksheet.write_with_format(0, col, format!("{header} Hours"), &header_format)?;
+        col += 1;
+        worksheet.write_with_format(0, col, format!("{header} Notes"), &header_format)?;
+        col += 1;
+    }
+
+    worksheet.write_with_format(0, col, "Row Total", &header_format)?;
+
+    worksheet.set_column_width(0, 16)?;
+    worksheet.set_column_width(1, 14)?;
+    worksheet.set_column_width(2, 24)?;
+    worksheet.set_column_width(3, 24)?;
+    worksheet.set_column_width(4, 20)?;
+    for day_index in 0..summary.days.len() {
+        let base_col = 5 + (day_index as u16 * 2);
+        worksheet.set_column_width(base_col, 12)?;
+        worksheet.set_column_width(base_col + 1, 42)?;
+    }
+    worksheet.set_column_width(5 + (summary.days.len() as u16 * 2), 12)?;
+
+    let mut row_index: u32 = 1;
+    for row in &summary.rows {
+        worksheet.write(row_index, 0, row.engagement_code.as_str())?;
+        worksheet.write(row_index, 1, row.activity_code.as_str())?;
+        worksheet.write(row_index, 2, row.activity_name.as_str())?;
+        worksheet.write(row_index, 3, row.engagement_name.as_str())?;
+        let client_name = if row.client_name.trim().is_empty() {
+            "-"
+        } else {
+            row.client_name.as_str()
+        };
+        worksheet.write(row_index, 4, client_name)?;
+
+        for (day_index, cell) in row.cells.iter().enumerate() {
+            let hours_col = 5 + (day_index as u16 * 2);
+            let notes_col = hours_col + 1;
+            worksheet.write_with_format(
+                row_index,
+                hours_col,
+                format_minutes_as_hours(cell.total_minutes),
+                &hours_format,
+            )?;
+            worksheet.write_with_format(
+                row_index,
+                notes_col,
+                format_summary_notes_for_export(&cell.notes),
+                &notes_format,
+            )?;
+        }
+
+        worksheet.write_with_format(
+            row_index,
+            5 + (summary.days.len() as u16 * 2),
+            format_minutes_as_hours(row.row_total_minutes),
+            &hours_format,
+        )?;
+
+        row_index += 1;
+    }
+
+    worksheet.write_with_format(row_index, 0, "Day Totals", &header_format)?;
+    for (day_index, total_minutes) in summary.day_total_minutes.iter().enumerate() {
+        let day_hours_col = 5 + (day_index as u16 * 2);
+        worksheet.write_with_format(
+            row_index,
+            day_hours_col,
+            format_minutes_as_hours(*total_minutes),
+            &hours_format,
+        )?;
+    }
+    worksheet.write_with_format(
+        row_index,
+        5 + (summary.days.len() as u16 * 2),
+        format_minutes_as_hours(summary.week_total_minutes),
+        &hours_format,
+    )?;
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -779,6 +1038,57 @@ pub fn timeline_weekly_summary(
 
     db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn summary_export_weekly_excel(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: DateInput,
+) -> Result<SummaryExportResult, String> {
+    let (start_date, end_date_exclusive) = timeline_week_bounds(&input.date)?;
+    let summary = {
+        let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+        db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
+            .map_err(|error| error.to_string())?
+    };
+
+    let week_end_date = summary.week_end_date.clone();
+    let downloads_dir = resolve_downloads_dir(&app)?;
+    let base_name = format!(
+        "OmniSheet_Weekly_Summary_{}_to_{}",
+        summary.week_start_date, week_end_date
+    );
+    let file_path = choose_export_file_path(&downloads_dir, &base_name);
+
+    let mut workbook = Workbook::new();
+    write_weekly_hours_sheet(&mut workbook, &summary)
+        .map_err(|error| format!("failed to build Weekly Hours sheet: {error}"))?;
+    write_weekly_hours_and_notes_sheet(&mut workbook, &summary)
+        .map_err(|error| format!("failed to build Weekly Hours + Notes sheet: {error}"))?;
+    workbook
+        .save(&file_path)
+        .map_err(|error| format!("failed to write workbook: {error}"))?;
+
+    let auto_open_attempted = true;
+    let (auto_open_succeeded, auto_open_error) = match open::that(&file_path) {
+        Ok(_) => (true, None),
+        Err(error) => (false, Some(error.to_string())),
+    };
+
+    let file_name = file_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("summary.xlsx")
+        .to_string();
+
+    Ok(SummaryExportResult {
+        file_path: file_path.to_string_lossy().to_string(),
+        file_name,
+        auto_open_attempted,
+        auto_open_succeeded,
+        auto_open_error,
+    })
 }
 
 #[tauri::command]

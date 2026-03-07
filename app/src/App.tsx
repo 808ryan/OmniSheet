@@ -19,6 +19,7 @@ import {
   isAppCommandError,
   settingsGetStatus,
   settingsSetOpenAiKey,
+  summaryExportWeeklyExcel,
   timelineDeleteEntry,
   timelineListForDate,
   timelineMonthSummary,
@@ -308,6 +309,7 @@ function App() {
   const [weeklySummary, setWeeklySummary] = useState<TimelineWeeklySummary | null>(null)
   const [isWeeklySummaryLoading, setIsWeeklySummaryLoading] = useState(false)
   const [weeklySummaryError, setWeeklySummaryError] = useState<string | null>(null)
+  const [isSummaryExporting, setIsSummaryExporting] = useState(false)
   const [summaryNotesModal, setSummaryNotesModal] = useState<SummaryNotesModalState | null>(null)
   const summaryNotesModalRef = useRef<HTMLDivElement | null>(null)
 
@@ -1591,6 +1593,30 @@ function App() {
     onSetDate(shiftDate(selectedDate, weekDelta * 7))
   }
 
+  const onExportSummaryWeek = () => {
+    if (!weeklySummary) {
+      setErrorMessage('No summary data available to export.')
+      return
+    }
+
+    void runAction(async () => {
+      setIsSummaryExporting(true)
+      try {
+        const result = await summaryExportWeeklyExcel({ date: selectedDate })
+        if (!result.autoOpenAttempted || result.autoOpenSucceeded) {
+          setSuccessMessage(`Weekly summary exported and opened: ${result.filePath}`)
+          return
+        }
+
+        setSuccessMessage(
+          `Weekly summary exported to ${result.filePath}. Auto-open failed: ${result.autoOpenError ?? 'unknown error'}`,
+        )
+      } finally {
+        setIsSummaryExporting(false)
+      }
+    })
+  }
+
   const onOpenSummaryNotes = (rowIndex: number, dayIndex: number) => {
     setSummaryNotesModal({
       rowIndex,
@@ -2594,16 +2620,23 @@ function App() {
                 <button
                   type="button"
                   onClick={() => onShiftSummaryWeek(-1)}
-                  disabled={isBusy || isWeeklySummaryLoading}
+                  disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
                 >
                   Previous Week
                 </button>
                 <button
                   type="button"
                   onClick={() => onShiftSummaryWeek(1)}
-                  disabled={isBusy || isWeeklySummaryLoading}
+                  disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
                 >
                   Next Week
+                </button>
+                <button
+                  type="button"
+                  onClick={onExportSummaryWeek}
+                  disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting || !weeklySummary}
+                >
+                  {isSummaryExporting ? 'Exporting...' : 'Export'}
                 </button>
               </div>
             </div>
