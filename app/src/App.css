@@ -759,22 +759,39 @@ button.danger {
 }
 
 .timeline-block {
+  --timeline-block-color: #6f7b89;
+  --timeline-block-accent: #8f9bab;
+  --timeline-block-accent-width: 4px;
   position: absolute;
   left: 0;
   border-radius: 10px;
   border: none;
+  background-color: var(--timeline-block-color);
   text-align: left;
-  padding: 0.28rem 0.5rem;
+  padding: 0.28rem 0.5rem 0.28rem calc(0.5rem + var(--timeline-block-accent-width) + 0.22rem);
   display: flex;
   align-items: center;
   overflow: hidden;
-  box-shadow: 0 8px 12px rgba(0, 0, 0, 0.16);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.78),
+    0 8px 12px rgba(0, 0, 0, 0.16);
   transform: translateY(0);
   transition: transform 140ms ease;
   cursor: grab;
   user-select: none;
   touch-action: none;
   z-index: 2;
+}
+
+.timeline-block::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--timeline-block-accent-width);
+  background: var(--timeline-block-accent);
+  border-radius: 10px 0 0 10px;
 }
 
 .timeline-block:hover {
@@ -792,7 +809,7 @@ button.danger {
 .timeline-block.drag-origin-ghost {
   opacity: 0.34;
   filter: saturate(0.52) brightness(0.98);
-  box-shadow: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.8);
   transform: none;
   transition: none;
   pointer-events: none;
@@ -804,7 +821,7 @@ button.danger {
   border-style: dashed;
   background: rgba(255, 255, 255, 0.72);
   color: #0f172a;
-  box-shadow: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.86);
   transform: none;
   transition: none;
   pointer-events: none;
@@ -824,7 +841,7 @@ button.danger {
 }
 
 .timeline-block.tier-3 {
-  padding: 0.2rem 0.4rem;
+  padding: 0.2rem 0.4rem 0.2rem calc(0.4rem + var(--timeline-block-accent-width) + 0.16rem);
 }
 
 .timeline-block.tier-3 .timeline-block-label {
