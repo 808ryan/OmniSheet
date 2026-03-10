@@ -79,6 +79,8 @@ Additional rules:
 - If uncertain, set lower confidence.
 - Use describeWhenToUse as the primary categorization signal for engagements and activities.
 - Use tags/key words as secondary hints; exact keyword overlap is not required.
+- engagementCode must be selected from engagementActivityContext.engagements[].code only.
+- Never place an activity code into engagementCode.
 - If you identify an engagementCode and that engagement has activities in the provided context, choose the best available activityCode from that engagement.
 - Use activityCode = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
 - If no engagement match exists, set engagementCode/activityCode to null.
