@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use tauri::{Manager, State};
 use uuid::Uuid;
 
+use crate::code_reconciliation::reconcile_codes;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -1367,6 +1368,7 @@ pub async fn interpret_text_message(
     let mut fallback_count = 0;
 
     for mut result in normalization_results {
+        let code_reconciliation = reconcile_codes(&mut result.entry, &code_context);
         let activity_fallback = apply_activity_fallback_if_needed(
             &mut result.entry,
             input.raw_text.trim(),
@@ -1379,6 +1381,13 @@ pub async fn interpret_text_message(
 
         if let Some(note) = activity_fallback.note.clone() {
             normalization_notes.push(note);
+        }
+
+        if code_reconciliation.applied {
+            normalization_notes.push(format!(
+                "Code reconciliation applied ({})",
+                code_reconciliation.reason.as_str()
+            ));
         }
 
         if result.used_temporal_fallback {
@@ -1404,9 +1413,16 @@ pub async fn interpret_text_message(
           "llmChosenActivityCode": result.llm_activity_code,
           "llmActivityReason": result.llm_activity_reason,
           "llmAlternativeActivities": result.llm_alternative_activities,
+          "originalEngagementCode": code_reconciliation.original_engagement_code,
+          "originalActivityCode": code_reconciliation.original_activity_code,
           "savedEngagementCode": result.entry.engagement_code,
           "savedActivityCode": result.entry.activity_code,
           "savedConfidence": result.entry.confidence,
+          "reconciliationApplied": code_reconciliation.applied,
+          "reconciliationReason": code_reconciliation.reason.as_str(),
+          "reconciliationAmbiguousCandidateCount": code_reconciliation.ambiguous_candidate_count,
+          "reconciledEngagementCode": code_reconciliation.reconciled_engagement_code,
+          "reconciledActivityCode": code_reconciliation.reconciled_activity_code,
           "attemptedActivityFallback": activity_fallback.attempted,
           "usedActivityFallback": activity_fallback.applied,
           "activityFallbackReason": activity_fallback.reason,
@@ -1460,6 +1476,13 @@ pub async fn interpret_text_message(
           "llmChosenActivityCode": null,
           "llmActivityReason": null,
           "llmAlternativeActivities": null,
+          "originalEngagementCode": null,
+          "originalActivityCode": null,
+          "reconciliationApplied": false,
+          "reconciliationReason": null,
+          "reconciliationAmbiguousCandidateCount": 0,
+          "reconciledEngagementCode": null,
+          "reconciledActivityCode": null,
           "attemptedActivityFallback": false,
           "usedActivityFallback": false,
           "fallbackSummary": fallback_summary,
