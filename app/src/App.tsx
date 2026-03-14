@@ -2087,17 +2087,19 @@ function App() {
                         }
                       />
                     </label>
-                    <button type="submit" disabled={isBusy}>
-                      Save Entry
-                    </button>
-                    <button
-                      type="button"
-                      className="danger"
-                      onClick={() => onDeleteTimelineEntry(entryDraft.id)}
-                      disabled={isBusy || isTimelineDeleteBusy}
-                    >
-                      Delete Entry
-                    </button>
+                    <div className="timeline-entry-actions">
+                      <button type="submit" disabled={isBusy}>
+                        Save Entry
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => onDeleteTimelineEntry(entryDraft.id)}
+                        disabled={isBusy || isTimelineDeleteBusy}
+                      >
+                        Delete Entry
+                      </button>
+                    </div>
                   </form>
                 ) : (
                   <p>Select a timeline block to edit engagement, activity, and timing.</p>

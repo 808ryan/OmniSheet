@@ -939,6 +939,17 @@ button.danger {
   width: 100%;
 }
 
+.timeline-entry-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: stretch;
+}
+
+.timeline-entry-actions button {
+  flex: 1;
+  min-width: 0;
+}
+
 .entry-metadata {
   border-top: 1px solid var(--outline);
   padding-top: 0.7rem;
