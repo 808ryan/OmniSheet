@@ -3,9 +3,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{CodeContext, LlmResponse};
+use crate::models::{CodeContext, LlmResponse, OpenAiModelId};
 
-const OPENAI_MODEL: &str = "gpt-5-nano";
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
 const OPENAI_MAX_ATTEMPTS: usize = 3;
 const OPENAI_RETRY_BASE_DELAY_MS: u64 = 700;
@@ -110,9 +109,8 @@ Examples:
 "#
 }
 
-pub async fn interpret_message(
-    client: &reqwest::Client,
-    api_key: &str,
+fn build_request_body(
+    model: OpenAiModelId,
     raw_text: &str,
     client_timestamp_iso: &str,
     client_local_date: &str,
@@ -120,8 +118,7 @@ pub async fn interpret_message(
     client_utc_offset_minutes: i64,
     timezone: &str,
     code_context: &CodeContext,
-    attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
-) -> AppResult<LlmResponse> {
+) -> Value {
     let system_prompt = build_system_prompt();
 
     let user_prompt = json!({
@@ -134,14 +131,39 @@ pub async fn interpret_message(
       "engagementActivityContext": code_context,
     });
 
-    let request_body = json!({
-      "model": OPENAI_MODEL,
+    json!({
+      "model": model.api_name(),
       "response_format": { "type": "json_object" },
       "messages": [
         { "role": "system", "content": system_prompt },
         { "role": "user", "content": user_prompt.to_string() }
       ]
-    });
+    })
+}
+
+pub async fn interpret_message(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: OpenAiModelId,
+    raw_text: &str,
+    client_timestamp_iso: &str,
+    client_local_date: &str,
+    client_local_time: &str,
+    client_utc_offset_minutes: i64,
+    timezone: &str,
+    code_context: &CodeContext,
+    attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
+) -> AppResult<LlmResponse> {
+    let request_body = build_request_body(
+        model,
+        raw_text,
+        client_timestamp_iso,
+        client_local_date,
+        client_local_time,
+        client_utc_offset_minutes,
+        timezone,
+        code_context,
+    );
 
     for attempt in 0..OPENAI_MAX_ATTEMPTS {
         let attempt_number = attempt + 1;
@@ -352,7 +374,10 @@ fn is_retryable_status(status_code: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_system_prompt, is_retryable_status};
+    use serde_json::Value;
+
+    use super::{build_request_body, build_system_prompt, is_retryable_status};
+    use crate::models::{CodeContext, OpenAiModelId};
 
     #[test]
     fn prompt_includes_relative_duration_inference_rules() {
@@ -442,5 +467,29 @@ mod tests {
         assert!(is_retryable_status(429));
         assert!(is_retryable_status(500));
         assert!(!is_retryable_status(400));
+    }
+
+    #[test]
+    fn request_body_uses_resolved_model_id() {
+        let request_body = build_request_body(
+            OpenAiModelId::Gpt41Nano,
+            "worked on controls testing",
+            "2026-03-15T18:00:00Z",
+            "2026-03-15",
+            "11:00",
+            -420,
+            "America/Los_Angeles",
+            &CodeContext {
+                engagements: vec![],
+            },
+        );
+
+        assert_eq!(
+            request_body
+                .get("model")
+                .and_then(Value::as_str)
+                .expect("model should be serialized"),
+            "gpt-4.1-nano"
+        );
     }
 }

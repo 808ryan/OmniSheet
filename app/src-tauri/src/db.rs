@@ -3,16 +3,17 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
-    DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, TimelineDaySummary,
-    TimelineEntry, TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
-    TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, Warning, WarningType,
+    DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
+    TimelineDaySummary, TimelineEntry, TimelineWeeklySummary, TimelineWeeklySummaryCell,
+    TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, Warning,
+    WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
@@ -87,6 +88,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         id TEXT PRIMARY KEY,
         raw_text TEXT NOT NULL,
         interpreted_entries_json TEXT NOT NULL,
+        open_ai_model TEXT,
         confidence REAL NOT NULL,
         status TEXT NOT NULL,
         message_timestamp INTEGER NOT NULL,
@@ -213,6 +215,7 @@ fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
         "interpreted_entry_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_column_exists(conn, "raw_messages", "open_ai_model", "TEXT")?;
     ensure_column_exists(
         conn,
         "raw_messages",
@@ -516,6 +519,31 @@ pub fn delete_timeline_entry(conn: &Connection, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub fn get_app_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(value)
+}
+
+pub fn upsert_app_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
+    conn.execute(
+        r#"
+        INSERT INTO app_settings (key, value)
+        VALUES (?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
+        params![key, value],
+    )?;
+
+    Ok(())
+}
+
 pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
     let mut engagement_statement = conn.prepare(
         r#"
@@ -633,6 +661,7 @@ pub fn insert_raw_message(
     id: &str,
     raw_text: &str,
     interpreted_entries_json: &str,
+    open_ai_model: &str,
     confidence: f64,
     message_timestamp: i64,
     interpreted_entry_count: i64,
@@ -646,16 +675,17 @@ pub fn insert_raw_message(
     conn.execute(
         r#"
       INSERT INTO raw_messages (
-        id, raw_text, interpreted_entries_json, confidence,
+        id, raw_text, interpreted_entries_json, open_ai_model, confidence,
         status, message_timestamp, interpreted_entry_count, unique_entry_count,
         saved_entry_count, truncated_entry_count, contains_multiple_events, created_at
       )
-      VALUES (?1, ?2, ?3, ?4, 'processed', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+      VALUES (?1, ?2, ?3, ?4, ?5, 'processed', ?6, ?7, ?8, ?9, ?10, ?11, ?12)
     "#,
         params![
             id,
             raw_text.trim(),
             interpreted_entries_json,
+            open_ai_model,
             confidence,
             message_timestamp,
             interpreted_entry_count,
@@ -871,7 +901,8 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         te.duration_defaulted,
         te.fallback_summary,
         te.source_message_entry_index,
-        te.source_message_entry_count
+        te.source_message_entry_count,
+        rm.open_ai_model
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -883,6 +914,10 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
 
     let mut entries = statement
         .query_map(params![date], |row| {
+            let model_used = row
+                .get::<_, Option<String>>(21)?
+                .and_then(|value| OpenAiModelId::from_api_name(&value));
+
             Ok(TimelineEntry {
                 id: row.get(0)?,
                 date: row.get(1)?,
@@ -905,6 +940,8 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
                 fallback_summary: row.get(18)?,
                 source_message_entry_index: row.get(19)?,
                 source_message_entry_count: row.get(20)?,
+                model_used,
+                model_used_label: model_used.map(|model| model.display_label().to_string()),
                 warning_flags: Vec::new(),
             })
         })?
@@ -1399,7 +1436,7 @@ pub fn list_diagnostics_events(
             r#"
           SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
           FROM diagnostics_events
-          WHERE command IN ('settings_get_status', 'settings_set_openai_key') OR event_type = 'key_save_verify'
+          WHERE command IN ('settings_get_status', 'settings_set_openai_key', 'settings_set_openai_model') OR event_type = 'key_save_verify'
           ORDER BY timestamp DESC
           LIMIT ?1
         "#,
@@ -1528,10 +1565,13 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        current_unix_timestamp, insert_raw_message, insert_timesheet_entry, list_engagements,
-        list_timeline_weekly_summary, run_migrations, upsert_activity, upsert_engagement,
+        current_unix_timestamp, get_app_setting, insert_raw_message, insert_timesheet_entry,
+        list_engagements, list_timeline_entries, list_timeline_weekly_summary, run_migrations,
+        upsert_activity, upsert_app_setting, upsert_engagement,
     };
-    use crate::models::{ActivityUpsertInput, EngagementUpsertInput, NormalizedEntry};
+    use crate::models::{
+        ActivityUpsertInput, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
+    };
 
     fn test_connection() -> Connection {
         let connection = Connection::open_in_memory().expect("in-memory db should open");
@@ -1566,6 +1606,209 @@ mod tests {
 
         assert!(saved.code.is_none());
         assert_eq!(saved.name, "No Code Engagement");
+    }
+
+    #[test]
+    fn app_settings_round_trip_saved_value() {
+        let connection = test_connection();
+
+        assert_eq!(
+            get_app_setting(&connection, "openai_model").expect("settings lookup should work"),
+            None
+        );
+
+        upsert_app_setting(&connection, "openai_model", "gpt-4.1-nano")
+            .expect("setting should save");
+
+        assert_eq!(
+            get_app_setting(&connection, "openai_model").expect("settings lookup should work"),
+            Some("gpt-4.1-nano".to_string())
+        );
+    }
+
+    #[test]
+    fn timeline_entries_include_model_provenance_from_raw_message() {
+        let connection = test_connection();
+
+        insert_raw_message(
+            &connection,
+            "raw-model",
+            "worked on controls testing",
+            "{\"entries\":[]}",
+            "gpt-5-nano",
+            0.8,
+            current_unix_timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message should save");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-15".to_string(),
+            start_minute: 540,
+            end_minute: 570,
+            duration_minutes: 30,
+            description: "Control testing".to_string(),
+            user_submission_text: "Control testing".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-model",
+            &entry,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "text",
+        )
+        .expect("timesheet entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-15")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.model_used, Some(OpenAiModelId::Gpt5Nano));
+        assert_eq!(saved_entry.model_used_label.as_deref(), Some("GPT-5 Nano"));
+    }
+
+    #[test]
+    fn timeline_entries_hide_model_provenance_when_raw_message_has_no_model() {
+        let connection = test_connection();
+        let now = current_unix_timestamp();
+
+        connection
+            .execute(
+                r#"
+                INSERT INTO raw_messages (
+                  id, raw_text, interpreted_entries_json, open_ai_model, confidence,
+                  status, message_timestamp, interpreted_entry_count, unique_entry_count,
+                  saved_entry_count, truncated_entry_count, contains_multiple_events, created_at
+                )
+                VALUES (?1, ?2, ?3, NULL, ?4, 'processed', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "#,
+                rusqlite::params![
+                    "raw-null-model",
+                    "worked on controls testing",
+                    "{\"entries\":[]}",
+                    0.8,
+                    now,
+                    1,
+                    1,
+                    1,
+                    0,
+                    0,
+                    now,
+                ],
+            )
+            .expect("raw message should save with null model");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-16".to_string(),
+            start_minute: 600,
+            end_minute: 630,
+            duration_minutes: 30,
+            description: "Control testing".to_string(),
+            user_submission_text: "Control testing".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-null-model",
+            &entry,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "text",
+        )
+        .expect("timesheet entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-16")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.model_used, None);
+        assert_eq!(saved_entry.model_used_label, None);
+    }
+
+    #[test]
+    fn timeline_entries_ignore_invalid_historical_model_values() {
+        let connection = test_connection();
+
+        insert_raw_message(
+            &connection,
+            "raw-invalid-model",
+            "worked on controls testing",
+            "{\"entries\":[]}",
+            "legacy-model",
+            0.8,
+            current_unix_timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message should save");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-17".to_string(),
+            start_minute: 660,
+            end_minute: 690,
+            duration_minutes: 30,
+            description: "Control testing".to_string(),
+            user_submission_text: "Control testing".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-invalid-model",
+            &entry,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "text",
+        )
+        .expect("timesheet entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-17")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.model_used, None);
+        assert_eq!(saved_entry.model_used_label, None);
     }
 
     #[test]
@@ -1607,6 +1850,7 @@ mod tests {
             "raw-1",
             "worked on client walkthrough",
             "{\"entries\":[]}",
+            "gpt-5-nano",
             0.8,
             current_unix_timestamp(),
             1,

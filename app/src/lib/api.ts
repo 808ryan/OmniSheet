@@ -14,6 +14,7 @@ import type {
   IdResult,
   InterpretResult,
   InterpretTextInput,
+  OpenAiModelId,
   SettingsStatus,
   SummaryExportResult,
   TimelineDaySummary,
@@ -164,6 +165,12 @@ export function settingsGetStatus(): Promise<SettingsStatus> {
 export function settingsSetOpenAiKey(apiKey: string): Promise<void> {
   return invokeCommand<void>('settings_set_openai_key', {
     input: { apiKey },
+  })
+}
+
+export function settingsSetOpenAiModel(model: OpenAiModelId): Promise<void> {
+  return invokeCommand<void>('settings_set_openai_model', {
+    input: { model },
   })
 }
 

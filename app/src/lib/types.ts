@@ -1,4 +1,10 @@
 export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
+export type OpenAiModelId = 'gpt-5-nano' | 'gpt-4.1-nano'
+
+export interface OpenAiModelOption {
+  id: OpenAiModelId
+  label: string
+}
 
 export interface Activity {
   id: string
@@ -68,6 +74,7 @@ export interface InterpretTextInput {
   clientLocalDate: string
   clientLocalTime: string
   clientUtcOffsetMinutes: number
+  openAiModel?: OpenAiModelId
 }
 
 export interface Warning {
@@ -88,6 +95,9 @@ export interface InterpretResult {
   touchedMonthKeys: string[]
   warnings: Warning[]
   normalizationNotes: string[]
+  modelUsed: OpenAiModelId
+  modelUsedLabel: string
+  llmDurationMs: number
 }
 
 export interface TimelineEntry {
@@ -112,6 +122,8 @@ export interface TimelineEntry {
   fallbackSummary: string | null
   sourceMessageEntryIndex: number | null
   sourceMessageEntryCount: number | null
+  modelUsed: OpenAiModelId | null
+  modelUsedLabel: string | null
   warningFlags: WarningType[]
 }
 
@@ -182,6 +194,8 @@ export interface SettingsStatus {
   keySource: 'keyring' | 'session_cache' | 'none'
   statusLevel: 'ok' | 'warning' | 'error'
   lastError: string | null
+  selectedOpenAiModel: OpenAiModelId
+  availableOpenAiModels: OpenAiModelOption[]
 }
 
 export interface DiagnosticsListInput {
