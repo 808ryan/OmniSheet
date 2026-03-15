@@ -80,7 +80,7 @@ pub struct EngagementUpsertInput {
     pub client: Option<String>,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
-    pub describe_when_to_use: Option<String>,
+    pub describe_when_to_use: String,
     pub is_active: Option<bool>,
 }
 
@@ -93,7 +93,7 @@ pub struct ActivityUpsertInput {
     pub name: String,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
-    pub describe_when_to_use: Option<String>,
+    pub describe_when_to_use: String,
     pub is_active: Option<bool>,
 }
 
