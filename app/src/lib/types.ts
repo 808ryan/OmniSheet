@@ -1,8 +1,15 @@
 export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
 export type OpenAiModelId = 'gpt-5-nano' | 'gpt-4.1-nano'
+export type TranscriptionModelId = 'gpt-4o-mini-transcribe' | 'whisper-1'
+export type CaptureSourceId = 'text' | 'voice'
 
 export interface OpenAiModelOption {
   id: OpenAiModelId
+  label: string
+}
+
+export interface TranscriptionModelOption {
+  id: TranscriptionModelId
   label: string
 }
 
@@ -75,6 +82,24 @@ export interface InterpretTextInput {
   clientLocalTime: string
   clientUtcOffsetMinutes: number
   openAiModel?: OpenAiModelId
+  captureSource?: CaptureSourceId
+  transcriptionModel?: TranscriptionModelId
+  transcriptionDurationMs?: number
+}
+
+export interface TranscribeAudioInput {
+  audioBase64: string
+  mimeType: string
+  durationMs: number
+  captureTimestampIso: string
+}
+
+export interface TranscribeAudioResult {
+  transcriptText: string
+  transcriptionModelUsed: TranscriptionModelId
+  transcriptionModelUsedLabel: string
+  transcriptionDurationMs: number
+  audioDurationMs: number
 }
 
 export interface Warning {
@@ -124,6 +149,8 @@ export interface TimelineEntry {
   sourceMessageEntryCount: number | null
   modelUsed: OpenAiModelId | null
   modelUsedLabel: string | null
+  transcriptionModelUsed: TranscriptionModelId | null
+  transcriptionModelUsedLabel: string | null
   warningFlags: WarningType[]
 }
 
@@ -196,6 +223,8 @@ export interface SettingsStatus {
   lastError: string | null
   selectedOpenAiModel: OpenAiModelId
   availableOpenAiModels: OpenAiModelOption[]
+  selectedTranscriptionModel: TranscriptionModelId
+  availableTranscriptionModels: TranscriptionModelOption[]
 }
 
 export interface DiagnosticsListInput {

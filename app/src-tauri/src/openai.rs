@@ -1,11 +1,13 @@
+use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{CodeContext, LlmResponse, OpenAiModelId};
+use crate::models::{CodeContext, LlmResponse, OpenAiModelId, TranscriptionModelId};
 
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_AUDIO_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MAX_ATTEMPTS: usize = 3;
 const OPENAI_RETRY_BASE_DELAY_MS: u64 = 700;
 
@@ -139,6 +141,48 @@ fn build_request_body(
         { "role": "user", "content": user_prompt.to_string() }
       ]
     })
+}
+
+fn audio_filename_for_mime_type(mime_type: &str) -> &'static str {
+    let normalized = mime_type.trim().to_ascii_lowercase();
+
+    if normalized.contains("webm") {
+        return "capture.webm";
+    }
+
+    if normalized.contains("wav") {
+        return "capture.wav";
+    }
+
+    if normalized.contains("mpeg") || normalized.contains("mp3") {
+        return "capture.mp3";
+    }
+
+    if normalized.contains("ogg") {
+        return "capture.ogg";
+    }
+
+    if normalized.contains("mp4") || normalized.contains("m4a") {
+        return "capture.m4a";
+    }
+
+    "capture.webm"
+}
+
+fn build_transcription_form(
+    model: TranscriptionModelId,
+    audio_bytes: &[u8],
+    mime_type: &str,
+) -> AppResult<Form> {
+    let file_part = Part::bytes(audio_bytes.to_vec())
+        .file_name(audio_filename_for_mime_type(mime_type).to_string())
+        .mime_str(mime_type)
+        .map_err(|error| AppError::InvalidInput(format!("unsupported audio mime type: {error}")))?;
+
+    Ok(Form::new()
+        .text("model", model.api_name().to_string())
+        .text("response_format", "json".to_string())
+        .part("file", file_part))
 }
 
 pub async fn interpret_message(
@@ -348,6 +392,180 @@ pub async fn interpret_message(
     ))
 }
 
+pub async fn transcribe_audio(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: TranscriptionModelId,
+    audio_bytes: &[u8],
+    mime_type: &str,
+    attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
+) -> AppResult<String> {
+    for attempt in 0..OPENAI_MAX_ATTEMPTS {
+        let attempt_number = attempt + 1;
+        let attempt_started_at = Instant::now();
+        let form = build_transcription_form(model, audio_bytes, mime_type)?;
+
+        let response = client
+            .post(OPENAI_AUDIO_TRANSCRIPTIONS_URL)
+            .bearer_auth(api_key)
+            .multipart(form)
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(value) => value,
+            Err(error) => {
+                let retryable =
+                    attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_transport_error(&error);
+                let delay_ms = if retryable {
+                    Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+                } else {
+                    None
+                };
+
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "transport_error",
+                    http_status: None,
+                    retryable,
+                    retry_delay_ms: delay_ms,
+                    error_class: Some(transport_error_class(&error)),
+                    error_message: Some(error.to_string()),
+                });
+
+                if let Some(delay_ms) = delay_ms {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    continue;
+                }
+
+                return Err(AppError::Network(error));
+            }
+        };
+
+        let status = response.status();
+        let response_text = match response.text().await {
+            Ok(value) => value,
+            Err(error) => {
+                let retryable =
+                    attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_transport_error(&error);
+                let delay_ms = if retryable {
+                    Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+                } else {
+                    None
+                };
+
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "transport_error",
+                    http_status: Some(status.as_u16()),
+                    retryable,
+                    retry_delay_ms: delay_ms,
+                    error_class: Some(transport_error_class(&error)),
+                    error_message: Some(error.to_string()),
+                });
+
+                if let Some(delay_ms) = delay_ms {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    continue;
+                }
+
+                return Err(AppError::Network(error));
+            }
+        };
+
+        if !status.is_success() {
+            let retryable =
+                attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_status(status.as_u16());
+            let delay_ms = if retryable {
+                Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+            } else {
+                None
+            };
+
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "http_error",
+                http_status: Some(status.as_u16()),
+                retryable,
+                retry_delay_ms: delay_ms,
+                error_class: None,
+                error_message: Some(format!("OpenAI transcription API error ({status})")),
+            });
+
+            if let Some(delay_ms) = delay_ms {
+                thread::sleep(Duration::from_millis(delay_ms));
+                continue;
+            }
+
+            return Err(AppError::Service(format!(
+                "OpenAI transcription API error ({status}): {response_text}"
+            )));
+        }
+
+        let response_json: Value = serde_json::from_str(&response_text).map_err(|error| {
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "parse_error",
+                http_status: Some(status.as_u16()),
+                retryable: false,
+                retry_delay_ms: None,
+                error_class: None,
+                error_message: Some(error.to_string()),
+            });
+
+            AppError::Service(format!(
+                "Failed to parse OpenAI transcription response JSON: {error}. Raw response: {response_text}"
+            ))
+        })?;
+
+        let transcript = response_json
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "parse_error",
+                    http_status: Some(status.as_u16()),
+                    retryable: false,
+                    retry_delay_ms: None,
+                    error_class: None,
+                    error_message: Some("OpenAI transcription response missing text".to_string()),
+                });
+                AppError::Service("OpenAI transcription response missing text".to_string())
+            })?;
+
+        attempt_telemetry.push(LlmAttemptTelemetry {
+            attempt: attempt_number,
+            max_attempts: OPENAI_MAX_ATTEMPTS,
+            duration_ms: attempt_duration_ms(attempt_started_at),
+            outcome: "success",
+            http_status: Some(status.as_u16()),
+            retryable: false,
+            retry_delay_ms: None,
+            error_class: None,
+            error_message: None,
+        });
+
+        return Ok(transcript.to_string());
+    }
+
+    Err(AppError::Service(
+        "OpenAI transcription request exhausted retry attempts".to_string(),
+    ))
+}
+
 fn attempt_duration_ms(started_at: Instant) -> i64 {
     started_at.elapsed().as_millis() as i64
 }
@@ -376,7 +594,9 @@ fn is_retryable_status(status_code: u16) -> bool {
 mod tests {
     use serde_json::Value;
 
-    use super::{build_request_body, build_system_prompt, is_retryable_status};
+    use super::{
+        audio_filename_for_mime_type, build_request_body, build_system_prompt, is_retryable_status,
+    };
     use crate::models::{CodeContext, OpenAiModelId};
 
     #[test]
@@ -490,6 +710,21 @@ mod tests {
                 .and_then(Value::as_str)
                 .expect("model should be serialized"),
             "gpt-4.1-nano"
+        );
+    }
+
+    #[test]
+    fn audio_filename_defaults_match_common_recording_mime_types() {
+        assert_eq!(
+            audio_filename_for_mime_type("audio/webm;codecs=opus"),
+            "capture.webm"
+        );
+        assert_eq!(audio_filename_for_mime_type("audio/wav"), "capture.wav");
+        assert_eq!(audio_filename_for_mime_type("audio/mp4"), "capture.m4a");
+        assert_eq!(audio_filename_for_mime_type("audio/ogg"), "capture.ogg");
+        assert_eq!(
+            audio_filename_for_mime_type("application/octet-stream"),
+            "capture.webm"
         );
     }
 }

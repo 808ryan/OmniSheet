@@ -17,6 +17,9 @@ import type {
   OpenAiModelId,
   SettingsStatus,
   SummaryExportResult,
+  TranscribeAudioInput,
+  TranscribeAudioResult,
+  TranscriptionModelId,
   TimelineDaySummary,
   TimelineEntry,
   TimelineWeeklySummary,
@@ -94,6 +97,10 @@ async function recordFrontendDiagnostic(input: DiagnosticsRecordInput): Promise<
   } catch {
     // Diagnostics logging should never block UX.
   }
+}
+
+export function diagnosticsRecordFrontendEvent(input: DiagnosticsRecordInput): Promise<void> {
+  return recordFrontendDiagnostic(input)
 }
 
 async function invokeCommand<T>(
@@ -174,6 +181,12 @@ export function settingsSetOpenAiModel(model: OpenAiModelId): Promise<void> {
   })
 }
 
+export function settingsSetTranscriptionModel(model: TranscriptionModelId): Promise<void> {
+  return invokeCommand<void>('settings_set_transcription_model', {
+    input: { model },
+  })
+}
+
 export function engagementList(): Promise<Engagement[]> {
   return invokeCommand<Engagement[]>('engagement_list')
 }
@@ -202,6 +215,10 @@ export function interpretTextMessage(input: InterpretTextInput): Promise<Interpr
   return invokeCommand<InterpretResult>('interpret_text_message', { input }, {
     messageText: input.rawText,
   })
+}
+
+export function transcribeAudioClip(input: TranscribeAudioInput): Promise<TranscribeAudioResult> {
+  return invokeCommand<TranscribeAudioResult>('transcribe_audio_clip', { input })
 }
 
 export function timelineListForDate(input: DateInput): Promise<TimelineEntry[]> {

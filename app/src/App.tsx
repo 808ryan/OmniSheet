@@ -11,6 +11,7 @@ import {
   activityDelete,
   activityUpsert,
   diagnosticsCopyBundle,
+  diagnosticsRecordFrontendEvent,
   diagnosticsList,
   engagementDelete,
   engagementList,
@@ -20,7 +21,9 @@ import {
   settingsGetStatus,
   settingsSetOpenAiKey,
   settingsSetOpenAiModel,
+  settingsSetTranscriptionModel,
   summaryExportWeeklyExcel,
+  transcribeAudioClip,
   timelineDeleteEntry,
   timelineListForDate,
   timelineMonthSummary,
@@ -39,6 +42,7 @@ import {
 } from './lib/time'
 import type {
   Activity,
+  CaptureSourceId,
   DiagnosticsEvent,
   Engagement,
   OpenAiModelId,
@@ -47,10 +51,12 @@ import type {
   TimelineEntry,
   TimelineWeeklySummary,
   TimelineWeeklySummaryNote,
+  TranscriptionModelId,
   WarningType,
 } from './lib/types'
 import deleteIcon from './assets/icons/delete.svg'
 import editIcon from './assets/icons/edit.svg'
+import microphoneIcon from './assets/icons/microphone.svg'
 import './App.css'
 
 type View = 'timeline' | 'codes' | 'settings' | 'diagnostics' | 'summary'
@@ -68,6 +74,7 @@ interface SubmissionQueueItem {
   id: string
   rawText: string
   submittedAtMs: number
+  captureSource: CaptureSourceId
   requestedOpenAiModel: OpenAiModelId
   clientTimestampIso: string
   clientLocalDate: string
@@ -82,6 +89,17 @@ interface SubmissionQueueItem {
   completedDurationMs?: number
   modelUsed?: OpenAiModelId
   modelUsedLabel?: string
+  transcriptionModelUsed?: TranscriptionModelId
+  transcriptionModelUsedLabel?: string
+  transcriptionDurationMs?: number
+}
+
+interface VoiceDraftMetadata {
+  captureSource: 'voice'
+  capturedAtMs: number
+  transcriptionModelUsed: TranscriptionModelId
+  transcriptionModelUsedLabel: string
+  transcriptionDurationMs: number
 }
 
 interface EngagementFormState {
@@ -211,6 +229,8 @@ interface RunActionOptions {
   formatError?: (error: unknown) => string
 }
 
+type VoiceCaptureState = 'idle' | 'recording' | 'transcribing'
+
 const EMPTY_ENGAGEMENT_FORM: EngagementFormState = {
   code: '',
   name: '',
@@ -263,6 +283,16 @@ const END_OF_DAY_INPUT_SENTINEL = '23:59'
 const MAX_CONCURRENT_SUBMISSIONS = 5
 const MAX_FINISHED_QUEUE_HISTORY = 10
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5-nano'
+const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-4o-mini-transcribe'
+const MAX_VOICE_RECORDING_DURATION_MS = 120_000
+const PREFERRED_VOICE_MIME_TYPES = [
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/mp4',
+  'audio/ogg;codecs=opus',
+  'audio/ogg',
+  'audio/wav',
+] as const
 const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'codes', label: 'Codes' },
@@ -443,6 +473,8 @@ function App() {
   const [openAiKey, setOpenAiKey] = useState('')
   const [selectedOpenAiModelDraft, setSelectedOpenAiModelDraft] =
     useState<OpenAiModelId>(DEFAULT_OPENAI_MODEL)
+  const [selectedTranscriptionModelDraft, setSelectedTranscriptionModelDraft] =
+    useState<TranscriptionModelId>(DEFAULT_TRANSCRIPTION_MODEL)
 
   const [engagements, setEngagements] = useState<Engagement[]>([])
   const [codeEditorSurface, setCodeEditorSurface] = useState<CodeEditorSurface | null>(null)
@@ -453,6 +485,9 @@ function App() {
   const [activityForm, setActivityForm] = useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
 
   const [captureMessage, setCaptureMessage] = useState('')
+  const [captureDraftMetadata, setCaptureDraftMetadata] = useState<VoiceDraftMetadata | null>(null)
+  const [voiceCaptureState, setVoiceCaptureState] = useState<VoiceCaptureState>('idle')
+  const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
   const [isSubmissionQueueOpen, setIsSubmissionQueueOpen] = useState(false)
 
@@ -486,6 +521,14 @@ function App() {
   const timelineEntriesRef = useRef<TimelineEntry[]>([])
   const suppressTimelineClickRef = useRef(false)
   const inFlightSubmissionIdsRef = useRef<Set<string>>(new Set())
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const voiceChunksRef = useRef<Blob[]>([])
+  const voiceCaptureStartedAtMsRef = useRef<number | null>(null)
+  const voiceCaptureMimeTypeRef = useRef<string>('audio/webm')
+  const voiceCaptureCorrelationIdRef = useRef<string | null>(null)
+  const voiceCaptureTimeoutRef = useRef<number | null>(null)
+  const stopVoiceRecordingToDraftRef = useRef<(reason?: 'mic_button' | 'auto_stop') => void>(() => {})
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
@@ -553,6 +596,86 @@ function App() {
 
     return [...processing, ...pending, ...finished]
   }, [submissionQueue])
+
+  const recordVoiceDiagnostic = useCallback((
+    eventType: string,
+    status: 'ok' | 'warning' | 'error',
+    details: Record<string, unknown>,
+  ) => {
+    void diagnosticsRecordFrontendEvent({
+      correlationId: voiceCaptureCorrelationIdRef.current ?? generateClientCorrelationId(),
+      layer: 'frontend',
+      eventType,
+      command: 'voice_capture',
+      status,
+      detailsJson: JSON.stringify(details),
+    })
+  }, [])
+
+  const clearVoiceCaptureTimeout = useCallback(() => {
+    if (voiceCaptureTimeoutRef.current !== null) {
+      window.clearTimeout(voiceCaptureTimeoutRef.current)
+      voiceCaptureTimeoutRef.current = null
+    }
+  }, [])
+
+  const stopVoiceCaptureStream = useCallback(() => {
+    const stream = mediaStreamRef.current
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop()
+      }
+    }
+
+    mediaStreamRef.current = null
+  }, [])
+
+  const enqueueSubmissionQueueItem = useCallback(({
+    rawText,
+    submittedAtMs,
+    clientTimestampIso,
+    clientLocalDate,
+    clientLocalTime,
+    clientUtcOffsetMinutes,
+    timezone,
+    captureSource,
+    transcriptionModelUsed,
+    transcriptionModelUsedLabel,
+    transcriptionDurationMs,
+  }: {
+    rawText: string
+    submittedAtMs: number
+    clientTimestampIso: string
+    clientLocalDate: string
+    clientLocalTime: string
+    clientUtcOffsetMinutes: number
+    timezone: string
+    captureSource: CaptureSourceId
+    transcriptionModelUsed?: TranscriptionModelId
+    transcriptionModelUsedLabel?: string
+    transcriptionDurationMs?: number
+  }) => {
+    const queueItem: SubmissionQueueItem = {
+      id: generateSubmissionQueueId(),
+      rawText,
+      submittedAtMs,
+      captureSource,
+      requestedOpenAiModel: settingsStatus?.selectedOpenAiModel ?? DEFAULT_OPENAI_MODEL,
+      clientTimestampIso,
+      clientLocalDate,
+      clientLocalTime,
+      clientUtcOffsetMinutes,
+      timezone,
+      state: 'pending',
+      statusMessage: 'Queued for processing.',
+      transcriptionModelUsed,
+      transcriptionModelUsedLabel,
+      transcriptionDurationMs,
+    }
+
+    setSubmissionQueue((previous) => [...previous, queueItem])
+    setIsSubmissionQueueOpen(true)
+  }, [settingsStatus])
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
   const timelineHeaderDate = useMemo(
@@ -840,6 +963,7 @@ function App() {
     const status = await settingsGetStatus()
     setSettingsStatus(status)
     setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+    setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
   }, [])
 
   const loadTimeline = useCallback(async (date: string) => {
@@ -1327,6 +1451,9 @@ function App() {
           clientLocalTime: item.clientLocalTime,
           clientUtcOffsetMinutes: item.clientUtcOffsetMinutes,
           timezone: item.timezone,
+          captureSource: item.captureSource,
+          transcriptionModel: item.transcriptionModelUsed,
+          transcriptionDurationMs: item.transcriptionDurationMs,
         })
 
         const completedAt = Date.now()
@@ -1394,6 +1521,310 @@ function App() {
       trimSubmissionQueue,
     ],
   )
+
+  const finalizeStoppedVoiceRecording = useCallback(async ({
+    stopReason,
+    nextAction,
+  }: {
+    stopReason: 'mic_button' | 'submit_button' | 'auto_stop'
+    nextAction: 'transcribe_only' | 'submit_after_transcription'
+  }) => {
+    const recorder = mediaRecorderRef.current
+    const startedAtMs = voiceCaptureStartedAtMsRef.current
+
+    if (!recorder || recorder.state === 'inactive' || startedAtMs === null) {
+      return null
+    }
+
+    const capturedAtMs = Date.now()
+    const durationMs = Math.max(1, capturedAtMs - startedAtMs)
+    clearVoiceCaptureTimeout()
+    setVoiceCaptureState('transcribing')
+    setVoiceCaptureStatusMessage('Transcribing voice note...')
+    recordVoiceDiagnostic('voice_recording_stopped', 'ok', {
+      audioDurationMs: durationMs,
+      stopReason,
+      nextAction,
+      mimeType: voiceCaptureMimeTypeRef.current,
+    })
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      const handleStop = () => {
+        recorder.removeEventListener('error', handleError)
+        stopVoiceCaptureStream()
+        mediaRecorderRef.current = null
+        const mimeType = recorder.mimeType || voiceCaptureMimeTypeRef.current || 'audio/webm'
+        const nextBlob = new Blob(voiceChunksRef.current, { type: mimeType })
+        voiceChunksRef.current = []
+        voiceCaptureStartedAtMsRef.current = null
+        resolve(nextBlob)
+      }
+
+      const handleError = () => {
+        recorder.removeEventListener('stop', handleStop)
+        stopVoiceCaptureStream()
+        mediaRecorderRef.current = null
+        voiceChunksRef.current = []
+        voiceCaptureStartedAtMsRef.current = null
+        reject(new Error('Audio recording failed.'))
+      }
+
+      recorder.addEventListener('stop', handleStop, { once: true })
+      recorder.addEventListener('error', handleError, { once: true })
+      recorder.stop()
+    })
+
+    return {
+      blob,
+      mimeType: blob.type || voiceCaptureMimeTypeRef.current || 'audio/webm',
+      capturedAtMs,
+      durationMs,
+    }
+  }, [clearVoiceCaptureTimeout, recordVoiceDiagnostic, stopVoiceCaptureStream])
+
+  const transcribeRecordedVoiceBlob = useCallback(async (recording: {
+    blob: Blob
+    mimeType: string
+    capturedAtMs: number
+    durationMs: number
+  }) => {
+    const audioBase64 = await blobToBase64(recording.blob)
+    const result = await transcribeAudioClip({
+      audioBase64,
+      mimeType: recording.mimeType,
+      durationMs: recording.durationMs,
+      captureTimestampIso: new Date(recording.capturedAtMs).toISOString(),
+    })
+
+    return {
+      ...result,
+      capturedAtMs: recording.capturedAtMs,
+    }
+  }, [])
+
+  const startVoiceRecording = useCallback(async () => {
+    if (voiceCaptureState !== 'idle') {
+      return
+    }
+
+    if (
+      typeof navigator === 'undefined'
+      || !navigator.mediaDevices?.getUserMedia
+      || typeof MediaRecorder === 'undefined'
+    ) {
+      setErrorMessage('Voice recording is not available in this environment.')
+      return
+    }
+
+    setErrorMessage(null)
+    setSuccessMessage(null)
+
+    let stream: MediaStream | null = null
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const preferredMimeType = selectPreferredVoiceMimeType()
+      const recorder = preferredMimeType
+        ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+        : new MediaRecorder(stream)
+
+      voiceCaptureCorrelationIdRef.current = generateClientCorrelationId()
+      mediaStreamRef.current = stream
+      mediaRecorderRef.current = recorder
+      voiceChunksRef.current = []
+      voiceCaptureStartedAtMsRef.current = Date.now()
+      voiceCaptureMimeTypeRef.current = recorder.mimeType || preferredMimeType || 'audio/webm'
+      recorder.addEventListener('dataavailable', (event) => {
+        if (event.data.size > 0) {
+          voiceChunksRef.current.push(event.data)
+        }
+      })
+
+      recorder.start()
+      setVoiceCaptureState('recording')
+      setVoiceCaptureStatusMessage('Recording voice note...')
+      recordVoiceDiagnostic('voice_recording_started', 'ok', {
+        mimeType: voiceCaptureMimeTypeRef.current,
+      })
+
+      clearVoiceCaptureTimeout()
+      voiceCaptureTimeoutRef.current = window.setTimeout(() => {
+        stopVoiceRecordingToDraftRef.current('auto_stop')
+      }, MAX_VOICE_RECORDING_DURATION_MS)
+    } catch (error) {
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          track.stop()
+        }
+      }
+
+      mediaStreamRef.current = null
+      mediaRecorderRef.current = null
+      voiceChunksRef.current = []
+      voiceCaptureStartedAtMsRef.current = null
+      voiceCaptureCorrelationIdRef.current = null
+      setVoiceCaptureState('idle')
+      setVoiceCaptureStatusMessage(null)
+      setErrorMessage(extractErrorMessage(error))
+      recordVoiceDiagnostic('voice_recording_failed', 'error', {
+        message: extractErrorMessage(error),
+      })
+    }
+  }, [
+    clearVoiceCaptureTimeout,
+    recordVoiceDiagnostic,
+    voiceCaptureState,
+  ])
+
+  const stopVoiceRecordingToDraft = useCallback(async (
+    stopReason: 'mic_button' | 'auto_stop' = 'mic_button',
+  ) => {
+    try {
+      const recording = await finalizeStoppedVoiceRecording({
+        stopReason,
+        nextAction: 'transcribe_only',
+      })
+
+      if (!recording) {
+        return
+      }
+
+      const transcription = await transcribeRecordedVoiceBlob(recording)
+      setCaptureMessage(transcription.transcriptText)
+      setCaptureDraftMetadata({
+        captureSource: 'voice',
+        capturedAtMs: transcription.capturedAtMs,
+        transcriptionModelUsed: transcription.transcriptionModelUsed,
+        transcriptionModelUsedLabel: transcription.transcriptionModelUsedLabel,
+        transcriptionDurationMs: transcription.transcriptionDurationMs,
+      })
+      setVoiceCaptureState('idle')
+      setVoiceCaptureStatusMessage(
+        `Voice transcript ready using ${transcription.transcriptionModelUsedLabel}.`,
+      )
+      setSuccessMessage('Voice note transcribed into the submission box.')
+    } catch (error) {
+      setVoiceCaptureState('idle')
+      setVoiceCaptureStatusMessage(null)
+      setErrorMessage(extractErrorMessage(error))
+      recordVoiceDiagnostic('voice_transcription_failed', 'error', {
+        message: extractErrorMessage(error),
+      })
+      stopVoiceCaptureStream()
+      mediaRecorderRef.current = null
+      voiceChunksRef.current = []
+      voiceCaptureStartedAtMsRef.current = null
+    } finally {
+      voiceCaptureCorrelationIdRef.current = null
+    }
+  }, [finalizeStoppedVoiceRecording, recordVoiceDiagnostic, stopVoiceCaptureStream, transcribeRecordedVoiceBlob])
+
+  stopVoiceRecordingToDraftRef.current = (reason = 'mic_button') => {
+    void stopVoiceRecordingToDraft(reason)
+  }
+
+  const stopVoiceRecordingAndSubmit = useCallback(async () => {
+    let queueItemId: string | null = null
+
+    try {
+      const recording = await finalizeStoppedVoiceRecording({
+        stopReason: 'submit_button',
+        nextAction: 'submit_after_transcription',
+      })
+
+      if (!recording) {
+        return
+      }
+
+      const submittedAt = new Date(recording.capturedAtMs)
+      const queueItem: SubmissionQueueItem = {
+        id: generateSubmissionQueueId(),
+        rawText: 'Voice note pending transcription...',
+        submittedAtMs: recording.capturedAtMs,
+        captureSource: 'voice',
+        requestedOpenAiModel: settingsStatus?.selectedOpenAiModel ?? DEFAULT_OPENAI_MODEL,
+        clientTimestampIso: submittedAt.toISOString(),
+        clientLocalDate: formatDate(submittedAt),
+        clientLocalTime: formatLocalTime(submittedAt),
+        clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        state: 'running',
+        statusMessage: 'Transcribing audio note...',
+      }
+      queueItemId = queueItem.id
+      setSubmissionQueue((previous) => [...previous, queueItem])
+      setIsSubmissionQueueOpen(true)
+
+      const transcription = await transcribeRecordedVoiceBlob(recording)
+      setSubmissionQueue((previous) =>
+        previous.map((candidate) =>
+          candidate.id === queueItem.id
+            ? {
+              ...candidate,
+              rawText: transcription.transcriptText,
+              state: 'pending',
+              statusMessage: 'Queued for processing.',
+              transcriptionModelUsed: transcription.transcriptionModelUsed,
+              transcriptionModelUsedLabel: transcription.transcriptionModelUsedLabel,
+              transcriptionDurationMs: transcription.transcriptionDurationMs,
+            }
+            : candidate,
+        ),
+      )
+      setCaptureMessage('')
+      setCaptureDraftMetadata(null)
+      setVoiceCaptureState('idle')
+      setVoiceCaptureStatusMessage(null)
+    } catch (error) {
+      const correlationId = isAppCommandError(error) ? error.correlationId : undefined
+      if (queueItemId) {
+        const completedAt = Date.now()
+        setSubmissionQueue((previous) =>
+          trimSubmissionQueue(
+            previous.map((candidate) =>
+              candidate.id === queueItemId
+                ? {
+                  ...candidate,
+                  state: 'error',
+                  statusMessage: extractErrorMessage(error),
+                  correlationId,
+                  completedAtMs: completedAt,
+                }
+                : candidate,
+            ),
+          ),
+        )
+      }
+
+      setVoiceCaptureState('idle')
+      setVoiceCaptureStatusMessage(null)
+      setErrorMessage(extractErrorMessage(error))
+      recordVoiceDiagnostic('voice_transcription_failed', 'error', {
+        message: extractErrorMessage(error),
+      })
+      stopVoiceCaptureStream()
+      mediaRecorderRef.current = null
+      voiceChunksRef.current = []
+      voiceCaptureStartedAtMsRef.current = null
+    } finally {
+      voiceCaptureCorrelationIdRef.current = null
+    }
+  }, [
+    finalizeStoppedVoiceRecording,
+    recordVoiceDiagnostic,
+    settingsStatus,
+    stopVoiceCaptureStream,
+    transcribeRecordedVoiceBlob,
+    trimSubmissionQueue,
+  ])
+
+  useEffect(() => () => {
+    clearVoiceCaptureTimeout()
+    stopVoiceCaptureStream()
+    mediaRecorderRef.current = null
+    voiceChunksRef.current = []
+    voiceCaptureStartedAtMsRef.current = null
+  }, [clearVoiceCaptureTimeout, stopVoiceCaptureStream])
 
   useEffect(() => {
     selectedDateRef.current = selectedDate
@@ -1583,29 +2014,33 @@ function App() {
 
   const onSubmitCapture = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (voiceCaptureState === 'recording') {
+      void stopVoiceRecordingAndSubmit()
+      return
+    }
+
     const messageToSend = captureMessage.trim()
     if (messageToSend.length === 0) {
       return
     }
 
-    const submittedAt = new Date()
-    const queueItem: SubmissionQueueItem = {
-      id: generateSubmissionQueueId(),
+    const submittedAt = new Date(captureDraftMetadata?.capturedAtMs ?? Date.now())
+    setCaptureMessage('')
+    enqueueSubmissionQueueItem({
       rawText: messageToSend,
       submittedAtMs: submittedAt.getTime(),
-      requestedOpenAiModel: settingsStatus?.selectedOpenAiModel ?? DEFAULT_OPENAI_MODEL,
       clientTimestampIso: submittedAt.toISOString(),
       clientLocalDate: formatDate(submittedAt),
       clientLocalTime: formatLocalTime(submittedAt),
       clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-      state: 'pending',
-      statusMessage: 'Queued for processing.',
-    }
-
-    setCaptureMessage('')
-    setSubmissionQueue((previous) => [...previous, queueItem])
-    setIsSubmissionQueueOpen(true)
+      captureSource: captureDraftMetadata?.captureSource ?? 'text',
+      transcriptionModelUsed: captureDraftMetadata?.transcriptionModelUsed,
+      transcriptionModelUsedLabel: captureDraftMetadata?.transcriptionModelUsedLabel,
+      transcriptionDurationMs: captureDraftMetadata?.transcriptionDurationMs,
+    })
+    setCaptureDraftMetadata(null)
+    setVoiceCaptureStatusMessage(null)
   }
 
   const onSubmitEngagement = (event: FormEvent<HTMLFormElement>) => {
@@ -1973,7 +2408,19 @@ function App() {
       const status = await settingsGetStatus()
       setSettingsStatus(status)
       setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
-      setSuccessMessage('OpenAI model preference saved.')
+      setSuccessMessage('Interpretation model preference saved.')
+    })
+  }
+
+  const onSaveTranscriptionModel = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    void runAction(async () => {
+      await settingsSetTranscriptionModel(selectedTranscriptionModelDraft)
+      const status = await settingsGetStatus()
+      setSettingsStatus(status)
+      setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
+      setSuccessMessage('Speech-to-text model preference saved.')
     })
   }
 
@@ -2075,14 +2522,53 @@ function App() {
             <form onSubmit={onSubmitCapture} className="stack">
               <textarea
                 value={captureMessage}
-                onChange={(event) => setCaptureMessage(event.target.value)}
+                onChange={(event) => {
+                  const nextValue = event.target.value
+                  setCaptureMessage(nextValue)
+                  if (nextValue.trim().length === 0) {
+                    setCaptureDraftMetadata(null)
+                    if (voiceCaptureState === 'idle') {
+                      setVoiceCaptureStatusMessage(null)
+                    }
+                  }
+                }}
                 placeholder="Example: Just finished a 30 minute SAP ITGC meeting with the Orange team"
                 rows={4}
-                required
+                required={voiceCaptureState !== 'recording'}
               />
-              <button type="submit" disabled={captureMessage.trim().length === 0}>
-                Send
-              </button>
+              {voiceCaptureStatusMessage ? (
+                <p className={`capture-status ${voiceCaptureState === 'recording' ? 'recording' : ''}`}>
+                  {voiceCaptureStatusMessage}
+                </p>
+              ) : null}
+              <div className="capture-actions">
+                <button
+                  type="button"
+                  className={`capture-mic-button ${voiceCaptureState === 'recording' ? 'recording' : ''}`}
+                  onClick={() => {
+                    if (voiceCaptureState === 'recording') {
+                      void stopVoiceRecordingToDraft()
+                      return
+                    }
+
+                    void startVoiceRecording()
+                  }}
+                  disabled={voiceCaptureState === 'transcribing'}
+                  aria-label={voiceCaptureState === 'recording' ? 'Stop recording' : 'Start recording'}
+                  title={voiceCaptureState === 'recording' ? 'Stop recording' : 'Start recording'}
+                >
+                  <img src={microphoneIcon} alt="" aria-hidden="true" />
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    voiceCaptureState === 'transcribing'
+                    || (voiceCaptureState !== 'recording' && captureMessage.trim().length === 0)
+                  }
+                >
+                  {voiceCaptureState === 'recording' ? 'Stop & Send' : 'Send'}
+                </button>
+              </div>
             </form>
 
             <div className="submission-queue">
@@ -2136,6 +2622,11 @@ function App() {
                         {item.state === 'success' && item.modelUsedLabel ? (
                           <p className="submission-queue-item-meta">
                             Model used: {item.modelUsedLabel}
+                          </p>
+                        ) : null}
+                        {item.captureSource === 'voice' && item.transcriptionModelUsedLabel ? (
+                          <p className="submission-queue-item-meta">
+                            Transcription model: {item.transcriptionModelUsedLabel}
                           </p>
                         ) : null}
                       </div>
@@ -2556,6 +3047,9 @@ function App() {
                     <p>Description: {selectedEntry.description}</p>
                     {selectedEntry.modelUsedLabel ? (
                       <p>Model Used: {selectedEntry.modelUsedLabel}</p>
+                    ) : null}
+                    {selectedEntry.source === 'voice' && selectedEntry.transcriptionModelUsedLabel ? (
+                      <p>Transcription Model: {selectedEntry.transcriptionModelUsedLabel}</p>
                     ) : null}
                     {selectedEntry.durationDefaulted ? (
                       <p>
@@ -3088,7 +3582,7 @@ function App() {
             </form>
             <form className="stack" onSubmit={onSaveOpenAiModel}>
               <label>
-                OpenAI Model
+                Interpretation Model
                 <select
                   value={selectedOpenAiModelDraft}
                   onChange={(event) =>
@@ -3114,15 +3608,53 @@ function App() {
                 Save Model Preference
               </button>
             </form>
+            <form className="stack" onSubmit={onSaveTranscriptionModel}>
+              <label>
+                Speech-to-Text Model
+                <select
+                  value={selectedTranscriptionModelDraft}
+                  onChange={(event) =>
+                    setSelectedTranscriptionModelDraft(event.target.value as TranscriptionModelId)
+                  }
+                  disabled={isBusy || settingsStatus === null}
+                >
+                  {(settingsStatus?.availableTranscriptionModels ?? []).map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="submit"
+                disabled={
+                  isBusy ||
+                  settingsStatus === null ||
+                  selectedTranscriptionModelDraft === settingsStatus.selectedTranscriptionModel
+                }
+              >
+                Save Transcription Model
+              </button>
+            </form>
             <p>
               Key configured: <strong>{settingsStatus?.hasOpenAiKey ? 'Yes' : 'No'}</strong>
             </p>
             <p>
-              Selected model:{' '}
+              Selected interpretation model:{' '}
               <strong>
                 {settingsStatus
                   ? settingsStatus.availableOpenAiModels.find(
                       (model) => model.id === settingsStatus.selectedOpenAiModel,
+                    )?.label ?? 'unknown'
+                  : 'unknown'}
+              </strong>
+            </p>
+            <p>
+              Selected speech-to-text model:{' '}
+              <strong>
+                {settingsStatus
+                  ? settingsStatus.availableTranscriptionModels.find(
+                      (model) => model.id === settingsStatus.selectedTranscriptionModel,
                     )?.label ?? 'unknown'
                   : 'unknown'}
               </strong>
@@ -3597,6 +4129,45 @@ function generateSubmissionQueueId(): string {
   }
 
   return `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function generateClientCorrelationId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+
+  return `voice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function selectPreferredVoiceMimeType(): string | undefined {
+  if (typeof MediaRecorder === 'undefined') {
+    return undefined
+  }
+
+  const supportsCheck = typeof MediaRecorder.isTypeSupported === 'function'
+  return PREFERRED_VOICE_MIME_TYPES.find(
+    (candidate) => !supportsCheck || MediaRecorder.isTypeSupported(candidate),
+  )
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => {
+      reject(new Error('Audio recording could not be prepared for transcription.'))
+    }
+    reader.onload = () => {
+      const value = reader.result
+      if (typeof value !== 'string') {
+        reject(new Error('Audio recording could not be prepared for transcription.'))
+        return
+      }
+
+      const [, encoded] = value.split(',', 2)
+      resolve(encoded ?? value)
+    }
+    reader.readAsDataURL(blob)
+  })
 }
 
 function formatSubmissionQueueStateLabel(state: SubmissionQueueItemState): string {

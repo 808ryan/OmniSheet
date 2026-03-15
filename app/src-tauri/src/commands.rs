@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime};
 use keyring::{Entry, Error as KeyringError};
 use rusqlite::Connection;
@@ -14,13 +15,15 @@ use uuid::Uuid;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    ActivityUpsertInput, ApiKeyInput, CodeContext, ContextActivity, ContextEngagement, DateInput,
-    DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement,
-    EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
-    LlmAlternativeActivity, LlmEntry, NormalizedEntry, OpenAiModelId, SettingsSetOpenAiModelInput,
-    SettingsStatus, StatusLevel, StorageHealth, SummaryExportResult, TimelineDaySummary,
-    TimelineEntry, TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode,
-    TimelineWeeklySummary, TimelineWeeklySummaryNote, Warning, WarningType,
+    ActivityUpsertInput, ApiKeyInput, CaptureSourceId, CodeContext, ContextActivity,
+    ContextEngagement, DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput,
+    DiagnosticsRecordInput, Engagement, EngagementUpsertInput, IdInput, IdResult, InterpretResult,
+    InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, NormalizedEntry,
+    OpenAiModelId, SettingsSetOpenAiModelInput, SettingsSetTranscriptionModelInput, SettingsStatus,
+    StatusLevel, StorageHealth, SummaryExportResult, TimelineDaySummary, TimelineEntry,
+    TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode, TimelineWeeklySummary,
+    TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult, TranscriptionModelId,
+    Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -32,6 +35,7 @@ const ACTIVITY_FALLBACK_CONFIDENCE_CAP: f64 = 0.60;
 const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
 const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
+const APP_SETTING_TRANSCRIPTION_MODEL: &str = "openai_transcription_model";
 const SUMMARY_DAY_NAMES: [&str; 7] = [
     "Saturday",
     "Sunday",
@@ -85,6 +89,10 @@ fn openai_model_options() -> Vec<crate::models::OpenAiModelOption> {
     OpenAiModelId::options()
 }
 
+fn transcription_model_options() -> Vec<crate::models::TranscriptionModelOption> {
+    TranscriptionModelId::options()
+}
+
 fn resolve_saved_openai_model_value(
     saved_value: Option<String>,
 ) -> (OpenAiModelId, Option<String>) {
@@ -102,11 +110,37 @@ fn read_saved_openai_model(connection: &Connection) -> AppResult<(OpenAiModelId,
     Ok(resolve_saved_openai_model_value(saved_value))
 }
 
+fn resolve_saved_transcription_model_value(
+    saved_value: Option<String>,
+) -> (TranscriptionModelId, Option<String>) {
+    match saved_value {
+        Some(value) => match TranscriptionModelId::from_api_name(&value) {
+            Some(model) => (model, None),
+            None => (TranscriptionModelId::default(), Some(value)),
+        },
+        None => (TranscriptionModelId::default(), None),
+    }
+}
+
+fn read_saved_transcription_model(
+    connection: &Connection,
+) -> AppResult<(TranscriptionModelId, Option<String>)> {
+    let saved_value = db::get_app_setting(connection, APP_SETTING_TRANSCRIPTION_MODEL)?;
+    Ok(resolve_saved_transcription_model_value(saved_value))
+}
+
 fn resolve_requested_openai_model(
     requested_model: Option<OpenAiModelId>,
     saved_model: OpenAiModelId,
 ) -> OpenAiModelId {
     requested_model.unwrap_or(saved_model)
+}
+
+fn capture_source_label(value: CaptureSourceId) -> &'static str {
+    match value {
+        CaptureSourceId::Text => "text",
+        CaptureSourceId::Voice => "voice",
+    }
 }
 
 fn record_invalid_saved_openai_model(
@@ -128,6 +162,29 @@ fn record_invalid_saved_openai_model(
           "invalidValue": invalid_value,
           "fallbackModel": OpenAiModelId::default().api_name(),
           "fallbackModelLabel": OpenAiModelId::default().display_label(),
+        }),
+    );
+}
+
+fn record_invalid_saved_transcription_model(
+    state: &State<'_, AppState>,
+    correlation_id: &str,
+    command: &str,
+    invalid_value: &str,
+) {
+    record_backend_event_with_state(
+        state,
+        correlation_id,
+        "settings_model_fallback",
+        command,
+        "warning",
+        None,
+        None,
+        json!({
+          "message": "Invalid saved transcription model; defaulted to GPT-4o Mini Transcribe.",
+          "invalidValue": invalid_value,
+          "fallbackModel": TranscriptionModelId::default().api_name(),
+          "fallbackModelLabel": TranscriptionModelId::default().display_label(),
         }),
     );
 }
@@ -914,6 +971,38 @@ fn record_llm_attempt_events(
     }
 }
 
+fn record_transcription_attempt_events(
+    state: &State<'_, AppState>,
+    correlation_id: &str,
+    command: &str,
+    model: TranscriptionModelId,
+    attempts: &[openai::LlmAttemptTelemetry],
+) {
+    for attempt in attempts {
+        record_backend_event_with_state(
+            state,
+            correlation_id,
+            "transcription_attempt",
+            command,
+            llm_attempt_event_status(attempt),
+            Some(attempt.duration_ms),
+            None,
+            json!({
+              "attempt": attempt.attempt,
+              "maxAttempts": attempt.max_attempts,
+              "outcome": attempt.outcome,
+              "httpStatus": attempt.http_status,
+              "retryable": attempt.retryable,
+              "retryDelayMs": attempt.retry_delay_ms,
+              "errorClass": attempt.error_class,
+              "error": attempt.error_message.as_deref(),
+              "transcriptionModel": model.api_name(),
+              "transcriptionModelLabel": model.display_label(),
+            }),
+        );
+    }
+}
+
 #[tauri::command]
 pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus, String> {
     let command = "settings_get_status";
@@ -921,7 +1010,12 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
     let started_at = Instant::now();
 
     let key_status = read_key_status(&state);
-    let (selected_open_ai_model, invalid_saved_model) = {
+    let (
+        selected_open_ai_model,
+        invalid_saved_model,
+        selected_transcription_model,
+        invalid_saved_transcription_model,
+    ) = {
         let connection = state.connection.lock().map_err(|_| {
             let message = state_lock_error();
             record_backend_event_with_state(
@@ -937,28 +1031,60 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             format_command_error(&correlation_id, message)
         })?;
 
-        match read_saved_openai_model(&connection) {
-            Ok(value) => value,
-            Err(error) => {
-                let message = error.to_string();
-                record_backend_event(
-                    &connection,
-                    state.inner(),
-                    &correlation_id,
-                    "command_error",
-                    command,
-                    "error",
-                    Some(duration_ms(started_at)),
-                    None,
-                    json!({ "stage": "read_model_setting", "message": message }),
-                );
-                return Err(format_command_error(&correlation_id, message));
-            }
-        }
+        let (selected_open_ai_model, invalid_saved_model) =
+            match read_saved_openai_model(&connection) {
+                Ok(value) => value,
+                Err(error) => {
+                    let message = error.to_string();
+                    record_backend_event(
+                        &connection,
+                        state.inner(),
+                        &correlation_id,
+                        "command_error",
+                        command,
+                        "error",
+                        Some(duration_ms(started_at)),
+                        None,
+                        json!({ "stage": "read_model_setting", "message": message }),
+                    );
+                    return Err(format_command_error(&correlation_id, message));
+                }
+            };
+
+        let (selected_transcription_model, invalid_saved_transcription_model) =
+            match read_saved_transcription_model(&connection) {
+                Ok(value) => value,
+                Err(error) => {
+                    let message = error.to_string();
+                    record_backend_event(
+                        &connection,
+                        state.inner(),
+                        &correlation_id,
+                        "command_error",
+                        command,
+                        "error",
+                        Some(duration_ms(started_at)),
+                        None,
+                        json!({ "stage": "read_transcription_model_setting", "message": message }),
+                    );
+                    return Err(format_command_error(&correlation_id, message));
+                }
+            };
+
+        (
+            selected_open_ai_model,
+            invalid_saved_model,
+            selected_transcription_model,
+            invalid_saved_transcription_model,
+        )
     };
 
     if let Some(invalid_value) = invalid_saved_model.as_deref() {
         record_invalid_saved_openai_model(&state, &correlation_id, command, invalid_value);
+    }
+
+    if let Some(invalid_value) = invalid_saved_transcription_model.as_deref() {
+        record_invalid_saved_transcription_model(&state, &correlation_id, command, invalid_value);
     }
 
     let status = SettingsStatus {
@@ -969,6 +1095,8 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         last_error: key_status.last_error.clone(),
         selected_open_ai_model,
         available_open_ai_models: openai_model_options(),
+        selected_transcription_model,
+        available_transcription_models: transcription_model_options(),
     };
 
     record_backend_event_with_state(
@@ -989,6 +1117,9 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "selectedOpenAiModel": status.selected_open_ai_model.api_name(),
           "selectedOpenAiModelLabel": status.selected_open_ai_model.display_label(),
           "availableOpenAiModelCount": status.available_open_ai_models.len(),
+          "selectedTranscriptionModel": status.selected_transcription_model.api_name(),
+          "selectedTranscriptionModelLabel": status.selected_transcription_model.display_label(),
+          "availableTranscriptionModelCount": status.available_transcription_models.len(),
         }),
     );
 
@@ -1167,6 +1298,90 @@ pub fn settings_set_openai_model(
                   "message": message,
                   "selectedOpenAiModel": selected_model.api_name(),
                   "selectedOpenAiModelLabel": selected_model.display_label(),
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn settings_set_transcription_model(
+    state: State<'_, AppState>,
+    input: SettingsSetTranscriptionModelInput,
+) -> Result<(), String> {
+    let command = "settings_set_transcription_model";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+    let selected_model = input.model;
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let save_result: Result<(), String> = (|| {
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_TRANSCRIPTION_MODEL,
+            selected_model.api_name(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified = db::get_app_setting(&connection, APP_SETTING_TRANSCRIPTION_MODEL)
+            .map_err(|error| error.to_string())?;
+
+        if verified.as_deref() != Some(selected_model.api_name()) {
+            return Err("Transcription model setting verification failed".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "selectedTranscriptionModel": selected_model.api_name(),
+                  "selectedTranscriptionModelLabel": selected_model.display_label(),
+                  "verified": true,
+                }),
+            );
+            Ok(())
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_transcription_model_setting",
+                  "message": message,
+                  "selectedTranscriptionModel": selected_model.api_name(),
+                  "selectedTranscriptionModelLabel": selected_model.display_label(),
                 }),
             );
             Err(format_command_error(&correlation_id, message))
@@ -1413,6 +1628,250 @@ fn diagnostics_event_line(event: &DiagnosticsEvent) -> String {
 }
 
 #[tauri::command]
+pub async fn transcribe_audio_clip(
+    state: State<'_, AppState>,
+    input: TranscribeAudioInput,
+) -> Result<TranscribeAudioResult, String> {
+    let command = "transcribe_audio_clip";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    record_backend_event_with_state(
+        &state,
+        &correlation_id,
+        "command_start",
+        command,
+        "ok",
+        None,
+        None,
+        json!({
+          "mimeType": input.mime_type,
+          "audioDurationMs": input.duration_ms,
+          "captureTimestampIso": input.capture_timestamp_iso,
+        }),
+    );
+
+    let encoded_audio = input
+        .audio_base64
+        .trim()
+        .rsplit_once(',')
+        .map(|(_, data)| data)
+        .unwrap_or_else(|| input.audio_base64.trim());
+
+    if encoded_audio.is_empty() {
+        let message = "audio payload cannot be empty";
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "message": message }),
+        );
+        return Err(format_command_error(&correlation_id, message));
+    }
+
+    if input.mime_type.trim().is_empty() {
+        let message = "audio mime type cannot be empty";
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "message": message }),
+        );
+        return Err(format_command_error(&correlation_id, message));
+    }
+
+    if input.duration_ms <= 0 {
+        let message = "audio duration must be greater than zero";
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "message": message, "audioDurationMs": input.duration_ms }),
+        );
+        return Err(format_command_error(&correlation_id, message));
+    }
+
+    let audio_bytes = BASE64_STANDARD.decode(encoded_audio).map_err(|error| {
+        let message = format!("audio payload could not be decoded: {error}");
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "decode_audio", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let api_key = match get_openai_api_key(&state) {
+        Ok(value) => value,
+        Err(error) => {
+            let message = error.to_string();
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({ "stage": "read_key", "message": message }),
+            );
+            return Err(format_command_error(&correlation_id, message));
+        }
+    };
+
+    let (selected_transcription_model, invalid_saved_model) = {
+        let connection = state.connection.lock().map_err(|_| {
+            let message = state_lock_error();
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({ "stage": "read_transcription_model_setting", "message": message }),
+            );
+            format_command_error(&correlation_id, message)
+        })?;
+
+        match read_saved_transcription_model(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "read_transcription_model_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        }
+    };
+
+    if let Some(invalid_value) = invalid_saved_model.as_deref() {
+        record_invalid_saved_transcription_model(&state, &correlation_id, command, invalid_value);
+    }
+
+    let transcription_started_at = Instant::now();
+    let mut transcription_attempts = Vec::<openai::LlmAttemptTelemetry>::new();
+    let transcription_result = openai::transcribe_audio(
+        &state.http_client,
+        &api_key,
+        selected_transcription_model,
+        &audio_bytes,
+        input.mime_type.trim(),
+        &mut transcription_attempts,
+    )
+    .await;
+
+    record_transcription_attempt_events(
+        &state,
+        &correlation_id,
+        command,
+        selected_transcription_model,
+        &transcription_attempts,
+    );
+    let transcription_duration_ms = duration_ms(transcription_started_at);
+    let transcription_summary = llm_attempt_summary(&transcription_attempts);
+
+    let transcript_text = match transcription_result {
+        Ok(value) => {
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "transcription_response",
+                command,
+                "ok",
+                Some(transcription_duration_ms),
+                None,
+                json!({
+                  "audioDurationMs": input.duration_ms,
+                  "decodedAudioBytes": audio_bytes.len(),
+                  "transcriptLength": value.len(),
+                  "transcriptionModel": selected_transcription_model.api_name(),
+                  "transcriptionModelLabel": selected_transcription_model.display_label(),
+                  "transcriptionDurationMs": transcription_duration_ms,
+                  "attemptSummary": transcription_summary,
+                }),
+            );
+            value
+        }
+        Err(error) => {
+            let message = error.to_string();
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "transcription_response",
+                command,
+                "error",
+                Some(transcription_duration_ms),
+                None,
+                json!({
+                  "message": message,
+                  "audioDurationMs": input.duration_ms,
+                  "decodedAudioBytes": audio_bytes.len(),
+                  "transcriptionModel": selected_transcription_model.api_name(),
+                  "transcriptionModelLabel": selected_transcription_model.display_label(),
+                  "transcriptionDurationMs": transcription_duration_ms,
+                  "attemptSummary": transcription_summary,
+                }),
+            );
+            return Err(format_command_error(&correlation_id, message));
+        }
+    };
+
+    record_backend_event_with_state(
+        &state,
+        &correlation_id,
+        "command_success",
+        command,
+        "ok",
+        Some(duration_ms(started_at)),
+        None,
+        json!({
+          "audioDurationMs": input.duration_ms,
+          "decodedAudioBytes": audio_bytes.len(),
+          "transcriptLength": transcript_text.len(),
+          "transcriptionModel": selected_transcription_model.api_name(),
+          "transcriptionModelLabel": selected_transcription_model.display_label(),
+          "transcriptionDurationMs": transcription_duration_ms,
+        }),
+    );
+
+    Ok(TranscribeAudioResult {
+        transcript_text,
+        transcription_model_used: selected_transcription_model,
+        transcription_model_used_label: selected_transcription_model.display_label().to_string(),
+        transcription_duration_ms,
+        audio_duration_ms: input.duration_ms,
+    })
+}
+
+#[tauri::command]
 pub async fn interpret_text_message(
     state: State<'_, AppState>,
     input: InterpretTextInput,
@@ -1436,6 +1895,9 @@ pub async fn interpret_text_message(
           "clientLocalTime": input.client_local_time,
           "clientUtcOffsetMinutes": input.client_utc_offset_minutes,
           "requestedOpenAiModel": input.open_ai_model.map(|model| model.api_name()),
+          "captureSource": input.capture_source.map(capture_source_label),
+          "transcriptionModel": input.transcription_model.map(|model| model.api_name()),
+          "transcriptionDurationMs": input.transcription_duration_ms,
         }),
     );
 
@@ -1780,6 +2242,9 @@ pub async fn interpret_text_message(
             input.raw_text.trim(),
             &interpreted_entries_json,
             selected_openai_model.api_name(),
+            capture_source_label(input.capture_source.unwrap_or(CaptureSourceId::Text)),
+            input.transcription_model.map(|model| model.api_name()),
+            input.transcription_duration_ms,
             confidence_average,
             parsed_timestamp.timestamp(),
             interpreted_entry_count,
@@ -1806,7 +2271,7 @@ pub async fn interpret_text_message(
                 prepared_entry.fallback_summary.as_deref(),
                 Some(index as i64 + 1),
                 Some(saved_entry_count),
-                "text",
+                capture_source_label(input.capture_source.unwrap_or(CaptureSourceId::Text)),
             )
             .map_err(|error| error.to_string())?;
 
@@ -1901,6 +2366,9 @@ pub async fn interpret_text_message(
           "normalizationDetails": normalization_details,
           "model": selected_openai_model.api_name(),
           "modelLabel": selected_openai_model.display_label(),
+          "captureSource": capture_source_label(input.capture_source.unwrap_or(CaptureSourceId::Text)),
+          "transcriptionModel": input.transcription_model.map(|model| model.api_name()),
+          "transcriptionDurationMs": input.transcription_duration_ms,
           "llmDurationMs": llm_duration_ms,
         }),
     );
@@ -2934,7 +3402,7 @@ mod tests {
 
     use crate::models::{
         CodeContext, ContextActivity, ContextEngagement, KeySource, LlmEntry, NormalizedEntry,
-        OpenAiModelId, StatusLevel,
+        OpenAiModelId, StatusLevel, TranscriptionModelId,
     };
     use crate::openai::LlmAttemptTelemetry;
 
@@ -2943,9 +3411,9 @@ mod tests {
         llm_attempt_event_status, message_has_explicit_clock_time_cue,
         message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
         normalize_snapped_update_window, resolve_requested_openai_model,
-        resolve_saved_openai_model_value, round_to_nearest_15, timeline_week_bounds,
-        validate_manual_update_window, PreparedEntry, TemporalCueType, TemporalReference,
-        MINUTES_IN_DAY,
+        resolve_saved_openai_model_value, resolve_saved_transcription_model_value,
+        round_to_nearest_15, timeline_week_bounds, validate_manual_update_window, PreparedEntry,
+        TemporalCueType, TemporalReference, MINUTES_IN_DAY,
     };
 
     #[test]
@@ -3060,6 +3528,18 @@ mod tests {
             resolve_requested_openai_model(None, OpenAiModelId::Gpt41Nano),
             OpenAiModelId::Gpt41Nano
         );
+    }
+
+    #[test]
+    fn saved_transcription_model_defaults_when_missing_or_invalid() {
+        let (missing_model, missing_invalid_value) = resolve_saved_transcription_model_value(None);
+        assert_eq!(missing_model, TranscriptionModelId::Gpt4oMiniTranscribe);
+        assert!(missing_invalid_value.is_none());
+
+        let (invalid_model, invalid_value) =
+            resolve_saved_transcription_model_value(Some("legacy-transcribe".to_string()));
+        assert_eq!(invalid_model, TranscriptionModelId::Gpt4oMiniTranscribe);
+        assert_eq!(invalid_value.as_deref(), Some("legacy-transcribe"));
     }
 
     #[test]

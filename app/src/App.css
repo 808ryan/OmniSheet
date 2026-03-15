@@ -108,6 +108,51 @@
   min-height: 6.4rem;
 }
 
+.capture-status {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--ink-soft);
+}
+
+.capture-status.recording {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.capture-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.capture-mic-button {
+  width: 2.7rem;
+  height: 2.7rem;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  border: 1px solid var(--outline);
+  box-shadow: var(--glass-inset);
+}
+
+.capture-mic-button:hover:not(:disabled) {
+  background: rgba(31, 122, 255, 0.12);
+}
+
+.capture-mic-button.recording {
+  background: rgba(180, 35, 24, 0.12);
+  border-color: rgba(180, 35, 24, 0.4);
+  color: var(--danger);
+}
+
+.capture-mic-button img {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
 .submission-queue {
   border: 1px solid var(--outline);
   border-radius: 12px;
