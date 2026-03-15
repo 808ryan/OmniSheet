@@ -2583,6 +2583,7 @@ function App() {
                               Name
                               <span className="required-indicator" aria-hidden="true">*</span>
                             </span>
+                            <span className="field-helper">Required for matching</span>
                             <input
                               ref={engagementNameInputRef}
                               value={engagementForm.name}
@@ -2596,7 +2597,7 @@ function App() {
                             />
                           </label>
                           <label>
-                            Code (optional)
+                            Code
                             <input
                               value={engagementForm.code}
                               onChange={(event) =>
@@ -2758,6 +2759,7 @@ function App() {
                               Name
                               <span className="required-indicator" aria-hidden="true">*</span>
                             </span>
+                            <span className="field-helper">Required for matching</span>
                             <input
                               value={activityForm.name}
                               onChange={(event) =>
@@ -2770,7 +2772,7 @@ function App() {
                             />
                           </label>
                           <label>
-                            Code (optional)
+                            Code
                             <input
                               value={activityForm.code}
                               onChange={(event) =>
