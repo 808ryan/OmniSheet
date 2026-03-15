@@ -30,8 +30,8 @@ Return strict JSON with this shape:
 {
   "entries": [
     {
-      "engagementCode": string | null,
-      "activityCode": string | null,
+      "engagementRef": string | null,
+      "activityRef": string | null,
       "date": "YYYY-MM-DD",
       "startTime": "HH:MM" | null,
       "endTime": "HH:MM" | null,
@@ -40,7 +40,7 @@ Return strict JSON with this shape:
       "activityReason": string | null,
       "alternativeActivities": [
         {
-          "activityCode": string,
+          "activityRef": string,
           "reason": string
         }
       ] | null,
@@ -78,15 +78,18 @@ Additional rules:
 - Never default missing times to 00:00.
 - If uncertain, set lower confidence.
 - Use describeWhenToUse as the primary categorization signal for engagements and activities.
+- Use names as the primary visible categorization cue.
+- If a user-provided code appears in the context, treat it as a secondary hint only.
 - Use tags/key words as secondary hints; exact keyword overlap is not required.
-- engagementCode must be selected from engagementActivityContext.engagements[].code only.
-- Never place an activity code into engagementCode.
-- If you identify an engagementCode and that engagement has activities in the provided context, choose the best available activityCode from that engagement.
-- Use activityCode = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
-- If no engagement match exists, set engagementCode/activityCode to null.
-- If activityCode is not null, include activityReason that cites the strongest evidence from message text plus provided context.
-- If activityCode is not null, include alternativeActivities with up to 3 rejected codes from the same engagement and concise rejection reasons.
-- If activityCode is null, set activityReason and alternativeActivities to null.
+- engagementRef must be selected from engagementActivityContext.engagements[].engagementRef only.
+- activityRef must be selected from the chosen engagement's activities[].activityRef only.
+- Never invent or modify refs.
+- If you identify an engagementRef and that engagement has activities in the provided context, choose the best available activityRef from that engagement.
+- Use activityRef = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
+- If no engagement match exists, set engagementRef/activityRef to null.
+- If activityRef is not null, include activityReason that cites the strongest evidence from message text plus provided context.
+- If activityRef is not null, include alternativeActivities with up to 3 rejected activityRef values from the same engagement and concise rejection reasons.
+- If activityRef is null, set activityReason and alternativeActivities to null.
 - Duration and times must be internally consistent.
 - Confidence must be in range 0.0 to 1.0.
 - Never include text outside JSON.
@@ -378,18 +381,16 @@ mod tests {
     #[test]
     fn prompt_includes_morning_duration_example() {
         let prompt = build_system_prompt();
+        assert!(prompt.contains("\"in the morning i spent 30 minutes on a PCC related meeting\""));
         assert!(prompt.contains(
-            "\"in the morning i spent 30 minutes on a PCC related meeting\""
+            "Expected temporal intent: startTime \"09:30\", endTime \"10:00\", durationMinutes 30."
         ));
-        assert!(prompt.contains("Expected temporal intent: startTime \"09:30\", endTime \"10:00\", durationMinutes 30."));
     }
 
     #[test]
     fn prompt_disambiguates_single_time_duration_anchor_defaults() {
         let prompt = build_system_prompt();
-        assert!(prompt.contains(
-            "message includes exactly one explicit clock time plus duration"
-        ));
+        assert!(prompt.contains("message includes exactly one explicit clock time plus duration"));
         assert!(prompt.contains("treat that explicit time as startTime"));
         assert!(prompt.contains("clear end-anchor wording"));
         assert!(prompt.contains("\"going to spend 30 minutes at 6pm for pcc\""));
@@ -405,8 +406,8 @@ mod tests {
     #[test]
     fn prompt_makes_activity_null_a_last_resort_when_engagement_is_known() {
         let prompt = build_system_prompt();
-        assert!(prompt.contains("choose the best available activityCode"));
-        assert!(prompt.contains("Use activityCode = null only as a last resort"));
+        assert!(prompt.contains("choose the best available activityRef"));
+        assert!(prompt.contains("Use activityRef = null only as a last resort"));
         assert!(prompt.contains("If no engagement match exists"));
     }
 
@@ -414,6 +415,7 @@ mod tests {
     fn prompt_prioritizes_description_over_tags_for_categorization() {
         let prompt = build_system_prompt();
         assert!(prompt.contains("Use describeWhenToUse as the primary categorization signal"));
+        assert!(prompt.contains("Use names as the primary visible categorization cue"));
         assert!(prompt.contains("Use tags/key words as secondary hints"));
     }
 
@@ -423,7 +425,7 @@ mod tests {
         assert!(prompt.contains("\"activityReason\": string | null"));
         assert!(prompt.contains("\"alternativeActivities\""));
         assert!(prompt.contains("include activityReason"));
-        assert!(prompt.contains("rejected codes"));
+        assert!(prompt.contains("rejected activityRef values"));
     }
 
     #[test]

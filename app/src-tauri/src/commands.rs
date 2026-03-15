@@ -5,13 +5,12 @@ use std::time::Instant;
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime};
 use keyring::{Entry, Error as KeyringError};
-use rust_xlsxwriter::{Format, Workbook, XlsxError};
 use rusqlite::Connection;
+use rust_xlsxwriter::{Format, Workbook, XlsxError};
 use serde_json::{json, Value};
 use tauri::{Manager, State};
 use uuid::Uuid;
 
-use crate::code_reconciliation::reconcile_codes;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -20,7 +19,8 @@ use crate::models::{
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
     LlmAlternativeActivity, LlmEntry, NormalizedEntry, SettingsStatus, StatusLevel, StorageHealth,
     SummaryExportResult, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
-    TimelineUpdateInput, TimelineWeeklySummary, TimelineWeeklySummaryNote, Warning, WarningType,
+    TimelineUpdateInput, TimelineUpdateMode, TimelineWeeklySummary, TimelineWeeklySummaryNote,
+    Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -158,7 +158,13 @@ fn format_minutes_as_hours(minutes: i64) -> f64 {
 fn format_summary_notes_for_export(notes: &[TimelineWeeklySummaryNote]) -> String {
     notes
         .iter()
-        .map(|note| format!("{:.2} Hours: {}", format_minutes_as_hours(note.duration_minutes), note.description))
+        .map(|note| {
+            format!(
+                "{:.2} Hours: {}",
+                format_minutes_as_hours(note.duration_minutes),
+                note.description
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -216,7 +222,12 @@ fn write_weekly_hours_sheet(
     }
 
     for (day_index, day) in summary.days.iter().enumerate() {
-        worksheet.write_with_format(0, col, summary_day_header(day_index, &day.date), &header_format)?;
+        worksheet.write_with_format(
+            0,
+            col,
+            summary_day_header(day_index, &day.date),
+            &header_format,
+        )?;
         col += 1;
     }
 
@@ -234,8 +245,8 @@ fn write_weekly_hours_sheet(
 
     let mut row_index: u32 = 1;
     for row in &summary.rows {
-        worksheet.write(row_index, 0, row.engagement_code.as_str())?;
-        worksheet.write(row_index, 1, row.activity_code.as_str())?;
+        worksheet.write(row_index, 0, row.engagement_code.as_deref().unwrap_or(""))?;
+        worksheet.write(row_index, 1, row.activity_code.as_deref().unwrap_or(""))?;
         worksheet.write(row_index, 2, row.activity_name.as_str())?;
         worksheet.write(row_index, 3, row.engagement_name.as_str())?;
         let client_name = if row.client_name.trim().is_empty() {
@@ -332,8 +343,8 @@ fn write_weekly_hours_and_notes_sheet(
 
     let mut row_index: u32 = 1;
     for row in &summary.rows {
-        worksheet.write(row_index, 0, row.engagement_code.as_str())?;
-        worksheet.write(row_index, 1, row.activity_code.as_str())?;
+        worksheet.write(row_index, 0, row.engagement_code.as_deref().unwrap_or(""))?;
+        worksheet.write(row_index, 1, row.activity_code.as_deref().unwrap_or(""))?;
         worksheet.write(row_index, 2, row.activity_name.as_str())?;
         worksheet.write(row_index, 3, row.engagement_name.as_str())?;
         let client_name = if row.client_name.trim().is_empty() {
@@ -442,7 +453,7 @@ struct NormalizedEntryResult {
     raw_start: Option<String>,
     raw_end: Option<String>,
     raw_duration: Option<i64>,
-    llm_activity_code: Option<String>,
+    llm_activity_ref: Option<String>,
     llm_activity_reason: Option<String>,
     llm_alternative_activities: Option<Vec<LlmAlternativeActivity>>,
     temporal_cue_type: TemporalCueType,
@@ -464,7 +475,7 @@ struct ActivityFallbackDecision {
     applied: bool,
     reason: Option<String>,
     candidate_count: usize,
-    chosen_activity_code: Option<String>,
+    chosen_activity_ref: Option<String>,
     chosen_activity_name: Option<String>,
     chosen_score: Option<f64>,
     matched_terms: Vec<String>,
@@ -472,8 +483,18 @@ struct ActivityFallbackDecision {
 }
 
 #[derive(Debug, Clone)]
+struct RefResolutionDecision {
+    applied: bool,
+    reason: &'static str,
+    original_engagement_ref: Option<String>,
+    original_activity_ref: Option<String>,
+    resolved_engagement_ref: Option<String>,
+    resolved_activity_ref: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct ActivityCandidateMatch {
-    code: String,
+    activity_ref: String,
     name: String,
     score: f64,
     matched_terms: Vec<String>,
@@ -512,8 +533,8 @@ fn prepared_entry_dedupe_key(entry: &PreparedEntry) -> String {
         entry.entry.date,
         entry.entry.start_minute,
         entry.entry.end_minute,
-        entry.entry.engagement_code.as_deref().unwrap_or(""),
-        entry.entry.activity_code.as_deref().unwrap_or(""),
+        entry.entry.engagement_ref.as_deref().unwrap_or(""),
+        entry.entry.activity_ref.as_deref().unwrap_or(""),
         normalize_description_for_dedupe(&entry.entry.description)
     )
 }
@@ -1103,13 +1124,20 @@ pub fn timeline_update_entry(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "timeline entry not found".to_string())?;
 
-    let (start_minute, end_minute, duration_minutes) =
-        normalize_update_window(input.start_minute, input.end_minute);
+    let next_date = input.date.trim();
+    let (start_minute, end_minute, duration_minutes) = match input.mode {
+        TimelineUpdateMode::Manual => {
+            validate_manual_update_window(input.start_minute, input.end_minute)?
+        }
+        TimelineUpdateMode::Drag => {
+            normalize_snapped_update_window(input.start_minute, input.end_minute)
+        }
+    };
 
     db::update_timeline_entry(
         &connection,
         &input.id,
-        input.date.trim(),
+        next_date,
         start_minute,
         end_minute,
         duration_minutes,
@@ -1143,8 +1171,8 @@ pub fn timeline_update_entry(
     let _ = db::recompute_overlap_warnings(&connection, &previous_date)
         .map_err(|error| error.to_string())?;
 
-    if input.date != previous_date {
-        let _ = db::recompute_overlap_warnings(&connection, input.date.trim())
+    if next_date != previous_date {
+        let _ = db::recompute_overlap_warnings(&connection, next_date)
             .map_err(|error| error.to_string())?;
     }
 
@@ -1368,7 +1396,7 @@ pub async fn interpret_text_message(
     let mut fallback_count = 0;
 
     for mut result in normalization_results {
-        let code_reconciliation = reconcile_codes(&mut result.entry, &code_context);
+        let ref_resolution = reconcile_context_refs(&mut result.entry, &code_context);
         let activity_fallback = apply_activity_fallback_if_needed(
             &mut result.entry,
             input.raw_text.trim(),
@@ -1383,10 +1411,10 @@ pub async fn interpret_text_message(
             normalization_notes.push(note);
         }
 
-        if code_reconciliation.applied {
+        if ref_resolution.applied {
             normalization_notes.push(format!(
-                "Code reconciliation applied ({})",
-                code_reconciliation.reason.as_str()
+                "Reference resolution applied ({})",
+                ref_resolution.reason
             ));
         }
 
@@ -1410,24 +1438,23 @@ pub async fn interpret_text_message(
           "savedDate": result.entry.date,
           "savedStartMinute": result.entry.start_minute,
           "savedEndMinute": result.entry.end_minute,
-          "llmChosenActivityCode": result.llm_activity_code,
+          "llmChosenActivityRef": result.llm_activity_ref,
           "llmActivityReason": result.llm_activity_reason,
           "llmAlternativeActivities": result.llm_alternative_activities,
-          "originalEngagementCode": code_reconciliation.original_engagement_code,
-          "originalActivityCode": code_reconciliation.original_activity_code,
-          "savedEngagementCode": result.entry.engagement_code,
-          "savedActivityCode": result.entry.activity_code,
+          "originalEngagementRef": ref_resolution.original_engagement_ref,
+          "originalActivityRef": ref_resolution.original_activity_ref,
+          "savedEngagementRef": result.entry.engagement_ref,
+          "savedActivityRef": result.entry.activity_ref,
           "savedConfidence": result.entry.confidence,
-          "reconciliationApplied": code_reconciliation.applied,
-          "reconciliationReason": code_reconciliation.reason.as_str(),
-          "reconciliationAmbiguousCandidateCount": code_reconciliation.ambiguous_candidate_count,
-          "reconciledEngagementCode": code_reconciliation.reconciled_engagement_code,
-          "reconciledActivityCode": code_reconciliation.reconciled_activity_code,
+          "refResolutionApplied": ref_resolution.applied,
+          "refResolutionReason": ref_resolution.reason,
+          "resolvedEngagementRef": ref_resolution.resolved_engagement_ref,
+          "resolvedActivityRef": ref_resolution.resolved_activity_ref,
           "attemptedActivityFallback": activity_fallback.attempted,
           "usedActivityFallback": activity_fallback.applied,
           "activityFallbackReason": activity_fallback.reason,
           "activityFallbackCandidateCount": activity_fallback.candidate_count,
-          "activityFallbackChosenCode": activity_fallback.chosen_activity_code,
+          "activityFallbackChosenRef": activity_fallback.chosen_activity_ref,
           "activityFallbackChosenName": activity_fallback.chosen_activity_name,
           "activityFallbackScore": activity_fallback.chosen_score,
           "activityFallbackMatchedTerms": activity_fallback.matched_terms,
@@ -1473,16 +1500,15 @@ pub async fn interpret_text_message(
           "savedDate": temporal_reference.local_date.format("%Y-%m-%d").to_string(),
           "savedStartMinute": (temporal_reference.rounded_end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0),
           "savedEndMinute": temporal_reference.rounded_end_minute,
-          "llmChosenActivityCode": null,
+          "llmChosenActivityRef": null,
           "llmActivityReason": null,
           "llmAlternativeActivities": null,
-          "originalEngagementCode": null,
-          "originalActivityCode": null,
-          "reconciliationApplied": false,
-          "reconciliationReason": null,
-          "reconciliationAmbiguousCandidateCount": 0,
-          "reconciledEngagementCode": null,
-          "reconciledActivityCode": null,
+          "originalEngagementRef": null,
+          "originalActivityRef": null,
+          "refResolutionApplied": false,
+          "refResolutionReason": null,
+          "resolvedEngagementRef": null,
+          "resolvedActivityRef": null,
           "attemptedActivityFallback": false,
           "usedActivityFallback": false,
           "fallbackSummary": fallback_summary,
@@ -1542,12 +1568,7 @@ pub async fn interpret_text_message(
 
         for (index, prepared_entry) in prepared_entries.into_iter().enumerate() {
             let normalized_entry = prepared_entry.entry;
-            let (engagement_id, activity_id) = db::resolve_code_ids(
-                &connection,
-                normalized_entry.engagement_code.as_deref(),
-                normalized_entry.activity_code.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
+            let (engagement_id, activity_id) = resolve_ref_ids(&normalized_entry, &code_context);
 
             let entry_id = db::insert_timesheet_entry(
                 &connection,
@@ -1838,8 +1859,8 @@ fn fallback_entry(reference: &TemporalReference, raw_text: &str) -> NormalizedEn
         description: raw_text.to_string(),
         user_submission_text: raw_text.to_string(),
         confidence: 0.5,
-        engagement_code: None,
-        activity_code: None,
+        engagement_ref: None,
+        activity_ref: None,
     }
 }
 
@@ -1867,8 +1888,8 @@ fn normalize_llm_entry(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let raw_duration = entry.duration_minutes;
-    let llm_activity_code = entry
-        .activity_code
+    let llm_activity_ref = entry
+        .activity_ref
         .as_ref()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -1881,14 +1902,14 @@ fn normalize_llm_entry(
         activities
             .iter()
             .filter_map(|activity| {
-                let activity_code = activity.activity_code.trim();
+                let activity_ref = activity.activity_ref.trim();
                 let reason = activity.reason.trim();
-                if activity_code.is_empty() || reason.is_empty() {
+                if activity_ref.is_empty() || reason.is_empty() {
                     return None;
                 }
 
                 Some(LlmAlternativeActivity {
-                    activity_code: activity_code.to_string(),
+                    activity_ref: activity_ref.to_string(),
                     reason: reason.to_string(),
                 })
             })
@@ -1981,7 +2002,7 @@ fn normalize_llm_entry(
     let should_use_fallback = fallback_reason.is_some();
 
     let (normalized_start, normalized_end, duration_minutes) =
-        normalize_update_window(start_minute, end_minute);
+        normalize_snapped_update_window(start_minute, end_minute);
 
     let note = fallback_reason.as_ref().map(|reason| {
         format!(
@@ -2005,8 +2026,16 @@ fn normalize_llm_entry(
                 .unwrap_or_else(|| fallback_description.to_string()),
             user_submission_text: fallback_description.to_string(),
             confidence: normalize_confidence(entry.confidence),
-            engagement_code: entry.engagement_code.clone(),
-            activity_code: entry.activity_code.clone(),
+            engagement_ref: entry
+                .engagement_ref
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            activity_ref: entry
+                .activity_ref
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
         },
         note,
         used_temporal_fallback: should_use_fallback,
@@ -2015,7 +2044,7 @@ fn normalize_llm_entry(
         raw_start,
         raw_end,
         raw_duration,
-        llm_activity_code,
+        llm_activity_ref,
         llm_activity_reason,
         llm_alternative_activities,
         temporal_cue_type,
@@ -2028,11 +2057,11 @@ fn apply_activity_fallback_if_needed(
     raw_text: &str,
     code_context: &CodeContext,
 ) -> ActivityFallbackDecision {
-    if entry.activity_code.is_some() {
+    if entry.activity_ref.is_some() {
         return ActivityFallbackDecision::default();
     }
 
-    let Some(engagement_code) = entry.engagement_code.as_deref() else {
+    let Some(engagement_ref) = entry.engagement_ref.as_deref() else {
         return ActivityFallbackDecision::default();
     };
 
@@ -2041,12 +2070,12 @@ fn apply_activity_fallback_if_needed(
         ..ActivityFallbackDecision::default()
     };
 
-    let Some(engagement) = code_context
-        .engagements
-        .iter()
-        .find(|candidate| candidate.code.eq_ignore_ascii_case(engagement_code))
-    else {
-        decision.reason = Some("engagement_not_found_in_context".to_string());
+    let Some(engagement) = code_context.engagements.iter().find(|candidate| {
+        candidate
+            .engagement_ref
+            .eq_ignore_ascii_case(engagement_ref)
+    }) else {
+        decision.reason = Some("engagement_ref_not_found_in_context".to_string());
         return decision;
     };
 
@@ -2062,21 +2091,151 @@ fn apply_activity_fallback_if_needed(
         return decision;
     };
 
-    entry.activity_code = Some(candidate.code.clone());
+    entry.activity_ref = Some(candidate.activity_ref.clone());
     entry.confidence = entry.confidence.min(ACTIVITY_FALLBACK_CONFIDENCE_CAP);
 
     decision.applied = true;
     decision.reason = Some("engagement_known_activity_missing".to_string());
-    decision.chosen_activity_code = Some(candidate.code.clone());
+    decision.chosen_activity_ref = Some(candidate.activity_ref.clone());
     decision.chosen_activity_name = Some(candidate.name.clone());
     decision.chosen_score = Some(candidate.score);
     decision.matched_terms = candidate.matched_terms.clone();
     decision.note = Some(format!(
         "Activity fallback applied: selected {} ({}) for {} using activity name/tag similarity.",
-        candidate.code, candidate.name, engagement.code
+        candidate.activity_ref, candidate.name, engagement.name
     ));
 
     decision
+}
+
+fn reconcile_context_refs(
+    entry: &mut NormalizedEntry,
+    code_context: &CodeContext,
+) -> RefResolutionDecision {
+    let original_engagement_ref = normalize_optional_ref(entry.engagement_ref.clone());
+    let original_activity_ref = normalize_optional_ref(entry.activity_ref.clone());
+    let mut resolved_engagement_ref = original_engagement_ref.clone();
+    let mut resolved_activity_ref = original_activity_ref.clone();
+    let mut reason = "already_valid";
+
+    let engagement = resolved_engagement_ref
+        .as_deref()
+        .and_then(|engagement_ref| find_engagement_by_ref(code_context, engagement_ref));
+    let activity_match = resolved_activity_ref
+        .as_deref()
+        .and_then(|activity_ref| find_activity_by_ref(code_context, activity_ref));
+
+    match (engagement, activity_match) {
+        (Some(engagement), Some((owner, activity))) => {
+            resolved_engagement_ref = Some(engagement.engagement_ref.clone());
+            if owner.id == engagement.id {
+                resolved_activity_ref = Some(activity.activity_ref.clone());
+            } else {
+                resolved_activity_ref = None;
+                reason = "cleared_invalid_activity_for_engagement";
+            }
+        }
+        (Some(engagement), None) => {
+            resolved_engagement_ref = Some(engagement.engagement_ref.clone());
+            if resolved_activity_ref.is_some() {
+                resolved_activity_ref = None;
+                reason = "cleared_unknown_activity_ref";
+            }
+        }
+        (None, Some((owner, activity))) => {
+            resolved_engagement_ref = Some(owner.engagement_ref.clone());
+            resolved_activity_ref = Some(activity.activity_ref.clone());
+            reason = "derived_engagement_from_activity_ref";
+        }
+        (None, None) => {
+            if resolved_engagement_ref.is_some() || resolved_activity_ref.is_some() {
+                reason = "cleared_unknown_refs";
+            }
+            resolved_engagement_ref = None;
+            resolved_activity_ref = None;
+        }
+    }
+
+    let applied = original_engagement_ref != resolved_engagement_ref
+        || original_activity_ref != resolved_activity_ref;
+
+    entry.engagement_ref = resolved_engagement_ref.clone();
+    entry.activity_ref = resolved_activity_ref.clone();
+
+    RefResolutionDecision {
+        applied,
+        reason,
+        original_engagement_ref,
+        original_activity_ref,
+        resolved_engagement_ref,
+        resolved_activity_ref,
+    }
+}
+
+fn resolve_ref_ids(
+    entry: &NormalizedEntry,
+    code_context: &CodeContext,
+) -> (Option<String>, Option<String>) {
+    let engagement = entry
+        .engagement_ref
+        .as_deref()
+        .and_then(|engagement_ref| find_engagement_by_ref(code_context, engagement_ref));
+
+    let Some(engagement) = engagement else {
+        return (None, None);
+    };
+
+    let activity_id = entry
+        .activity_ref
+        .as_deref()
+        .and_then(|activity_ref| {
+            engagement
+                .activities
+                .iter()
+                .find(|activity| activity.activity_ref.eq_ignore_ascii_case(activity_ref))
+        })
+        .map(|activity| activity.id.clone());
+
+    (Some(engagement.id.clone()), activity_id)
+}
+
+fn find_engagement_by_ref<'a>(
+    code_context: &'a CodeContext,
+    engagement_ref: &str,
+) -> Option<&'a ContextEngagement> {
+    code_context.engagements.iter().find(|candidate| {
+        candidate
+            .engagement_ref
+            .eq_ignore_ascii_case(engagement_ref)
+    })
+}
+
+fn find_activity_by_ref<'a>(
+    code_context: &'a CodeContext,
+    activity_ref: &str,
+) -> Option<(&'a ContextEngagement, &'a ContextActivity)> {
+    for engagement in &code_context.engagements {
+        if let Some(activity) = engagement
+            .activities
+            .iter()
+            .find(|candidate| candidate.activity_ref.eq_ignore_ascii_case(activity_ref))
+        {
+            return Some((engagement, activity));
+        }
+    }
+
+    None
+}
+
+fn normalize_optional_ref(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn select_best_activity_candidate(
@@ -2121,7 +2280,7 @@ fn is_better_activity_candidate(
         return candidate.matched_terms.len() > current.matched_terms.len();
     }
 
-    candidate.code < current.code
+    candidate.activity_ref < current.activity_ref
 }
 
 fn score_activity_candidate(
@@ -2171,7 +2330,7 @@ fn score_activity_candidate(
     }
 
     ActivityCandidateMatch {
-        code: activity.code.clone(),
+        activity_ref: activity.activity_ref.clone(),
         name: activity.name.clone(),
         score,
         matched_terms,
@@ -2487,7 +2646,7 @@ fn normalize_confidence(raw_value: Option<f64>) -> f64 {
     value.clamp(0.0, 1.0)
 }
 
-fn normalize_update_window(start_minute: i64, end_minute: i64) -> (i64, i64, i64) {
+fn normalize_snapped_update_window(start_minute: i64, end_minute: i64) -> (i64, i64, i64) {
     let mut normalized_start = round_to_nearest_15(start_minute).clamp(0, MINUTES_IN_DAY);
     let mut normalized_end = round_to_nearest_15(end_minute).clamp(0, MINUTES_IN_DAY);
 
@@ -2503,6 +2662,25 @@ fn normalize_update_window(start_minute: i64, end_minute: i64) -> (i64, i64, i64
 
     let duration_minutes = (normalized_end - normalized_start).max(TIME_INCREMENT_MINUTES);
     (normalized_start, normalized_end, duration_minutes)
+}
+
+fn validate_manual_update_window(
+    start_minute: i64,
+    end_minute: i64,
+) -> Result<(i64, i64, i64), String> {
+    if !(0..MINUTES_IN_DAY).contains(&start_minute) {
+        return Err("start time must be between 00:00 and 23:59".to_string());
+    }
+
+    if !(1..=MINUTES_IN_DAY).contains(&end_minute) {
+        return Err("end time must be between 00:01 and 24:00".to_string());
+    }
+
+    if end_minute <= start_minute {
+        return Err("end time must be later than start time".to_string());
+    }
+
+    Ok((start_minute, end_minute, end_minute - start_minute))
 }
 
 trait TimeParts {
@@ -2534,8 +2712,9 @@ mod tests {
         apply_activity_fallback_if_needed, dedupe_prepared_entries, derive_key_status_level,
         llm_attempt_event_status, message_has_explicit_clock_time_cue,
         message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
-        normalize_update_window, round_to_nearest_15, timeline_week_bounds, PreparedEntry,
-        TemporalCueType, TemporalReference,
+        normalize_snapped_update_window, round_to_nearest_15, timeline_week_bounds,
+        validate_manual_update_window, PreparedEntry, TemporalCueType, TemporalReference,
+        MINUTES_IN_DAY,
     };
 
     #[test]
@@ -2555,7 +2734,7 @@ mod tests {
 
     #[test]
     fn update_window_enforces_minimum_quarter_hour() {
-        let (start, end, duration) = normalize_update_window(150, 150);
+        let (start, end, duration) = normalize_snapped_update_window(150, 150);
         assert_eq!(start, 150);
         assert_eq!(end, 165);
         assert_eq!(duration, 15);
@@ -2563,10 +2742,39 @@ mod tests {
 
     #[test]
     fn update_window_clamps_to_day_end() {
-        let (start, end, duration) = normalize_update_window(1439, 1600);
+        let (start, end, duration) = normalize_snapped_update_window(1439, 1600);
         assert_eq!(start, 1425);
         assert_eq!(end, 1440);
         assert_eq!(duration, 15);
+    }
+
+    #[test]
+    fn manual_update_window_preserves_exact_minutes() {
+        let (start, end, duration) =
+            validate_manual_update_window(9 * 60 + 7, 9 * 60 + 52).expect("valid manual window");
+        assert_eq!(start, 547);
+        assert_eq!(end, 592);
+        assert_eq!(duration, 45);
+    }
+
+    #[test]
+    fn manual_update_window_allows_end_of_day() {
+        let (start, end, duration) =
+            validate_manual_update_window(23 * 60 + 59, MINUTES_IN_DAY).expect("valid day end");
+        assert_eq!(start, 1439);
+        assert_eq!(end, 1440);
+        assert_eq!(duration, 1);
+    }
+
+    #[test]
+    fn manual_update_window_rejects_invalid_ranges() {
+        let equal_error =
+            validate_manual_update_window(600, 600).expect_err("equal range rejected");
+        assert_eq!(equal_error, "end time must be later than start time");
+
+        let reversed_error =
+            validate_manual_update_window(615, 610).expect_err("reversed range rejected");
+        assert_eq!(reversed_error, "end time must be later than start time");
     }
 
     #[test]
@@ -2636,8 +2844,8 @@ mod tests {
     #[test]
     fn normalization_falls_back_to_capture_window_when_no_time_cue() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-15".to_string()),
             start_time: Some("00:00".to_string()),
             end_time: Some("00:00".to_string()),
@@ -2664,8 +2872,8 @@ mod tests {
     #[test]
     fn normalization_defaults_missing_duration_without_temporal_fallback() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-15".to_string()),
             start_time: Some("12:00".to_string()),
             end_time: None,
@@ -2698,8 +2906,8 @@ mod tests {
     #[test]
     fn normalization_preserves_quarter_hour_duration() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-15".to_string()),
             start_time: Some("12:00".to_string()),
             end_time: None,
@@ -2731,8 +2939,8 @@ mod tests {
     #[test]
     fn normalization_keeps_explicit_clock_times() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-15".to_string()),
             start_time: Some("13:00".to_string()),
             end_time: Some("13:30".to_string()),
@@ -2763,8 +2971,8 @@ mod tests {
     #[test]
     fn normalization_does_not_mark_default_when_start_and_end_define_duration() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-15".to_string()),
             start_time: Some("13:00".to_string()),
             end_time: Some("14:00".to_string()),
@@ -2796,8 +3004,8 @@ mod tests {
     #[test]
     fn normalization_keeps_relative_duration_window_when_llm_times_present() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-17".to_string()),
             start_time: Some("20:48".to_string()),
             end_time: Some("21:48".to_string()),
@@ -2828,8 +3036,8 @@ mod tests {
     #[test]
     fn normalization_derives_from_duration_when_relative_cue_has_no_times() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-17".to_string()),
             start_time: None,
             end_time: None,
@@ -2862,8 +3070,8 @@ mod tests {
     #[test]
     fn normalization_falls_back_for_duration_without_relative_or_clock_cue() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-17".to_string()),
             start_time: None,
             end_time: None,
@@ -2891,8 +3099,8 @@ mod tests {
     #[test]
     fn normalization_marks_missing_duration_when_temporal_fallback_is_used() {
         let entry = LlmEntry {
-            engagement_code: Some("E-123".to_string()),
-            activity_code: Some("ACT-01".to_string()),
+            engagement_ref: Some("eng-123".to_string()),
+            activity_ref: Some("act-01".to_string()),
             date: Some("2026-02-17".to_string()),
             start_time: None,
             end_time: None,
@@ -2921,13 +3129,17 @@ mod tests {
     fn activity_fallback_selects_best_matching_activity_within_engagement() {
         let code_context = CodeContext {
             engagements: vec![ContextEngagement {
-                code: "E-69306633".to_string(),
+                id: "engagement-1".to_string(),
+                engagement_ref: "eng-001".to_string(),
+                code: Some("E-69306633".to_string()),
                 name: "PCC SOC2".to_string(),
                 tags: vec![],
                 describe_when_to_use: None,
                 activities: vec![
                     ContextActivity {
-                        code: "0001".to_string(),
+                        id: "activity-1".to_string(),
+                        activity_ref: "act-001-001".to_string(),
+                        code: Some("0001".to_string()),
                         name: "Report 1".to_string(),
                         tags: vec!["PCC".to_string(), "detail review".to_string()],
                         describe_when_to_use: Some(
@@ -2935,7 +3147,9 @@ mod tests {
                         ),
                     },
                     ContextActivity {
-                        code: "0006".to_string(),
+                        id: "activity-2".to_string(),
+                        activity_ref: "act-001-002".to_string(),
+                        code: Some("0006".to_string()),
                         name: "Admin/Management".to_string(),
                         tags: vec!["Admin".to_string(), "Management".to_string()],
                         describe_when_to_use: Some(
@@ -2955,8 +3169,8 @@ mod tests {
             user_submission_text: "Flight home from Reno for the PCC data center visit."
                 .to_string(),
             confidence: 0.9,
-            engagement_code: Some("E-69306633".to_string()),
-            activity_code: None,
+            engagement_ref: Some("eng-001".to_string()),
+            activity_ref: None,
         };
 
         let decision = apply_activity_fallback_if_needed(
@@ -2967,28 +3181,34 @@ mod tests {
 
         assert!(decision.attempted);
         assert!(decision.applied);
-        assert_eq!(entry.activity_code.as_deref(), Some("0001"));
+        assert_eq!(entry.activity_ref.as_deref(), Some("act-001-001"));
         assert!(entry.confidence <= 0.60);
-        assert_eq!(decision.chosen_activity_code.as_deref(), Some("0001"));
+        assert_eq!(decision.chosen_activity_ref.as_deref(), Some("act-001-001"));
     }
 
     #[test]
     fn activity_fallback_keeps_null_when_no_similarity_signal_exists() {
         let code_context = CodeContext {
             engagements: vec![ContextEngagement {
-                code: "E-1".to_string(),
+                id: "engagement-1".to_string(),
+                engagement_ref: "eng-001".to_string(),
+                code: Some("E-1".to_string()),
                 name: "Example".to_string(),
                 tags: vec![],
                 describe_when_to_use: None,
                 activities: vec![
                     ContextActivity {
-                        code: "1000".to_string(),
+                        id: "activity-1".to_string(),
+                        activity_ref: "act-001-001".to_string(),
+                        code: Some("1000".to_string()),
                         name: "Testing".to_string(),
                         tags: vec!["controls".to_string()],
                         describe_when_to_use: None,
                     },
                     ContextActivity {
-                        code: "2000".to_string(),
+                        id: "activity-2".to_string(),
+                        activity_ref: "act-001-002".to_string(),
+                        code: Some("2000".to_string()),
                         name: "Documentation".to_string(),
                         tags: vec!["writeups".to_string()],
                         describe_when_to_use: None,
@@ -3005,8 +3225,8 @@ mod tests {
             description: "Unrelated message".to_string(),
             user_submission_text: "Unrelated message".to_string(),
             confidence: 0.85,
-            engagement_code: Some("E-1".to_string()),
-            activity_code: None,
+            engagement_ref: Some("eng-001".to_string()),
+            activity_ref: None,
         };
 
         let decision = apply_activity_fallback_if_needed(
@@ -3018,7 +3238,7 @@ mod tests {
         assert!(decision.attempted);
         assert!(!decision.applied);
         assert_eq!(decision.reason.as_deref(), Some("no_similarity_signal"));
-        assert!(entry.activity_code.is_none());
+        assert!(entry.activity_ref.is_none());
         assert_eq!(entry.confidence, 0.85);
     }
 
@@ -3026,13 +3246,17 @@ mod tests {
     fn activity_fallback_can_use_description_guidance_without_tag_overlap() {
         let code_context = CodeContext {
             engagements: vec![ContextEngagement {
-                code: "E-2".to_string(),
+                id: "engagement-1".to_string(),
+                engagement_ref: "eng-001".to_string(),
+                code: Some("E-2".to_string()),
                 name: "Client Work".to_string(),
                 tags: vec![],
                 describe_when_to_use: None,
                 activities: vec![
                     ContextActivity {
-                        code: "A-10".to_string(),
+                        id: "activity-1".to_string(),
+                        activity_ref: "act-001-001".to_string(),
+                        code: Some("A-10".to_string()),
                         name: "Fieldwork".to_string(),
                         tags: vec![],
                         describe_when_to_use: Some(
@@ -3041,7 +3265,9 @@ mod tests {
                         ),
                     },
                     ContextActivity {
-                        code: "A-20".to_string(),
+                        id: "activity-2".to_string(),
+                        activity_ref: "act-001-002".to_string(),
+                        code: Some("A-20".to_string()),
                         name: "Reporting".to_string(),
                         tags: vec![],
                         describe_when_to_use: Some(
@@ -3061,8 +3287,8 @@ mod tests {
             description: "Walkthrough call".to_string(),
             user_submission_text: "Walkthrough call".to_string(),
             confidence: 0.9,
-            engagement_code: Some("E-2".to_string()),
-            activity_code: None,
+            engagement_ref: Some("eng-001".to_string()),
+            activity_ref: None,
         };
 
         let decision = apply_activity_fallback_if_needed(
@@ -3072,7 +3298,7 @@ mod tests {
         );
 
         assert!(decision.applied);
-        assert_eq!(entry.activity_code.as_deref(), Some("A-10"));
+        assert_eq!(entry.activity_ref.as_deref(), Some("act-001-001"));
     }
 
     #[test]
@@ -3128,8 +3354,8 @@ mod tests {
                 description: "Control testing".to_string(),
                 user_submission_text: "Control testing".to_string(),
                 confidence: 0.8,
-                engagement_code: Some("E-1".to_string()),
-                activity_code: Some("A-1".to_string()),
+                engagement_ref: Some("eng-001".to_string()),
+                activity_ref: Some("act-001-001".to_string()),
             },
             used_activity_fallback: false,
             used_temporal_fallback: false,
@@ -3154,8 +3380,8 @@ mod tests {
                 description: "Controls   testing".to_string(),
                 user_submission_text: "Controls testing".to_string(),
                 confidence: 0.8,
-                engagement_code: Some("E-1".to_string()),
-                activity_code: Some("A-1".to_string()),
+                engagement_ref: Some("eng-001".to_string()),
+                activity_ref: Some("act-001-001".to_string()),
             },
             used_activity_fallback: false,
             used_temporal_fallback: false,
@@ -3172,8 +3398,8 @@ mod tests {
                 description: "controls testing".to_string(),
                 user_submission_text: "controls testing".to_string(),
                 confidence: 0.8,
-                engagement_code: Some("E-1".to_string()),
-                activity_code: Some("A-1".to_string()),
+                engagement_ref: Some("eng-001".to_string()),
+                activity_ref: Some("act-001-001".to_string()),
             },
             used_activity_fallback: true,
             used_temporal_fallback: false,

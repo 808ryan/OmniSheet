@@ -1,4 +1,3 @@
-mod code_reconciliation;
 mod commands;
 mod db;
 mod error;

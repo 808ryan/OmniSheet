@@ -108,6 +108,7 @@ interface EntryDraft {
   description: string
   startTime: string
   endTime: string
+  preserveEndOfDay: boolean
 }
 
 interface TimelineWindow {
@@ -252,6 +253,7 @@ const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
   startMinute: 0,
   endMinute: MINUTES_IN_DAY,
 }
+const END_OF_DAY_INPUT_SENTINEL = '23:59'
 const MAX_CONCURRENT_SUBMISSIONS = 5
 const MAX_FINISHED_QUEUE_HISTORY = 10
 const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
@@ -1245,6 +1247,7 @@ function App() {
           id: draggedEntry.id,
           engagementId: draggedEntry.engagementId,
           activityId: draggedEntry.activityId,
+          mode: 'drag',
           date: draggedEntry.date,
           startMinute: nextStartMinute,
           endMinute: nextEndMinute,
@@ -1267,12 +1270,14 @@ function App() {
         await loadTimeline(selectedDateRef.current)
         await loadWeeklySummary(selectedDateRef.current)
         invalidateMonthSummaries([monthKey])
+        const nextDraftEndState = buildEntryDraftEndState(nextEndMinute)
         setEntryDraft((previous) =>
           previous && previous.id === draggedEntry.id
             ? {
                 ...previous,
                 startTime: minuteToTimeInput(nextStartMinute),
-                endTime: minuteToTimeInput(nextEndMinute),
+                endTime: nextDraftEndState.endTime,
+                preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
               }
             : previous,
         )
@@ -1604,7 +1609,7 @@ function App() {
 
       await engagementUpsert({
         id: engagementForm.id,
-        code: engagementForm.code,
+        code: engagementForm.code.trim() || null,
         name: engagementForm.name,
         client: engagementForm.client || null,
         colorHex,
@@ -1638,7 +1643,7 @@ function App() {
     setCodeEditorSurface('edit-engagement')
     setEngagementForm({
       id: engagement.id,
-      code: engagement.code,
+      code: engagement.code ?? '',
       name: engagement.name,
       client: engagement.client ?? '',
       colorHex: engagement.colorHex ?? '',
@@ -1669,7 +1674,7 @@ function App() {
       await activityUpsert({
         id: activityForm.id,
         engagementId: activityForm.engagementId,
-        code: activityForm.code,
+        code: activityForm.code.trim() || null,
         name: activityForm.name,
         colorHex,
         describeWhenToUse,
@@ -1703,7 +1708,7 @@ function App() {
     setActivityForm({
       id: activity.id,
       engagementId: activity.engagementId,
-      code: activity.code,
+      code: activity.code ?? '',
       name: activity.name,
       colorHex: activity.colorHex ?? '',
       describeWhenToUse: activity.describeWhenToUse ?? '',
@@ -1738,15 +1743,7 @@ function App() {
   const onSelectEntry = (entry: TimelineEntry) => {
     setTimelineContextMenu(null)
     setSelectedEntryId(entry.id)
-    setEntryDraft({
-      id: entry.id,
-      date: entry.date,
-      engagementId: entry.engagementId ?? '',
-      activityId: entry.activityId ?? '',
-      description: entry.description,
-      startTime: minuteToTimeInput(entry.startMinute),
-      endTime: minuteToTimeInput(entry.endMinute),
-    })
+    setEntryDraft(buildEntryDraft(entry))
   }
 
   const onSelectTimelineBlock = (entry: TimelineEntry) => {
@@ -1825,6 +1822,26 @@ function App() {
       return
     }
 
+    if (entryDraft.startTime.trim().length === 0) {
+      setSuccessMessage(null)
+      setErrorMessage('Start time is required.')
+      return
+    }
+
+    if (entryDraft.endTime.trim().length === 0) {
+      setSuccessMessage(null)
+      setErrorMessage('End time is required.')
+      return
+    }
+
+    const startMinute = timeInputToMinute(entryDraft.startTime)
+    const endMinute = resolveEntryDraftEndMinute(entryDraft)
+    if (endMinute <= startMinute) {
+      setSuccessMessage(null)
+      setErrorMessage('End time must be later than start time.')
+      return
+    }
+
     void runAction(async () => {
       const previousEntryDate = selectedEntry?.date ?? selectedDate
       const previousMonthKey = monthKeyFromDate(previousEntryDate)
@@ -1834,15 +1851,27 @@ function App() {
         id: entryDraft.id,
         engagementId: entryDraft.engagementId || null,
         activityId: entryDraft.activityId || null,
+        mode: 'manual',
         date: entryDraft.date,
-        startMinute: timeInputToMinute(entryDraft.startTime),
-        endMinute: timeInputToMinute(entryDraft.endTime),
+        startMinute,
+        endMinute,
         description: entryDraft.description,
       })
 
       await loadTimeline(selectedDate)
       await loadWeeklySummary(selectedDate)
       invalidateMonthSummaries([previousMonthKey, nextMonthKey])
+      const nextDraftEndState = buildEntryDraftEndState(endMinute)
+      setEntryDraft((previous) =>
+        previous && previous.id === entryDraft.id
+          ? {
+              ...previous,
+              startTime: minuteToTimeInput(startMinute),
+              endTime: nextDraftEndState.endTime,
+              preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
+            }
+          : previous,
+      )
       setSuccessMessage('Timeline entry updated.')
     })
   }
@@ -2379,7 +2408,7 @@ function App() {
                         <option value="">Uncategorized</option>
                         {engagements.map((engagement) => (
                           <option key={engagement.id} value={engagement.id}>
-                            {engagement.code} {engagement.name}
+                            {formatEntityDisplayLabel(engagement.name, engagement.code)}
                           </option>
                         ))}
                       </select>
@@ -2402,7 +2431,7 @@ function App() {
                         <option value="">Uncategorized</option>
                         {availableActivities.map((activity) => (
                           <option key={activity.id} value={activity.id}>
-                            {activity.code} {activity.name}
+                            {formatEntityDisplayLabel(activity.name, activity.code)}
                           </option>
                         ))}
                       </select>
@@ -2411,7 +2440,7 @@ function App() {
                       Start
                       <input
                         type="time"
-                        step={900}
+                        step={60}
                         value={entryDraft.startTime}
                         onChange={(event) =>
                           setEntryDraft((previous) =>
@@ -2429,7 +2458,7 @@ function App() {
                       End
                       <input
                         type="time"
-                        step={900}
+                        step={60}
                         value={entryDraft.endTime}
                         onChange={(event) =>
                           setEntryDraft((previous) =>
@@ -2437,6 +2466,7 @@ function App() {
                               ? {
                                   ...previous,
                                   endTime: event.target.value,
+                                  preserveEndOfDay: false,
                                 }
                               : previous,
                           )
@@ -2566,7 +2596,7 @@ function App() {
                             />
                           </label>
                           <label>
-                            Code
+                            Code (optional)
                             <input
                               value={engagementForm.code}
                               onChange={(event) =>
@@ -2575,7 +2605,6 @@ function App() {
                                   code: event.target.value,
                                 }))
                               }
-                              required
                             />
                           </label>
                           <label>
@@ -2719,7 +2748,7 @@ function App() {
                               </option>
                               {engagements.map((engagement) => (
                                 <option key={engagement.id} value={engagement.id}>
-                                  {engagement.code} {engagement.name}
+                                  {formatEntityDisplayLabel(engagement.name, engagement.code)}
                                 </option>
                               ))}
                             </select>
@@ -2741,7 +2770,7 @@ function App() {
                             />
                           </label>
                           <label>
-                            Code
+                            Code (optional)
                             <input
                               value={activityForm.code}
                               onChange={(event) =>
@@ -2750,12 +2779,11 @@ function App() {
                                   code: event.target.value,
                                 }))
                               }
-                              required
                             />
                           </label>
                           <label>
                             <span className="field-label-row">
-                              Describe when to use this activity code
+                              Describe when to use this activity
                               <span className="required-indicator" aria-hidden="true">*</span>
                             </span>
                             <span className="field-helper">Required for matching</span>
@@ -2769,7 +2797,7 @@ function App() {
                                   describeWhenToUse: event.target.value,
                                 }))
                               }
-                              placeholder="Use this activity code when..."
+                              placeholder="Use this activity when..."
                               required
                             />
                           </label>
@@ -2847,7 +2875,7 @@ function App() {
             <div className="code-browse-panel">
               <div className="code-panel-header">
                 <h2>Existing Engagements & Activities</h2>
-                <p>Click to expand and review/edit the related activity codes.</p>
+                <p>Click to expand and review/edit the related activities.</p>
               </div>
 
               <div className="code-list" aria-label="Existing engagements and activities">
@@ -2884,9 +2912,11 @@ function App() {
                               >
                                 <span className="engagement-disclosure-main">
                                   <span className="engagement-disclosure-icon" aria-hidden="true" />
-                                  <span className="code-item-copy">
-                                    <span className="code-item-title">
-                                      <span className="code-item-badge">{engagement.code}</span>
+                                    <span className="code-item-copy">
+                                      <span className="code-item-title">
+                                      {engagement.code ? (
+                                        <span className="code-item-badge">{engagement.code}</span>
+                                      ) : null}
                                       <span className="code-item-name">{engagement.name}</span>
                                     </span>
                                     <span
@@ -2908,8 +2938,8 @@ function App() {
                             <button
                               type="button"
                               className="icon-action-button"
-                              aria-label={`Edit engagement ${engagement.code}`}
-                              title={`Edit engagement ${engagement.code}`}
+                              aria-label={`Edit engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
+                              title={`Edit engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
                               onClick={() => onEditEngagement(engagement)}
                             >
                               <img src={editIcon} alt="" aria-hidden="true" />
@@ -2917,8 +2947,8 @@ function App() {
                             <button
                               type="button"
                               className="icon-action-button is-danger"
-                              aria-label={`Delete engagement ${engagement.code}`}
-                              title={`Delete engagement ${engagement.code}`}
+                              aria-label={`Delete engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
+                              title={`Delete engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
                               onClick={() => onDeleteEngagement(engagement.id)}
                             >
                               <img src={deleteIcon} alt="" aria-hidden="true" />
@@ -2947,7 +2977,9 @@ function App() {
                                   >
                                     <div className="code-item-copy">
                                       <div className="code-item-title">
-                                        <span className="code-item-badge">{activity.code}</span>
+                                        {activity.code ? (
+                                          <span className="code-item-badge">{activity.code}</span>
+                                        ) : null}
                                         <span className="code-item-name">{activity.name}</span>
                                       </div>
                                       <p
@@ -2962,8 +2994,8 @@ function App() {
                                       <button
                                         type="button"
                                         className="icon-action-button"
-                                        aria-label={`Edit activity ${activity.code}`}
-                                        title={`Edit activity ${activity.code}`}
+                                        aria-label={`Edit activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
+                                        title={`Edit activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
                                         onClick={() => onEditActivity(activity)}
                                       >
                                         <img src={editIcon} alt="" aria-hidden="true" />
@@ -2971,8 +3003,8 @@ function App() {
                                       <button
                                         type="button"
                                         className="icon-action-button is-danger"
-                                        aria-label={`Delete activity ${activity.code}`}
-                                        title={`Delete activity ${activity.code}`}
+                                        aria-label={`Delete activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
+                                        title={`Delete activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
                                         onClick={() => onDeleteActivity(activity.id)}
                                       >
                                         <img src={deleteIcon} alt="" aria-hidden="true" />
@@ -3172,11 +3204,11 @@ function App() {
                     ) : (
                       weeklySummary.rows.map((row, rowIndex) => (
                         <tr key={`${row.engagementCode}-${row.activityCode}-${rowIndex}`}>
-                          <td className={row.engagementCode === 'UNCAT' ? 'summary-uncategorized' : ''}>
-                            {row.engagementCode}
+                          <td className={row.isUncategorized ? 'summary-uncategorized' : ''}>
+                            {formatSummaryCodeValue(row.engagementCode, row.isUncategorized)}
                           </td>
-                          <td className={row.activityCode === 'UNCAT' ? 'summary-uncategorized' : ''}>
-                            {row.activityCode}
+                          <td className={row.isUncategorized ? 'summary-uncategorized' : ''}>
+                            {formatSummaryCodeValue(row.activityCode, row.isUncategorized)}
                           </td>
                           <td>{row.activityName}</td>
                           <td>{row.engagementName}</td>
@@ -3293,7 +3325,13 @@ function App() {
               </button>
             </div>
             <p className="summary-notes-context">
-              {selectedSummaryNotesContext.row.engagementCode} / {selectedSummaryNotesContext.row.activityCode}
+              {formatEntityDisplayLabel(
+                selectedSummaryNotesContext.row.engagementName,
+                selectedSummaryNotesContext.row.engagementCode,
+              )} / {formatEntityDisplayLabel(
+                selectedSummaryNotesContext.row.activityName,
+                selectedSummaryNotesContext.row.activityCode,
+              )}
               {' '}on {SUMMARY_DAY_NAMES[selectedSummaryNotesContext.dayIndex]} ({formatMonthDay(selectedSummaryNotesContext.day.date)})
             </p>
             <div className="summary-notes-list">
@@ -3436,6 +3474,42 @@ function formatLocalTime(value: Date): string {
   return `${hours}:${minutes}`
 }
 
+function buildEntryDraftEndState(endMinute: number): Pick<EntryDraft, 'endTime' | 'preserveEndOfDay'> {
+  if (endMinute === MINUTES_IN_DAY) {
+    return {
+      endTime: END_OF_DAY_INPUT_SENTINEL,
+      preserveEndOfDay: true,
+    }
+  }
+
+  return {
+    endTime: minuteToTimeInput(endMinute),
+    preserveEndOfDay: false,
+  }
+}
+
+function buildEntryDraft(entry: TimelineEntry): EntryDraft {
+  const endState = buildEntryDraftEndState(entry.endMinute)
+
+  return {
+    id: entry.id,
+    date: entry.date,
+    engagementId: entry.engagementId ?? '',
+    activityId: entry.activityId ?? '',
+    description: entry.description,
+    startTime: minuteToTimeInput(entry.startMinute),
+    ...endState,
+  }
+}
+
+function resolveEntryDraftEndMinute(entryDraft: EntryDraft): number {
+  if (entryDraft.preserveEndOfDay && entryDraft.endTime === END_OF_DAY_INPUT_SENTINEL) {
+    return MINUTES_IN_DAY
+  }
+
+  return timeInputToMinute(entryDraft.endTime)
+}
+
 function generateSubmissionQueueId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID()
@@ -3529,8 +3603,8 @@ function formatCodesMutationError(error: unknown): string {
     return 'This activity code already exists for the selected engagement. Enter a different activity code.'
   }
 
-  if (normalized.includes('engagement code and name are required')) {
-    return 'Engagement code and name are required.'
+  if (normalized.includes('engagement name is required')) {
+    return 'Engagement name is required.'
   }
 
   if (
@@ -3541,8 +3615,8 @@ function formatCodesMutationError(error: unknown): string {
     return '"Describe when to use" is required for matching.'
   }
 
-  if (normalized.includes('activity engagement, code, and name are required')) {
-    return 'Select an engagement and enter both activity code and activity name.'
+  if (normalized.includes('activity engagement and name are required')) {
+    return 'Select an engagement and enter an activity name.'
   }
 
   if (
@@ -4035,6 +4109,46 @@ function formatActivityCount(count: number): string {
   return `${count} ${count === 1 ? 'activity' : 'activities'}`
 }
 
+function normalizeDisplayText(value: string | null | undefined): string | null {
+  if (!value) {
+    return null
+  }
+
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function formatEntityPrimaryLabel(
+  name: string | null | undefined,
+  code: string | null | undefined,
+  fallback = 'Uncategorized',
+): string {
+  return normalizeDisplayText(name) ?? normalizeDisplayText(code) ?? fallback
+}
+
+function formatEntityDisplayLabel(
+  name: string | null | undefined,
+  code: string | null | undefined,
+  fallback = 'Uncategorized',
+): string {
+  const primary = formatEntityPrimaryLabel(name, code, fallback)
+  const normalizedCode = normalizeDisplayText(code)
+
+  if (!normalizedCode || normalizedCode.toUpperCase() === primary.toUpperCase()) {
+    return primary
+  }
+
+  return `${primary} (${normalizedCode})`
+}
+
+function formatSummaryCodeValue(code: string | null | undefined, isUncategorized: boolean): string {
+  if (isUncategorized) {
+    return 'UNCAT'
+  }
+
+  return normalizeDisplayText(code) ?? ''
+}
+
 function getTimelineBlockReviewLabel(warningFlags: WarningType[]): string | null {
   const hasLowConfidence = warningFlags.includes('low_confidence')
   const hasUnmatched = warningFlags.includes('unmatched')
@@ -4077,18 +4191,21 @@ function buildTimelineBlockLabel(
   widthPercent: number,
   blockHeight: number,
 ): TimelineLabel {
-  const engagementCode = entry.engagementCode ?? 'UNCAT'
-  const activityCode = entry.activityCode ?? 'UNCAT'
-  const activityName = entry.activityName?.trim() ?? activityCode
-  const activityDisplaySegment =
-    activityName.toUpperCase() === activityCode.toUpperCase()
-      ? activityCode
-      : `${activityCode} ${activityName}`
-  const fullLabelBase = `${engagementCode} | ${activityDisplaySegment}`
+  const engagementPrimary = formatEntityPrimaryLabel(
+    entry.engagementName,
+    entry.engagementCode,
+    'Uncategorized',
+  )
+  const activityPrimary = formatEntityPrimaryLabel(
+    entry.activityName,
+    entry.activityCode,
+    'Uncategorized',
+  )
+  const fullLabelBase = `${formatEntityDisplayLabel(entry.engagementName, entry.engagementCode)} | ${formatEntityDisplayLabel(entry.activityName, entry.activityCode)}`
 
   if (widthPercent < 36 || blockHeight < 28) {
     return {
-      label: activityCode,
+      label: activityPrimary,
       fullLabel: fullLabelBase,
       tier: 3,
     }
@@ -4096,7 +4213,7 @@ function buildTimelineBlockLabel(
 
   if (widthPercent < 58 || blockHeight < 38) {
     return {
-      label: `${engagementCode} | ${activityCode}`,
+      label: `${engagementPrimary} | ${activityPrimary}`,
       fullLabel: fullLabelBase,
       tier: 2,
     }
