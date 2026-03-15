@@ -61,8 +61,12 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: universal-apple-darwin
+
+      - name: Install Rust targets for universal macOS build
+        shell: bash
+        run: |
+          rustup target add x86_64-apple-darwin
+          rustup target add aarch64-apple-darwin
 
       - name: Install frontend dependencies
         working-directory: app
