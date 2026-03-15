@@ -156,6 +156,38 @@ interface PositionedTimelineEntry extends ClippedTimelineEntry {
 }
 
 type TimelineLabelTier = 1 | 2 | 3
+type VoiceCaptureState = 'idle' | 'recording' | 'transcribing'
+type VoicePlatform = 'macos' | 'windows' | 'linux' | 'unknown'
+type VoiceSupportFailureReasonCode =
+  | 'missing_navigator'
+  | 'missing_media_devices'
+  | 'missing_get_user_media'
+  | 'missing_media_recorder'
+type VoicePermissionOutcome =
+  | 'not_requested'
+  | 'granted'
+  | 'denied'
+  | 'device_unavailable'
+  | 'device_unreadable'
+  | 'unknown'
+
+interface VoiceEnvironmentSupport {
+  platform: VoicePlatform
+  isTauriDev: boolean
+  hasNavigator: boolean
+  hasMediaDevices: boolean
+  hasGetUserMedia: boolean
+  hasMediaRecorder: boolean
+  supportedMimeTypes: string[]
+  failureReasonCode: VoiceSupportFailureReasonCode | null
+}
+
+interface VoiceRecordingErrorDetails {
+  errorCategory: 'permission_denied' | 'device_unavailable' | 'device_unreadable' | 'unknown'
+  message: string
+  permissionErrorName: string | null
+  permissionOutcome: VoicePermissionOutcome
+}
 
 interface TimelineLabel {
   label: string
@@ -228,8 +260,6 @@ interface PositionTimelineEntriesOptions {
 interface RunActionOptions {
   formatError?: (error: unknown) => string
 }
-
-type VoiceCaptureState = 'idle' | 'recording' | 'transcribing'
 
 const EMPTY_ENGAGEMENT_FORM: EngagementFormState = {
   code: '',
@@ -1607,28 +1637,37 @@ function App() {
       return
     }
 
-    if (
-      typeof navigator === 'undefined'
-      || !navigator.mediaDevices?.getUserMedia
-      || typeof MediaRecorder === 'undefined'
-    ) {
-      setErrorMessage('Voice recording is not available in this environment.')
+    setErrorMessage(null)
+    setSuccessMessage(null)
+    setVoiceCaptureStatusMessage(null)
+
+    voiceCaptureCorrelationIdRef.current = generateClientCorrelationId()
+    const support = detectVoiceEnvironmentSupport()
+    const supportDiagnosticDetails = buildVoiceSupportDiagnosticDetails(support)
+
+    recordVoiceDiagnostic('voice_support_checked', 'ok', supportDiagnosticDetails)
+
+    if (support.failureReasonCode !== null) {
+      const message = formatVoiceSupportUnavailableMessage(support)
+      setErrorMessage(message)
+      recordVoiceDiagnostic('voice_support_unavailable', 'warning', {
+        ...supportDiagnosticDetails,
+        message,
+        permissionOutcome: 'not_requested',
+      })
+      voiceCaptureCorrelationIdRef.current = null
       return
     }
 
-    setErrorMessage(null)
-    setSuccessMessage(null)
-
     let stream: MediaStream | null = null
+    const preferredMimeType = selectPreferredVoiceMimeType()
 
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const preferredMimeType = selectPreferredVoiceMimeType()
       const recorder = preferredMimeType
         ? new MediaRecorder(stream, { mimeType: preferredMimeType })
         : new MediaRecorder(stream)
 
-      voiceCaptureCorrelationIdRef.current = generateClientCorrelationId()
       mediaStreamRef.current = stream
       mediaRecorderRef.current = recorder
       voiceChunksRef.current = []
@@ -1644,7 +1683,10 @@ function App() {
       setVoiceCaptureState('recording')
       setVoiceCaptureStatusMessage('Recording voice note...')
       recordVoiceDiagnostic('voice_recording_started', 'ok', {
+        ...supportDiagnosticDetails,
         mimeType: voiceCaptureMimeTypeRef.current,
+        mimeTypeCandidate: preferredMimeType ?? null,
+        permissionOutcome: 'granted',
       })
 
       clearVoiceCaptureTimeout()
@@ -1662,13 +1704,19 @@ function App() {
       mediaRecorderRef.current = null
       voiceChunksRef.current = []
       voiceCaptureStartedAtMsRef.current = null
-      voiceCaptureCorrelationIdRef.current = null
       setVoiceCaptureState('idle')
       setVoiceCaptureStatusMessage(null)
-      setErrorMessage(extractErrorMessage(error))
+      const errorDetails = mapVoiceRecordingError(error)
+      setErrorMessage(errorDetails.message)
       recordVoiceDiagnostic('voice_recording_failed', 'error', {
-        message: extractErrorMessage(error),
+        ...supportDiagnosticDetails,
+        errorCategory: errorDetails.errorCategory,
+        message: errorDetails.message,
+        mimeTypeCandidate: preferredMimeType ?? null,
+        permissionErrorName: errorDetails.permissionErrorName,
+        permissionOutcome: errorDetails.permissionOutcome,
       })
+      voiceCaptureCorrelationIdRef.current = null
     }
   }, [
     clearVoiceCaptureTimeout,
@@ -4139,15 +4187,188 @@ function generateClientCorrelationId(): string {
   return `voice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-function selectPreferredVoiceMimeType(): string | undefined {
+function listSupportedVoiceMimeTypes(): string[] {
   if (typeof MediaRecorder === 'undefined') {
-    return undefined
+    return []
   }
 
   const supportsCheck = typeof MediaRecorder.isTypeSupported === 'function'
-  return PREFERRED_VOICE_MIME_TYPES.find(
+  return PREFERRED_VOICE_MIME_TYPES.filter(
     (candidate) => !supportsCheck || MediaRecorder.isTypeSupported(candidate),
   )
+}
+
+function selectPreferredVoiceMimeType(): string | undefined {
+  return listSupportedVoiceMimeTypes()[0]
+}
+
+function detectVoiceEnvironmentSupport(): VoiceEnvironmentSupport {
+  const hasNavigator = typeof navigator !== 'undefined'
+  const hasMediaDevices = hasNavigator && typeof navigator.mediaDevices !== 'undefined'
+  const hasGetUserMedia = hasMediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function'
+  const hasMediaRecorder = typeof MediaRecorder !== 'undefined'
+  let failureReasonCode: VoiceSupportFailureReasonCode | null = null
+
+  if (!hasNavigator) {
+    failureReasonCode = 'missing_navigator'
+  } else if (!hasMediaDevices) {
+    failureReasonCode = 'missing_media_devices'
+  } else if (!hasGetUserMedia) {
+    failureReasonCode = 'missing_get_user_media'
+  } else if (!hasMediaRecorder) {
+    failureReasonCode = 'missing_media_recorder'
+  }
+
+  return {
+    platform: detectVoicePlatform(),
+    isTauriDev: import.meta.env.DEV && isTauriRuntime(),
+    hasNavigator,
+    hasMediaDevices,
+    hasGetUserMedia,
+    hasMediaRecorder,
+    supportedMimeTypes: listSupportedVoiceMimeTypes(),
+    failureReasonCode,
+  }
+}
+
+function buildVoiceSupportDiagnosticDetails(
+  support: VoiceEnvironmentSupport,
+): Record<string, unknown> {
+  return {
+    failureReasonCode: support.failureReasonCode,
+    hasGetUserMedia: support.hasGetUserMedia,
+    hasMediaDevices: support.hasMediaDevices,
+    hasMediaRecorder: support.hasMediaRecorder,
+    hasNavigator: support.hasNavigator,
+    isTauriDev: support.isTauriDev,
+    platform: support.platform,
+    supportedMimeTypes: support.supportedMimeTypes,
+  }
+}
+
+function formatVoiceSupportUnavailableMessage(support: VoiceEnvironmentSupport): string {
+  if (
+    (support.failureReasonCode === 'missing_media_devices'
+      || support.failureReasonCode === 'missing_get_user_media')
+    && support.platform === 'macos'
+    && support.isTauriDev
+  ) {
+    return 'Voice recording is unavailable in this macOS development runtime. Test voice from the packaged OmniSheet.app so macOS can grant microphone access.'
+  }
+
+  if (support.failureReasonCode === 'missing_media_recorder' && support.platform === 'macos') {
+    return 'This macOS WebKit runtime does not support voice recording yet. Test the packaged OmniSheet.app on a supported macOS version.'
+  }
+
+  if (support.failureReasonCode === 'missing_media_devices') {
+    return 'Voice recording is unavailable because this runtime does not expose media devices.'
+  }
+
+  if (support.failureReasonCode === 'missing_get_user_media') {
+    return 'Voice recording is unavailable because microphone capture is not exposed in this runtime.'
+  }
+
+  if (support.failureReasonCode === 'missing_media_recorder') {
+    return 'Voice recording is unavailable because this runtime does not support audio recording.'
+  }
+
+  if (support.failureReasonCode === 'missing_navigator') {
+    return 'Voice recording is unavailable because no browser runtime was detected.'
+  }
+
+  return 'Voice recording is not available in this environment.'
+}
+
+function mapVoiceRecordingError(error: unknown): VoiceRecordingErrorDetails {
+  const permissionErrorName = getVoiceErrorName(error)
+
+  if (permissionErrorName === 'NotAllowedError' || permissionErrorName === 'SecurityError') {
+    return {
+      errorCategory: 'permission_denied',
+      message: 'Microphone access was denied. Enable OmniSheet in System Settings > Privacy & Security > Microphone, then try again.',
+      permissionErrorName,
+      permissionOutcome: 'denied',
+    }
+  }
+
+  if (permissionErrorName === 'NotFoundError' || permissionErrorName === 'OverconstrainedError') {
+    return {
+      errorCategory: 'device_unavailable',
+      message: 'No microphone was found for voice recording.',
+      permissionErrorName,
+      permissionOutcome: 'device_unavailable',
+    }
+  }
+
+  if (permissionErrorName === 'NotReadableError' || permissionErrorName === 'AbortError') {
+    return {
+      errorCategory: 'device_unreadable',
+      message: 'The microphone is busy or could not be started. Close other apps using the microphone and try again.',
+      permissionErrorName,
+      permissionOutcome: 'device_unreadable',
+    }
+  }
+
+  return {
+    errorCategory: 'unknown',
+    message: extractErrorMessage(error),
+    permissionErrorName,
+    permissionOutcome: 'unknown',
+  }
+}
+
+function detectVoicePlatform(): VoicePlatform {
+  if (typeof navigator === 'undefined') {
+    return 'unknown'
+  }
+
+  const userAgentDataPlatform = (
+    navigator as Navigator & { userAgentData?: { platform?: string } }
+  ).userAgentData?.platform
+  const platformText = [
+    navigator.userAgent,
+    userAgentDataPlatform,
+    navigator.platform,
+  ]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ')
+    .toLowerCase()
+
+  if (platformText.includes('mac')) {
+    return 'macos'
+  }
+
+  if (platformText.includes('win')) {
+    return 'windows'
+  }
+
+  if (
+    platformText.includes('linux')
+    || platformText.includes('x11')
+    || platformText.includes('ubuntu')
+  ) {
+    return 'linux'
+  }
+
+  return 'unknown'
+}
+
+function getVoiceErrorName(error: unknown): string | null {
+  if (error instanceof Error && typeof error.name === 'string' && error.name.length > 0) {
+    return error.name
+  }
+
+  if (
+    typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && typeof error.name === 'string'
+    && error.name.length > 0
+  ) {
+    return error.name
+  }
+
+  return null
 }
 
 function blobToBase64(blob: Blob): Promise<string> {
