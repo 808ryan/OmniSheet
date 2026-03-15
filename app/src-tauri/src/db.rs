@@ -12,8 +12,8 @@ use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
     DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
     TimelineDaySummary, TimelineEntry, TimelineWeeklySummary, TimelineWeeklySummaryCell,
-    TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, Warning,
-    WarningType,
+    TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
+    TranscriptionModelId, Warning, WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
@@ -89,6 +89,9 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         raw_text TEXT NOT NULL,
         interpreted_entries_json TEXT NOT NULL,
         open_ai_model TEXT,
+        capture_source TEXT NOT NULL DEFAULT 'text',
+        transcription_model TEXT,
+        transcription_duration_ms INTEGER,
         confidence REAL NOT NULL,
         status TEXT NOT NULL,
         message_timestamp INTEGER NOT NULL,
@@ -216,6 +219,14 @@ fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column_exists(conn, "raw_messages", "open_ai_model", "TEXT")?;
+    ensure_column_exists(
+        conn,
+        "raw_messages",
+        "capture_source",
+        "TEXT NOT NULL DEFAULT 'text'",
+    )?;
+    ensure_column_exists(conn, "raw_messages", "transcription_model", "TEXT")?;
+    ensure_column_exists(conn, "raw_messages", "transcription_duration_ms", "INTEGER")?;
     ensure_column_exists(
         conn,
         "raw_messages",
@@ -662,6 +673,9 @@ pub fn insert_raw_message(
     raw_text: &str,
     interpreted_entries_json: &str,
     open_ai_model: &str,
+    capture_source: &str,
+    transcription_model: Option<&str>,
+    transcription_duration_ms: Option<i64>,
     confidence: f64,
     message_timestamp: i64,
     interpreted_entry_count: i64,
@@ -675,17 +689,21 @@ pub fn insert_raw_message(
     conn.execute(
         r#"
       INSERT INTO raw_messages (
-        id, raw_text, interpreted_entries_json, open_ai_model, confidence,
+        id, raw_text, interpreted_entries_json, open_ai_model, capture_source,
+        transcription_model, transcription_duration_ms, confidence,
         status, message_timestamp, interpreted_entry_count, unique_entry_count,
         saved_entry_count, truncated_entry_count, contains_multiple_events, created_at
       )
-      VALUES (?1, ?2, ?3, ?4, ?5, 'processed', ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'processed', ?9, ?10, ?11, ?12, ?13, ?14, ?15)
     "#,
         params![
             id,
             raw_text.trim(),
             interpreted_entries_json,
             open_ai_model,
+            capture_source,
+            transcription_model,
+            transcription_duration_ms,
             confidence,
             message_timestamp,
             interpreted_entry_count,
@@ -902,7 +920,8 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         te.fallback_summary,
         te.source_message_entry_index,
         te.source_message_entry_count,
-        rm.open_ai_model
+        rm.open_ai_model,
+        rm.transcription_model
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -917,6 +936,9 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
             let model_used = row
                 .get::<_, Option<String>>(21)?
                 .and_then(|value| OpenAiModelId::from_api_name(&value));
+            let transcription_model_used = row
+                .get::<_, Option<String>>(22)?
+                .and_then(|value| TranscriptionModelId::from_api_name(&value));
 
             Ok(TimelineEntry {
                 id: row.get(0)?,
@@ -942,6 +964,9 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
                 source_message_entry_count: row.get(20)?,
                 model_used,
                 model_used_label: model_used.map(|model| model.display_label().to_string()),
+                transcription_model_used,
+                transcription_model_used_label: transcription_model_used
+                    .map(|model| model.display_label().to_string()),
                 warning_flags: Vec::new(),
             })
         })?
@@ -1426,7 +1451,10 @@ pub fn list_diagnostics_events(
             r#"
           SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
           FROM diagnostics_events
-          WHERE command = 'interpret_text_message' OR event_type LIKE 'llm_%'
+          WHERE command IN ('interpret_text_message', 'transcribe_audio_clip')
+             OR event_type LIKE 'llm_%'
+             OR event_type LIKE 'transcription_%'
+             OR event_type LIKE 'voice_%'
           ORDER BY timestamp DESC
           LIMIT ?1
         "#,
@@ -1436,7 +1464,12 @@ pub fn list_diagnostics_events(
             r#"
           SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
           FROM diagnostics_events
-          WHERE command IN ('settings_get_status', 'settings_set_openai_key', 'settings_set_openai_model') OR event_type = 'key_save_verify'
+          WHERE command IN (
+            'settings_get_status',
+            'settings_set_openai_key',
+            'settings_set_openai_model',
+            'settings_set_transcription_model'
+          ) OR event_type = 'key_save_verify'
           ORDER BY timestamp DESC
           LIMIT ?1
         "#,
@@ -1571,6 +1604,7 @@ mod tests {
     };
     use crate::models::{
         ActivityUpsertInput, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
+        TranscriptionModelId,
     };
 
     fn test_connection() -> Connection {
@@ -1636,6 +1670,9 @@ mod tests {
             "worked on controls testing",
             "{\"entries\":[]}",
             "gpt-5-nano",
+            "text",
+            None,
+            None,
             0.8,
             current_unix_timestamp(),
             1,
@@ -1693,11 +1730,12 @@ mod tests {
             .execute(
                 r#"
                 INSERT INTO raw_messages (
-                  id, raw_text, interpreted_entries_json, open_ai_model, confidence,
+                  id, raw_text, interpreted_entries_json, open_ai_model, capture_source,
+                  transcription_model, transcription_duration_ms, confidence,
                   status, message_timestamp, interpreted_entry_count, unique_entry_count,
                   saved_entry_count, truncated_entry_count, contains_multiple_events, created_at
                 )
-                VALUES (?1, ?2, ?3, NULL, ?4, 'processed', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                VALUES (?1, ?2, ?3, NULL, 'text', NULL, NULL, ?4, 'processed', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 "#,
                 rusqlite::params![
                     "raw-null-model",
@@ -1763,6 +1801,9 @@ mod tests {
             "worked on controls testing",
             "{\"entries\":[]}",
             "legacy-model",
+            "text",
+            None,
+            None,
             0.8,
             current_unix_timestamp(),
             1,
@@ -1812,6 +1853,73 @@ mod tests {
     }
 
     #[test]
+    fn timeline_entries_include_transcription_model_for_voice_sources() {
+        let connection = test_connection();
+
+        insert_raw_message(
+            &connection,
+            "raw-voice",
+            "worked on controls testing",
+            "{\"entries\":[]}",
+            "gpt-5-nano",
+            "voice",
+            Some("whisper-1"),
+            Some(1800),
+            0.8,
+            current_unix_timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message should save");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-18".to_string(),
+            start_minute: 720,
+            end_minute: 750,
+            duration_minutes: 30,
+            description: "Voice captured testing".to_string(),
+            user_submission_text: "Voice captured testing".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-voice",
+            &entry,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "voice",
+        )
+        .expect("timesheet entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-18")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(
+            saved_entry.transcription_model_used,
+            Some(TranscriptionModelId::Whisper1)
+        );
+        assert_eq!(
+            saved_entry.transcription_model_used_label.as_deref(),
+            Some("Whisper")
+        );
+    }
+
+    #[test]
     fn weekly_summary_keeps_categorized_rows_when_codes_are_blank() {
         let connection = test_connection();
 
@@ -1851,6 +1959,9 @@ mod tests {
             "worked on client walkthrough",
             "{\"entries\":[]}",
             "gpt-5-nano",
+            "text",
+            None,
+            None,
             0.8,
             current_unix_timestamp(),
             1,

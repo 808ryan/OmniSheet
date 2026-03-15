@@ -56,6 +56,63 @@ impl OpenAiModelId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranscriptionModelId {
+    #[serde(rename = "gpt-4o-mini-transcribe")]
+    Gpt4oMiniTranscribe,
+    #[serde(rename = "whisper-1")]
+    Whisper1,
+}
+
+impl Default for TranscriptionModelId {
+    fn default() -> Self {
+        Self::Gpt4oMiniTranscribe
+    }
+}
+
+impl TranscriptionModelId {
+    pub const ALL: [Self; 2] = [Self::Gpt4oMiniTranscribe, Self::Whisper1];
+
+    pub fn api_name(self) -> &'static str {
+        match self {
+            Self::Gpt4oMiniTranscribe => "gpt-4o-mini-transcribe",
+            Self::Whisper1 => "whisper-1",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Gpt4oMiniTranscribe => "GPT-4o Mini Transcribe",
+            Self::Whisper1 => "Whisper",
+        }
+    }
+
+    pub fn from_api_name(value: &str) -> Option<Self> {
+        match value.trim() {
+            "gpt-4o-mini-transcribe" => Some(Self::Gpt4oMiniTranscribe),
+            "whisper-1" => Some(Self::Whisper1),
+            _ => None,
+        }
+    }
+
+    pub fn options() -> Vec<TranscriptionModelOption> {
+        Self::ALL
+            .into_iter()
+            .map(|model| TranscriptionModelOption {
+                id: model,
+                label: model.display_label().to_string(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureSourceId {
+    Text,
+    Voice,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAiModelOption {
@@ -65,8 +122,21 @@ pub struct OpenAiModelOption {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TranscriptionModelOption {
+    pub id: TranscriptionModelId,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsSetOpenAiModelInput {
     pub model: OpenAiModelId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSetTranscriptionModelInput {
+    pub model: TranscriptionModelId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +149,8 @@ pub struct SettingsStatus {
     pub last_error: Option<String>,
     pub selected_open_ai_model: OpenAiModelId,
     pub available_open_ai_models: Vec<OpenAiModelOption>,
+    pub selected_transcription_model: TranscriptionModelId,
+    pub available_transcription_models: Vec<TranscriptionModelOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +262,28 @@ pub struct InterpretTextInput {
     pub client_local_time: String,
     pub client_utc_offset_minutes: i64,
     pub open_ai_model: Option<OpenAiModelId>,
+    pub capture_source: Option<CaptureSourceId>,
+    pub transcription_model: Option<TranscriptionModelId>,
+    pub transcription_duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribeAudioInput {
+    pub audio_base64: String,
+    pub mime_type: String,
+    pub duration_ms: i64,
+    pub capture_timestamp_iso: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribeAudioResult {
+    pub transcript_text: String,
+    pub transcription_model_used: TranscriptionModelId,
+    pub transcription_model_used_label: String,
+    pub transcription_duration_ms: i64,
+    pub audio_duration_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +347,8 @@ pub struct TimelineEntry {
     pub source_message_entry_count: Option<i64>,
     pub model_used: Option<OpenAiModelId>,
     pub model_used_label: Option<String>,
+    pub transcription_model_used: Option<TranscriptionModelId>,
+    pub transcription_model_used_label: Option<String>,
     pub warning_flags: Vec<WarningType>,
 }
 
@@ -468,7 +564,9 @@ pub struct NormalizedEntry {
 mod tests {
     use serde_json::Value;
 
-    use super::{CodeContext, ContextActivity, ContextEngagement, OpenAiModelId};
+    use super::{
+        CodeContext, ContextActivity, ContextEngagement, OpenAiModelId, TranscriptionModelId,
+    };
 
     #[test]
     fn openai_model_default_and_labels_match_expected_values() {
@@ -494,6 +592,35 @@ mod tests {
             Some(OpenAiModelId::Gpt41Nano)
         );
         assert_eq!(OpenAiModelId::from_api_name("gpt-4.1"), None);
+    }
+
+    #[test]
+    fn transcription_model_default_and_labels_match_expected_values() {
+        let default_model = TranscriptionModelId::default();
+
+        assert_eq!(default_model, TranscriptionModelId::Gpt4oMiniTranscribe);
+        assert_eq!(default_model.api_name(), "gpt-4o-mini-transcribe");
+        assert_eq!(default_model.display_label(), "GPT-4o Mini Transcribe");
+        assert_eq!(TranscriptionModelId::Whisper1.display_label(), "Whisper");
+    }
+
+    #[test]
+    fn transcription_model_serialization_round_trips_supported_ids() {
+        let serialized = serde_json::to_string(&TranscriptionModelId::Whisper1)
+            .expect("model serialization should work");
+        assert_eq!(serialized, "\"whisper-1\"");
+
+        let parsed: TranscriptionModelId = serde_json::from_str("\"gpt-4o-mini-transcribe\"")
+            .expect("model deserialization should work");
+        assert_eq!(parsed, TranscriptionModelId::Gpt4oMiniTranscribe);
+        assert_eq!(
+            TranscriptionModelId::from_api_name("whisper-1"),
+            Some(TranscriptionModelId::Whisper1)
+        );
+        assert_eq!(
+            TranscriptionModelId::from_api_name("gpt-4o-transcribe"),
+            None
+        );
     }
 
     #[test]
