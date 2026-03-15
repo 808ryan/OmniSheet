@@ -47,6 +47,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::settings_get_status,
             commands::settings_set_openai_key,
+            commands::settings_set_openai_model,
             commands::engagement_list,
             commands::engagement_upsert,
             commands::engagement_delete,

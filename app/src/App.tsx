@@ -19,6 +19,7 @@ import {
   isAppCommandError,
   settingsGetStatus,
   settingsSetOpenAiKey,
+  settingsSetOpenAiModel,
   summaryExportWeeklyExcel,
   timelineDeleteEntry,
   timelineListForDate,
@@ -40,6 +41,7 @@ import type {
   Activity,
   DiagnosticsEvent,
   Engagement,
+  OpenAiModelId,
   SettingsStatus,
   TimelineDaySummary,
   TimelineEntry,
@@ -66,6 +68,7 @@ interface SubmissionQueueItem {
   id: string
   rawText: string
   submittedAtMs: number
+  requestedOpenAiModel: OpenAiModelId
   clientTimestampIso: string
   clientLocalDate: string
   clientLocalTime: string
@@ -76,6 +79,9 @@ interface SubmissionQueueItem {
   correlationId?: string
   createdEntryCount?: number
   completedAtMs?: number
+  completedDurationMs?: number
+  modelUsed?: OpenAiModelId
+  modelUsedLabel?: string
 }
 
 interface EngagementFormState {
@@ -256,6 +262,7 @@ const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
 const END_OF_DAY_INPUT_SENTINEL = '23:59'
 const MAX_CONCURRENT_SUBMISSIONS = 5
 const MAX_FINISHED_QUEUE_HISTORY = 10
+const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5-nano'
 const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'codes', label: 'Codes' },
@@ -434,6 +441,8 @@ function App() {
 
   const [settingsStatus, setSettingsStatus] = useState<SettingsStatus | null>(null)
   const [openAiKey, setOpenAiKey] = useState('')
+  const [selectedOpenAiModelDraft, setSelectedOpenAiModelDraft] =
+    useState<OpenAiModelId>(DEFAULT_OPENAI_MODEL)
 
   const [engagements, setEngagements] = useState<Engagement[]>([])
   const [codeEditorSurface, setCodeEditorSurface] = useState<CodeEditorSurface | null>(null)
@@ -830,6 +839,7 @@ function App() {
   const loadSettings = useCallback(async () => {
     const status = await settingsGetStatus()
     setSettingsStatus(status)
+    setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
   }, [])
 
   const loadTimeline = useCallback(async (date: string) => {
@@ -1311,6 +1321,7 @@ function App() {
       try {
         const result = await interpretTextMessage({
           rawText: item.rawText,
+          openAiModel: item.requestedOpenAiModel,
           clientTimestampIso: item.clientTimestampIso,
           clientLocalDate: item.clientLocalDate,
           clientLocalTime: item.clientLocalTime,
@@ -1319,6 +1330,7 @@ function App() {
         })
 
         const completedAt = Date.now()
+        const completedDurationMs = completedAt - item.submittedAtMs
         setSubmissionQueue((previous) =>
           trimSubmissionQueue(
             previous.map((candidate) =>
@@ -1333,6 +1345,9 @@ function App() {
                     correlationId: result.correlationId,
                     createdEntryCount: result.createdEntryIds.length,
                     completedAtMs: completedAt,
+                    completedDurationMs,
+                    modelUsed: result.modelUsed,
+                    modelUsedLabel: result.modelUsedLabel,
                   }
                 : candidate,
             ),
@@ -1578,6 +1593,7 @@ function App() {
       id: generateSubmissionQueueId(),
       rawText: messageToSend,
       submittedAtMs: submittedAt.getTime(),
+      requestedOpenAiModel: settingsStatus?.selectedOpenAiModel ?? DEFAULT_OPENAI_MODEL,
       clientTimestampIso: submittedAt.toISOString(),
       clientLocalDate: formatDate(submittedAt),
       clientLocalTime: formatLocalTime(submittedAt),
@@ -1949,6 +1965,18 @@ function App() {
     })
   }
 
+  const onSaveOpenAiModel = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    void runAction(async () => {
+      await settingsSetOpenAiModel(selectedOpenAiModelDraft)
+      const status = await settingsGetStatus()
+      setSettingsStatus(status)
+      setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+      setSuccessMessage('OpenAI model preference saved.')
+    })
+  }
+
   const onRefreshDiagnostics = () => {
     void runAction(async () => {
       await loadDiagnostics(diagnosticsFilter)
@@ -2098,6 +2126,16 @@ function App() {
                         {item.correlationId ? (
                           <p className="submission-queue-item-meta">
                             Correlation ID: <code>{item.correlationId}</code>
+                          </p>
+                        ) : null}
+                        {item.state === 'success' && item.completedDurationMs !== undefined ? (
+                          <p className="submission-queue-item-meta">
+                            Completed in: {formatSubmissionQueueDuration(item.completedDurationMs)}
+                          </p>
+                        ) : null}
+                        {item.state === 'success' && item.modelUsedLabel ? (
+                          <p className="submission-queue-item-meta">
+                            Model used: {item.modelUsedLabel}
                           </p>
                         ) : null}
                       </div>
@@ -2516,6 +2554,9 @@ function App() {
                     <p>Source: {selectedEntry.source}</p>
                     <p>User Submission: {selectedEntry.userSubmissionText || 'Unavailable'}</p>
                     <p>Description: {selectedEntry.description}</p>
+                    {selectedEntry.modelUsedLabel ? (
+                      <p>Model Used: {selectedEntry.modelUsedLabel}</p>
+                    ) : null}
                     {selectedEntry.durationDefaulted ? (
                       <p>
                         Duration: Defaulted to {selectedEntry.durationMinutes} minutes (not specified in
@@ -3045,8 +3086,46 @@ function App() {
                 Save Key to Secure Storage
               </button>
             </form>
+            <form className="stack" onSubmit={onSaveOpenAiModel}>
+              <label>
+                OpenAI Model
+                <select
+                  value={selectedOpenAiModelDraft}
+                  onChange={(event) =>
+                    setSelectedOpenAiModelDraft(event.target.value as OpenAiModelId)
+                  }
+                  disabled={isBusy || settingsStatus === null}
+                >
+                  {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="submit"
+                disabled={
+                  isBusy ||
+                  settingsStatus === null ||
+                  selectedOpenAiModelDraft === settingsStatus.selectedOpenAiModel
+                }
+              >
+                Save Model Preference
+              </button>
+            </form>
             <p>
               Key configured: <strong>{settingsStatus?.hasOpenAiKey ? 'Yes' : 'No'}</strong>
+            </p>
+            <p>
+              Selected model:{' '}
+              <strong>
+                {settingsStatus
+                  ? settingsStatus.availableOpenAiModels.find(
+                      (model) => model.id === settingsStatus.selectedOpenAiModel,
+                    )?.label ?? 'unknown'
+                  : 'unknown'}
+              </strong>
             </p>
             <p>
               Storage health:{' '}
@@ -3556,6 +3635,18 @@ function formatSubmissionQueueOutcomeTimestamp(value: Date): string {
 
 function formatSubmissionQueueTimestamp(timestampMs: number): string {
   return formatSubmissionQueueOutcomeTimestamp(new Date(timestampMs))
+}
+
+function formatSubmissionQueueDuration(durationMs: number): string {
+  if (durationMs < 60_000) {
+    return `${(durationMs / 1000).toFixed(1)}s`
+  }
+
+  const totalSeconds = durationMs / 1000
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds - minutes * 60
+
+  return `${minutes}m ${seconds.toFixed(1)}s`
 }
 
 function formatKeySource(value: SettingsStatus['keySource'] | undefined): string {

@@ -17,10 +17,10 @@ use crate::models::{
     ActivityUpsertInput, ApiKeyInput, CodeContext, ContextActivity, ContextEngagement, DateInput,
     DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement,
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
-    LlmAlternativeActivity, LlmEntry, NormalizedEntry, SettingsStatus, StatusLevel, StorageHealth,
-    SummaryExportResult, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
-    TimelineUpdateInput, TimelineUpdateMode, TimelineWeeklySummary, TimelineWeeklySummaryNote,
-    Warning, WarningType,
+    LlmAlternativeActivity, LlmEntry, NormalizedEntry, OpenAiModelId, SettingsSetOpenAiModelInput,
+    SettingsStatus, StatusLevel, StorageHealth, SummaryExportResult, TimelineDaySummary,
+    TimelineEntry, TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode,
+    TimelineWeeklySummary, TimelineWeeklySummaryNote, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -31,6 +31,7 @@ const DEFAULT_FALLBACK_DURATION_MINUTES: i64 = 30;
 const ACTIVITY_FALLBACK_CONFIDENCE_CAP: f64 = 0.60;
 const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
+const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
 const SUMMARY_DAY_NAMES: [&str; 7] = [
     "Saturday",
     "Sunday",
@@ -78,6 +79,57 @@ fn status_level_label(value: &StatusLevel) -> &'static str {
         StatusLevel::Warning => "warning",
         StatusLevel::Error => "error",
     }
+}
+
+fn openai_model_options() -> Vec<crate::models::OpenAiModelOption> {
+    OpenAiModelId::options()
+}
+
+fn resolve_saved_openai_model_value(
+    saved_value: Option<String>,
+) -> (OpenAiModelId, Option<String>) {
+    match saved_value {
+        Some(value) => match OpenAiModelId::from_api_name(&value) {
+            Some(model) => (model, None),
+            None => (OpenAiModelId::default(), Some(value)),
+        },
+        None => (OpenAiModelId::default(), None),
+    }
+}
+
+fn read_saved_openai_model(connection: &Connection) -> AppResult<(OpenAiModelId, Option<String>)> {
+    let saved_value = db::get_app_setting(connection, APP_SETTING_OPENAI_MODEL)?;
+    Ok(resolve_saved_openai_model_value(saved_value))
+}
+
+fn resolve_requested_openai_model(
+    requested_model: Option<OpenAiModelId>,
+    saved_model: OpenAiModelId,
+) -> OpenAiModelId {
+    requested_model.unwrap_or(saved_model)
+}
+
+fn record_invalid_saved_openai_model(
+    state: &State<'_, AppState>,
+    correlation_id: &str,
+    command: &str,
+    invalid_value: &str,
+) {
+    record_backend_event_with_state(
+        state,
+        correlation_id,
+        "settings_model_fallback",
+        command,
+        "warning",
+        None,
+        None,
+        json!({
+          "message": "Invalid saved OpenAI model; defaulted to GPT-5 Nano.",
+          "invalidValue": invalid_value,
+          "fallbackModel": OpenAiModelId::default().api_name(),
+          "fallbackModelLabel": OpenAiModelId::default().display_label(),
+        }),
+    );
 }
 
 fn timeline_month_bounds(month: &str) -> Result<(String, String), String> {
@@ -834,6 +886,7 @@ fn record_llm_attempt_events(
     state: &State<'_, AppState>,
     correlation_id: &str,
     command: &str,
+    model: OpenAiModelId,
     attempts: &[openai::LlmAttemptTelemetry],
 ) {
     for attempt in attempts {
@@ -854,6 +907,8 @@ fn record_llm_attempt_events(
               "retryDelayMs": attempt.retry_delay_ms,
               "errorClass": attempt.error_class,
               "error": attempt.error_message.as_deref(),
+              "model": model.api_name(),
+              "modelLabel": model.display_label(),
             }),
         );
     }
@@ -866,6 +921,45 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
     let started_at = Instant::now();
 
     let key_status = read_key_status(&state);
+    let (selected_open_ai_model, invalid_saved_model) = {
+        let connection = state.connection.lock().map_err(|_| {
+            let message = state_lock_error();
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({ "stage": "read_model_setting", "message": message }),
+            );
+            format_command_error(&correlation_id, message)
+        })?;
+
+        match read_saved_openai_model(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "read_model_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        }
+    };
+
+    if let Some(invalid_value) = invalid_saved_model.as_deref() {
+        record_invalid_saved_openai_model(&state, &correlation_id, command, invalid_value);
+    }
 
     let status = SettingsStatus {
         has_open_ai_key: key_status.has_open_ai_key,
@@ -873,6 +967,8 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         key_source: key_status.key_source.clone(),
         status_level: key_status.status_level.clone(),
         last_error: key_status.last_error.clone(),
+        selected_open_ai_model,
+        available_open_ai_models: openai_model_options(),
     };
 
     record_backend_event_with_state(
@@ -890,6 +986,9 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "keySource": key_source_label(&status.key_source),
           "statusLevel": status_level_label(&status.status_level),
           "lastError": status.last_error,
+          "selectedOpenAiModel": status.selected_open_ai_model.api_name(),
+          "selectedOpenAiModelLabel": status.selected_open_ai_model.display_label(),
+          "availableOpenAiModelCount": status.available_open_ai_models.len(),
         }),
     );
 
@@ -987,6 +1086,90 @@ pub fn settings_set_openai_key(
                 }),
             );
             Ok(())
+        }
+    }
+}
+
+#[tauri::command]
+pub fn settings_set_openai_model(
+    state: State<'_, AppState>,
+    input: SettingsSetOpenAiModelInput,
+) -> Result<(), String> {
+    let command = "settings_set_openai_model";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+    let selected_model = input.model;
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let save_result: Result<(), String> = (|| {
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_OPENAI_MODEL,
+            selected_model.api_name(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified = db::get_app_setting(&connection, APP_SETTING_OPENAI_MODEL)
+            .map_err(|error| error.to_string())?;
+
+        if verified.as_deref() != Some(selected_model.api_name()) {
+            return Err("OpenAI model setting verification failed".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "selectedOpenAiModel": selected_model.api_name(),
+                  "selectedOpenAiModelLabel": selected_model.display_label(),
+                  "verified": true,
+                }),
+            );
+            Ok(())
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_model_setting",
+                  "message": message,
+                  "selectedOpenAiModel": selected_model.api_name(),
+                  "selectedOpenAiModelLabel": selected_model.display_label(),
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
         }
     }
 }
@@ -1252,6 +1435,7 @@ pub async fn interpret_text_message(
           "clientLocalDate": input.client_local_date,
           "clientLocalTime": input.client_local_time,
           "clientUtcOffsetMinutes": input.client_utc_offset_minutes,
+          "requestedOpenAiModel": input.open_ai_model.map(|model| model.api_name()),
         }),
     );
 
@@ -1292,9 +1476,28 @@ pub async fn interpret_text_message(
         }
     };
 
-    let code_context = {
+    let (saved_openai_model, invalid_saved_model, code_context) = {
         let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-        match db::load_code_context(&connection) {
+        let (saved_openai_model, invalid_saved_model) = match read_saved_openai_model(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    Some(input.raw_text.trim()),
+                    json!({ "stage": "read_model_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
+
+        let code_context = match db::load_code_context(&connection) {
             Ok(value) => value,
             Err(error) => {
                 let message = error.to_string();
@@ -1311,14 +1514,24 @@ pub async fn interpret_text_message(
                 );
                 return Err(format_command_error(&correlation_id, message));
             }
-        }
+        };
+
+        (saved_openai_model, invalid_saved_model, code_context)
     };
+
+    if let Some(invalid_value) = invalid_saved_model.as_deref() {
+        record_invalid_saved_openai_model(&state, &correlation_id, command, invalid_value);
+    }
+
+    let selected_openai_model =
+        resolve_requested_openai_model(input.open_ai_model, saved_openai_model);
 
     let llm_started_at = Instant::now();
     let mut llm_attempts = Vec::<openai::LlmAttemptTelemetry>::new();
     let llm_result = openai::interpret_message(
         &state.http_client,
         &api_key,
+        selected_openai_model,
         input.raw_text.trim(),
         &input.client_timestamp_iso,
         &input.client_local_date,
@@ -1330,7 +1543,13 @@ pub async fn interpret_text_message(
     )
     .await;
 
-    record_llm_attempt_events(&state, &correlation_id, command, &llm_attempts);
+    record_llm_attempt_events(
+        &state,
+        &correlation_id,
+        command,
+        selected_openai_model,
+        &llm_attempts,
+    );
     let llm_duration_ms = duration_ms(llm_started_at);
     let llm_summary = llm_attempt_summary(&llm_attempts);
 
@@ -1346,6 +1565,8 @@ pub async fn interpret_text_message(
                 None,
                 json!({
                   "entryCount": response.entries.len(),
+                  "model": selected_openai_model.api_name(),
+                  "modelLabel": selected_openai_model.display_label(),
                   "totalLlmDurationMs": llm_duration_ms,
                   "attemptSummary": llm_summary,
                 }),
@@ -1364,6 +1585,8 @@ pub async fn interpret_text_message(
                 Some(input.raw_text.trim()),
                 json!({
                   "message": message,
+                  "model": selected_openai_model.api_name(),
+                  "modelLabel": selected_openai_model.display_label(),
                   "totalLlmDurationMs": llm_duration_ms,
                   "attemptSummary": llm_summary,
                 }),
@@ -1556,6 +1779,7 @@ pub async fn interpret_text_message(
             &raw_message_id,
             input.raw_text.trim(),
             &interpreted_entries_json,
+            selected_openai_model.api_name(),
             confidence_average,
             parsed_timestamp.timestamp(),
             interpreted_entry_count,
@@ -1675,6 +1899,9 @@ pub async fn interpret_text_message(
           "normalizationFallbackCount": fallback_count,
           "normalizationNotes": normalization_notes,
           "normalizationDetails": normalization_details,
+          "model": selected_openai_model.api_name(),
+          "modelLabel": selected_openai_model.display_label(),
+          "llmDurationMs": llm_duration_ms,
         }),
     );
 
@@ -1690,6 +1917,9 @@ pub async fn interpret_text_message(
         touched_month_keys,
         warnings,
         normalization_notes,
+        model_used: selected_openai_model,
+        model_used_label: selected_openai_model.display_label().to_string(),
+        llm_duration_ms,
     })
 }
 
@@ -2704,7 +2934,7 @@ mod tests {
 
     use crate::models::{
         CodeContext, ContextActivity, ContextEngagement, KeySource, LlmEntry, NormalizedEntry,
-        StatusLevel,
+        OpenAiModelId, StatusLevel,
     };
     use crate::openai::LlmAttemptTelemetry;
 
@@ -2712,7 +2942,8 @@ mod tests {
         apply_activity_fallback_if_needed, dedupe_prepared_entries, derive_key_status_level,
         llm_attempt_event_status, message_has_explicit_clock_time_cue,
         message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
-        normalize_snapped_update_window, round_to_nearest_15, timeline_week_bounds,
+        normalize_snapped_update_window, resolve_requested_openai_model,
+        resolve_saved_openai_model_value, round_to_nearest_15, timeline_week_bounds,
         validate_manual_update_window, PreparedEntry, TemporalCueType, TemporalReference,
         MINUTES_IN_DAY,
     };
@@ -2805,6 +3036,30 @@ mod tests {
             derive_key_status_level(false, &KeySource::None),
             StatusLevel::Error
         ));
+    }
+
+    #[test]
+    fn saved_openai_model_defaults_when_missing_or_invalid() {
+        let (missing_model, missing_invalid_value) = resolve_saved_openai_model_value(None);
+        assert_eq!(missing_model, OpenAiModelId::Gpt5Nano);
+        assert!(missing_invalid_value.is_none());
+
+        let (invalid_model, invalid_value) =
+            resolve_saved_openai_model_value(Some("legacy-model".to_string()));
+        assert_eq!(invalid_model, OpenAiModelId::Gpt5Nano);
+        assert_eq!(invalid_value.as_deref(), Some("legacy-model"));
+    }
+
+    #[test]
+    fn requested_openai_model_override_takes_precedence() {
+        assert_eq!(
+            resolve_requested_openai_model(Some(OpenAiModelId::Gpt41Nano), OpenAiModelId::Gpt5Nano),
+            OpenAiModelId::Gpt41Nano
+        );
+        assert_eq!(
+            resolve_requested_openai_model(None, OpenAiModelId::Gpt41Nano),
+            OpenAiModelId::Gpt41Nano
+        );
     }
 
     #[test]

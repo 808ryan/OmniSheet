@@ -6,6 +6,69 @@ pub struct ApiKeyInput {
     pub api_key: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpenAiModelId {
+    #[serde(rename = "gpt-5-nano")]
+    Gpt5Nano,
+    #[serde(rename = "gpt-4.1-nano")]
+    Gpt41Nano,
+}
+
+impl Default for OpenAiModelId {
+    fn default() -> Self {
+        Self::Gpt5Nano
+    }
+}
+
+impl OpenAiModelId {
+    pub const ALL: [Self; 2] = [Self::Gpt5Nano, Self::Gpt41Nano];
+
+    pub fn api_name(self) -> &'static str {
+        match self {
+            Self::Gpt5Nano => "gpt-5-nano",
+            Self::Gpt41Nano => "gpt-4.1-nano",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Gpt5Nano => "GPT-5 Nano",
+            Self::Gpt41Nano => "GPT-4.1 Nano",
+        }
+    }
+
+    pub fn from_api_name(value: &str) -> Option<Self> {
+        match value.trim() {
+            "gpt-5-nano" => Some(Self::Gpt5Nano),
+            "gpt-4.1-nano" => Some(Self::Gpt41Nano),
+            _ => None,
+        }
+    }
+
+    pub fn options() -> Vec<OpenAiModelOption> {
+        Self::ALL
+            .into_iter()
+            .map(|model| OpenAiModelOption {
+                id: model,
+                label: model.display_label().to_string(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAiModelOption {
+    pub id: OpenAiModelId,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSetOpenAiModelInput {
+    pub model: OpenAiModelId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsStatus {
@@ -14,6 +77,8 @@ pub struct SettingsStatus {
     pub key_source: KeySource,
     pub status_level: StatusLevel,
     pub last_error: Option<String>,
+    pub selected_open_ai_model: OpenAiModelId,
+    pub available_open_ai_models: Vec<OpenAiModelOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +189,7 @@ pub struct InterpretTextInput {
     pub client_local_date: String,
     pub client_local_time: String,
     pub client_utc_offset_minutes: i64,
+    pub open_ai_model: Option<OpenAiModelId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +206,9 @@ pub struct InterpretResult {
     pub touched_month_keys: Vec<String>,
     pub warnings: Vec<Warning>,
     pub normalization_notes: Vec<String>,
+    pub model_used: OpenAiModelId,
+    pub model_used_label: String,
+    pub llm_duration_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -182,6 +251,8 @@ pub struct TimelineEntry {
     pub fallback_summary: Option<String>,
     pub source_message_entry_index: Option<i64>,
     pub source_message_entry_count: Option<i64>,
+    pub model_used: Option<OpenAiModelId>,
+    pub model_used_label: Option<String>,
     pub warning_flags: Vec<WarningType>,
 }
 
@@ -397,7 +468,33 @@ pub struct NormalizedEntry {
 mod tests {
     use serde_json::Value;
 
-    use super::{CodeContext, ContextActivity, ContextEngagement};
+    use super::{CodeContext, ContextActivity, ContextEngagement, OpenAiModelId};
+
+    #[test]
+    fn openai_model_default_and_labels_match_expected_values() {
+        let default_model = OpenAiModelId::default();
+
+        assert_eq!(default_model, OpenAiModelId::Gpt5Nano);
+        assert_eq!(default_model.api_name(), "gpt-5-nano");
+        assert_eq!(default_model.display_label(), "GPT-5 Nano");
+        assert_eq!(OpenAiModelId::Gpt41Nano.display_label(), "GPT-4.1 Nano");
+    }
+
+    #[test]
+    fn openai_model_serialization_round_trips_supported_ids() {
+        let serialized = serde_json::to_string(&OpenAiModelId::Gpt41Nano)
+            .expect("model serialization should work");
+        assert_eq!(serialized, "\"gpt-4.1-nano\"");
+
+        let parsed: OpenAiModelId =
+            serde_json::from_str("\"gpt-5-nano\"").expect("model deserialization should work");
+        assert_eq!(parsed, OpenAiModelId::Gpt5Nano);
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-4.1-nano"),
+            Some(OpenAiModelId::Gpt41Nano)
+        );
+        assert_eq!(OpenAiModelId::from_api_name("gpt-4.1"), None);
+    }
 
     #[test]
     fn context_serialization_omits_null_usage_description_fields() {
