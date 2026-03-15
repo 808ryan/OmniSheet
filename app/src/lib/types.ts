@@ -34,7 +34,7 @@ export interface EngagementUpsertInput {
   client?: string | null
   colorHex?: string | null
   tags: string[]
-  describeWhenToUse?: string | null
+  describeWhenToUse: string
   isActive?: boolean
 }
 
@@ -45,7 +45,7 @@ export interface ActivityUpsertInput {
   name: string
   colorHex?: string | null
   tags: string[]
-  describeWhenToUse?: string | null
+  describeWhenToUse: string
   isActive?: boolean
 }
 

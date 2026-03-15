@@ -267,6 +267,11 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
             "engagement code and name are required".to_string(),
         ));
     }
+    if input.describe_when_to_use.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "engagement usage guidance is required".to_string(),
+        ));
+    }
 
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -323,6 +328,11 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
     {
         return Err(AppError::InvalidInput(
             "activity engagement, code, and name are required".to_string(),
+        ));
+    }
+    if input.describe_when_to_use.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "activity usage guidance is required".to_string(),
         ));
     }
 
@@ -1328,14 +1338,12 @@ fn normalize_color_hex(raw_value: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(candidate))
 }
 
-fn normalize_usage_description(raw_value: Option<String>) -> AppResult<Option<String>> {
-    let Some(value) = raw_value else {
-        return Ok(None);
-    };
-
-    let trimmed = value.trim();
+fn normalize_usage_description(raw_value: String) -> AppResult<String> {
+    let trimmed = raw_value.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Err(AppError::InvalidInput(
+            "usage guidance is required".to_string(),
+        ));
     }
 
     if trimmed.chars().count() > MAX_USAGE_DESCRIPTION_LENGTH {
@@ -1345,7 +1353,7 @@ fn normalize_usage_description(raw_value: Option<String>) -> AppResult<Option<St
         )));
     }
 
-    Ok(Some(trimmed.to_string()))
+    Ok(trimmed.to_string())
 }
 
 fn parse_tags(tags_json: &str) -> Option<Vec<String>> {

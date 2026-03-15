@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   CSSProperties,
   FormEvent,
@@ -47,11 +47,18 @@ import type {
   TimelineWeeklySummaryNote,
   WarningType,
 } from './lib/types'
+import deleteIcon from './assets/icons/delete.svg'
+import editIcon from './assets/icons/edit.svg'
 import './App.css'
 
 type View = 'timeline' | 'codes' | 'settings' | 'diagnostics' | 'summary'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
+type CodeEditorSurface =
+  | 'create-engagement'
+  | 'edit-engagement'
+  | 'create-activity'
+  | 'edit-activity'
 
 type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
 
@@ -217,6 +224,17 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
   isActive: true,
 }
 
+function getDefaultActivityEngagementId(engagements: Engagement[]): string {
+  return engagements[0]?.id ?? ''
+}
+
+function buildEmptyActivityForm(engagementId: string): ActivityFormState {
+  return {
+    ...EMPTY_ACTIVITY_FORM,
+    engagementId,
+  }
+}
+
 const MINUTES_IN_DAY = 24 * 60
 const HOUR_IN_MINUTES = 60
 const PIXELS_PER_MINUTE = 1
@@ -254,6 +272,154 @@ const SUMMARY_DAY_NAMES = [
   'Friday',
 ] as const
 
+interface ResponsiveCodeTagListProps {
+  tags: string[]
+  itemKeyPrefix: string
+}
+
+function ResponsiveCodeTagList({ tags, itemKeyPrefix }: ResponsiveCodeTagListProps) {
+  const normalizedTags = useMemo(() => normalizeCodeTags(tags), [tags])
+  const [visibleCount, setVisibleCount] = useState(normalizedTags.length)
+  const containerRef = useRef<HTMLSpanElement | null>(null)
+  const measurementRowRef = useRef<HTMLSpanElement | null>(null)
+  const moreMeasurementRef = useRef<HTMLSpanElement | null>(null)
+  const tagMeasurementRefs = useRef<Array<HTMLSpanElement | null>>([])
+  const measurementFrameRef = useRef<number | null>(null)
+
+  const measureVisibleCount = useCallback(() => {
+    const container = containerRef.current
+    const measurementRow = measurementRowRef.current
+    const moreMeasurement = moreMeasurementRef.current
+
+    if (!container || !measurementRow || !moreMeasurement) {
+      return
+    }
+
+    const availableWidth = container.clientWidth
+    if (availableWidth <= 0) {
+      setVisibleCount(0)
+      return
+    }
+
+    const computedStyles = window.getComputedStyle(measurementRow)
+    const gapValue = computedStyles.columnGap || computedStyles.gap || '0'
+    const gap = Number.parseFloat(gapValue) || 0
+    const tagWidths = normalizedTags.map(
+      (_, index) => tagMeasurementRefs.current[index]?.offsetWidth ?? 0,
+    )
+    const prefixWidths = [0]
+
+    for (const width of tagWidths) {
+      prefixWidths.push(prefixWidths[prefixWidths.length - 1] + width)
+    }
+
+    const allTagsWidth = prefixWidths[prefixWidths.length - 1] + Math.max(0, tagWidths.length - 1) * gap
+    if (allTagsWidth <= availableWidth) {
+      setVisibleCount((previous) => (previous === normalizedTags.length ? previous : normalizedTags.length))
+      return
+    }
+
+    let nextVisibleCount = 0
+
+    for (let candidateCount = normalizedTags.length - 1; candidateCount >= 0; candidateCount -= 1) {
+      const hiddenCount = normalizedTags.length - candidateCount
+      moreMeasurement.textContent = `+${hiddenCount}`
+      const moreWidth = moreMeasurement.offsetWidth
+      const visibleWidth = prefixWidths[candidateCount]
+      const totalItemCount = candidateCount + 1
+      const totalGapWidth = totalItemCount > 1 ? (totalItemCount - 1) * gap : 0
+
+      if (visibleWidth + moreWidth + totalGapWidth <= availableWidth) {
+        nextVisibleCount = candidateCount
+        break
+      }
+    }
+
+    setVisibleCount((previous) => (previous === nextVisibleCount ? previous : nextVisibleCount))
+  }, [normalizedTags])
+
+  useLayoutEffect(() => {
+    if (normalizedTags.length === 0) {
+      return
+    }
+
+    const scheduleMeasurement = () => {
+      if (measurementFrameRef.current !== null) {
+        window.cancelAnimationFrame(measurementFrameRef.current)
+      }
+
+      measurementFrameRef.current = window.requestAnimationFrame(() => {
+        measurementFrameRef.current = null
+        measureVisibleCount()
+      })
+    }
+
+    scheduleMeasurement()
+
+    const container = containerRef.current
+    let resizeObserver: ResizeObserver | null = null
+    const handleWindowResize = () => {
+      scheduleMeasurement()
+    }
+
+    if (container && typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => {
+        scheduleMeasurement()
+      })
+      resizeObserver.observe(container)
+    } else {
+      window.addEventListener('resize', handleWindowResize)
+    }
+
+    return () => {
+      resizeObserver?.disconnect()
+      window.removeEventListener('resize', handleWindowResize)
+      if (measurementFrameRef.current !== null) {
+        window.cancelAnimationFrame(measurementFrameRef.current)
+      }
+    }
+  }, [measureVisibleCount, normalizedTags.length])
+
+  if (normalizedTags.length === 0) {
+    return null
+  }
+
+  const safeVisibleCount = Math.max(0, Math.min(visibleCount, normalizedTags.length))
+  const hiddenTagCount = Math.max(0, normalizedTags.length - safeVisibleCount)
+  const visibleTags = normalizedTags.slice(0, safeVisibleCount)
+
+  return (
+    <span className="responsive-code-tag-list">
+      <span ref={containerRef} className="code-tag-list">
+        {visibleTags.map((tag, index) => (
+          <span key={`${itemKeyPrefix}-${tag}-${index}`} className="code-tag">
+            {tag}
+          </span>
+        ))}
+        {hiddenTagCount > 0 ? <span className="code-tag code-tag-more">+{hiddenTagCount}</span> : null}
+      </span>
+      <span className="code-tag-measurement" aria-hidden="true">
+        <span ref={measurementRowRef} className="code-tag-list code-tag-list-measurement">
+          {normalizedTags.map((tag, index) => (
+            <span
+              key={`${itemKeyPrefix}-measure-${tag}-${index}`}
+              ref={(node) => {
+                tagMeasurementRefs.current[index] = node
+              }}
+              className="code-tag"
+            >
+              {tag}
+            </span>
+          ))}
+          <span ref={moreMeasurementRef} className="code-tag code-tag-more">
+            +{normalizedTags.length}
+          </span>
+        </span>
+      </span>
+    </span>
+  )
+}
+
 function App() {
   const tauriRuntime = isTauriRuntime()
   const todayDate = useMemo(() => formatDate(new Date()), [])
@@ -268,6 +434,9 @@ function App() {
   const [openAiKey, setOpenAiKey] = useState('')
 
   const [engagements, setEngagements] = useState<Engagement[]>([])
+  const [codeEditorSurface, setCodeEditorSurface] = useState<CodeEditorSurface | null>(null)
+  const [editorActivationKey, setEditorActivationKey] = useState(0)
+  const [expandedEngagementId, setExpandedEngagementId] = useState<string | null>(null)
   const [engagementForm, setEngagementForm] =
     useState<EngagementFormState>(EMPTY_ENGAGEMENT_FORM)
   const [activityForm, setActivityForm] = useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
@@ -292,6 +461,9 @@ function App() {
   const [monthSummaryCache, setMonthSummaryCache] = useState<MonthSummaryCache>({})
   const [monthSummaryLoadingMonth, setMonthSummaryLoadingMonth] = useState<string | null>(null)
   const [monthSummaryError, setMonthSummaryError] = useState<string | null>(null)
+  const codeFormsBodyRef = useRef<HTMLDivElement | null>(null)
+  const engagementNameInputRef = useRef<HTMLInputElement | null>(null)
+  const activityEngagementSelectRef = useRef<HTMLSelectElement | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
   const timelineContextMenuRef = useRef<HTMLDivElement | null>(null)
   const hasInitializedRef = useRef(false)
@@ -482,10 +654,161 @@ function App() {
     () => engagements.find((engagement) => engagement.id === activityForm.engagementId) ?? null,
     [activityForm.engagementId, engagements],
   )
+  const isEngagementEditorOpen =
+    codeEditorSurface === 'create-engagement' || codeEditorSurface === 'edit-engagement'
+  const isActivityEditorOpen =
+    codeEditorSurface === 'create-activity' || codeEditorSurface === 'edit-activity'
+  const isEditingEngagement = codeEditorSurface === 'edit-engagement'
+  const isEditingActivity = codeEditorSurface === 'edit-activity'
+  const canCreateActivity = engagements.length > 0
 
   const engagementFormColorValue = normalizeColorHexInput(engagementForm.colorHex)
   const activityFormColorValue = normalizeColorHexInput(activityForm.colorHex)
   const selectedEngagementColorValue = normalizeColorHexInput(selectedActivityEngagement?.colorHex)
+
+  useEffect(() => {
+    if (!expandedEngagementId) {
+      return
+    }
+
+    const isExpandedEngagementPresent = engagements.some(
+      (engagement) => engagement.id === expandedEngagementId,
+    )
+    if (!isExpandedEngagementPresent) {
+      setExpandedEngagementId(null)
+    }
+  }, [engagements, expandedEngagementId])
+
+  const openCreateEngagementEditor = useCallback(() => {
+    setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    setCodeEditorSurface('create-engagement')
+    setEditorActivationKey((previous) => previous + 1)
+  }, [])
+
+  const openCreateActivityEditor = useCallback(() => {
+    if (engagements.length === 0) {
+      return
+    }
+
+    setActivityForm(buildEmptyActivityForm(getDefaultActivityEngagementId(engagements)))
+    setCodeEditorSurface('create-activity')
+    setEditorActivationKey((previous) => previous + 1)
+  }, [engagements])
+
+  const closeCodeEditor = useCallback(() => {
+    if (isEngagementEditorOpen) {
+      setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    }
+
+    if (isActivityEditorOpen) {
+      setActivityForm(buildEmptyActivityForm(getDefaultActivityEngagementId(engagements)))
+    }
+
+    setCodeEditorSurface(null)
+  }, [engagements, isActivityEditorOpen, isEngagementEditorOpen])
+
+  const toggleEngagementEditor = useCallback(() => {
+    if (isEngagementEditorOpen) {
+      closeCodeEditor()
+      return
+    }
+
+    openCreateEngagementEditor()
+  }, [closeCodeEditor, isEngagementEditorOpen, openCreateEngagementEditor])
+
+  const toggleActivityEditor = useCallback(() => {
+    if (isActivityEditorOpen) {
+      closeCodeEditor()
+      return
+    }
+
+    openCreateActivityEditor()
+  }, [closeCodeEditor, isActivityEditorOpen, openCreateActivityEditor])
+
+  useEffect(() => {
+    if (!codeEditorSurface) {
+      return
+    }
+
+    if (codeFormsBodyRef.current) {
+      codeFormsBodyRef.current.scrollTop = 0
+    }
+
+    const targetInput = isActivityEditorOpen
+      ? activityEngagementSelectRef.current
+      : engagementNameInputRef.current
+
+    if (!targetInput) {
+      return
+    }
+
+    const animationFrameId = window.requestAnimationFrame(() => {
+      targetInput.focus()
+    })
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId)
+    }
+  }, [codeEditorSurface, editorActivationKey, isActivityEditorOpen])
+
+  useEffect(() => {
+    if (isEditingEngagement && engagementForm.id) {
+      const engagementStillExists = engagements.some((engagement) => engagement.id === engagementForm.id)
+      if (!engagementStillExists) {
+        setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+        setCodeEditorSurface(null)
+      }
+      return
+    }
+
+    if (!isActivityEditorOpen) {
+      return
+    }
+
+    if (engagements.length === 0) {
+      setActivityForm(EMPTY_ACTIVITY_FORM)
+      setCodeEditorSurface(null)
+      return
+    }
+
+    const hasSelectedEngagement = engagements.some(
+      (engagement) => engagement.id === activityForm.engagementId,
+    )
+
+    if (isEditingActivity && activityForm.id) {
+      const activityStillExists = engagements.some((engagement) =>
+        engagement.activities.some((activity) => activity.id === activityForm.id),
+      )
+
+      if (!activityStillExists || !hasSelectedEngagement) {
+        setActivityForm(buildEmptyActivityForm(getDefaultActivityEngagementId(engagements)))
+        setCodeEditorSurface(null)
+      }
+
+      return
+    }
+
+    if (!hasSelectedEngagement) {
+      const defaultEngagementId = getDefaultActivityEngagementId(engagements)
+      setActivityForm((previous) => (
+        previous.engagementId === defaultEngagementId
+          ? previous
+          : {
+              ...previous,
+              engagementId: defaultEngagementId,
+            }
+      ))
+    }
+  }, [
+    activityForm.engagementId,
+    activityForm.id,
+    codeEditorSurface,
+    engagementForm.id,
+    engagements,
+    isActivityEditorOpen,
+    isEditingActivity,
+    isEditingEngagement,
+  ])
 
   const loadEngagements = useCallback(async () => {
     const values = await engagementList()
@@ -1266,8 +1589,14 @@ function App() {
 
   const onSubmitEngagement = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const isEditing = codeEditorSurface === 'edit-engagement'
 
     void runAction(async () => {
+      const describeWhenToUse = engagementForm.describeWhenToUse.trim()
+      if (describeWhenToUse.length === 0) {
+        throw new Error('"Describe when to use" is required for matching.')
+      }
+
       const colorHex = normalizeColorHexInput(engagementForm.colorHex)
       if (engagementForm.colorHex.trim().length > 0 && !colorHex) {
         throw new Error('Engagement color must be a valid #RRGGBB value.')
@@ -1279,13 +1608,19 @@ function App() {
         name: engagementForm.name,
         client: engagementForm.client || null,
         colorHex,
-        describeWhenToUse: engagementForm.describeWhenToUse.trim() || null,
+        describeWhenToUse,
         tags: parseTagInput(engagementForm.tags),
         isActive: engagementForm.isActive,
       })
 
       setEngagementForm(EMPTY_ENGAGEMENT_FORM)
       await refreshAfterMutation()
+      if (isEditing) {
+        setCodeEditorSurface(null)
+      } else {
+        setCodeEditorSurface('create-engagement')
+        setEditorActivationKey((previous) => previous + 1)
+      }
       setSuccessMessage('Engagement saved.')
     }, { formatError: formatCodesMutationError })
   }
@@ -1299,6 +1634,8 @@ function App() {
   }
 
   const onEditEngagement = (engagement: Engagement) => {
+    setExpandedEngagementId(engagement.id)
+    setCodeEditorSurface('edit-engagement')
     setEngagementForm({
       id: engagement.id,
       code: engagement.code,
@@ -1309,12 +1646,21 @@ function App() {
       tags: joinTags(engagement.tags),
       isActive: engagement.isActive,
     })
+    setEditorActivationKey((previous) => previous + 1)
   }
 
   const onSubmitActivity = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const isEditing = codeEditorSurface === 'edit-activity'
+    const nextEngagementId =
+      activityForm.engagementId || getDefaultActivityEngagementId(engagements)
 
     void runAction(async () => {
+      const describeWhenToUse = activityForm.describeWhenToUse.trim()
+      if (describeWhenToUse.length === 0) {
+        throw new Error('"Describe when to use" is required for matching.')
+      }
+
       const colorHex = normalizeColorHexInput(activityForm.colorHex)
       if (activityForm.colorHex.trim().length > 0 && !colorHex) {
         throw new Error('Activity color must be a valid #RRGGBB value.')
@@ -1326,16 +1672,19 @@ function App() {
         code: activityForm.code,
         name: activityForm.name,
         colorHex,
-        describeWhenToUse: activityForm.describeWhenToUse.trim() || null,
+        describeWhenToUse,
         tags: parseTagInput(activityForm.tags),
         isActive: activityForm.isActive,
       })
 
-      setActivityForm((previous) => ({
-        ...EMPTY_ACTIVITY_FORM,
-        engagementId: previous.engagementId,
-      }))
+      setActivityForm(buildEmptyActivityForm(nextEngagementId))
       await refreshAfterMutation()
+      if (isEditing) {
+        setCodeEditorSurface(null)
+      } else {
+        setCodeEditorSurface('create-activity')
+        setEditorActivationKey((previous) => previous + 1)
+      }
       setSuccessMessage('Activity saved.')
     }, { formatError: formatCodesMutationError })
   }
@@ -1349,6 +1698,8 @@ function App() {
   }
 
   const onEditActivity = (activity: Activity) => {
+    setExpandedEngagementId(activity.engagementId)
+    setCodeEditorSurface('edit-activity')
     setActivityForm({
       id: activity.id,
       engagementId: activity.engagementId,
@@ -1359,6 +1710,7 @@ function App() {
       tags: joinTags(activity.tags),
       isActive: activity.isActive,
     })
+    setEditorActivationKey((previous) => previous + 1)
   }
 
   const onSetDate = (nextDate: string) => {
@@ -1869,11 +2221,13 @@ function App() {
                           draggedEntryOriginPosition.widthPercent,
                           draggedEntryOriginPosition.height,
                         )
+                        const ghostReviewLabel = getTimelineBlockReviewLabel(ghostEntry.warningFlags)
                         const ghostAccentColor = deriveTimelineAccentColor(ghostColor)
+                        const ghostNeedsReview = ghostReviewLabel !== null
 
                         return (
                           <div
-                            className={`timeline-block drag-origin-ghost tier-${ghostLabel.tier}`}
+                            className={`timeline-block drag-origin-ghost tier-${ghostLabel.tier} ${ghostNeedsReview ? 'needs-review' : ''}`}
                             style={{
                               top: draggedEntryOriginPosition.top,
                               height: draggedEntryOriginPosition.height,
@@ -1886,7 +2240,7 @@ function App() {
                             } as CSSProperties}
                             aria-hidden="true"
                           >
-                            <span className="timeline-block-label">{ghostLabel.label}</span>
+                            <TimelineBlockContent label={ghostLabel.label} />
                           </div>
                         )
                       })()
@@ -1903,6 +2257,8 @@ function App() {
                         positionedEntry.widthPercent,
                         positionedEntry.height,
                       )
+                      const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
+                      const needsReview = reviewLabel !== null
                       const isDragPreview =
                         timelineDragState?.isDragging
                         && timelineDragState.entryId === entry.id
@@ -1925,16 +2281,25 @@ function App() {
                             } as CSSProperties}
                             aria-hidden="true"
                           >
-                            <span className="timeline-block-label">{blockLabel.label}</span>
+                            <TimelineBlockContent label={blockLabel.label} />
                           </div>
                         )
                       }
+
+                      const blockClassName = [
+                        'timeline-block',
+                        `tier-${blockLabel.tier}`,
+                        selectedEntryId === entry.id ? 'selected' : '',
+                        needsReview ? 'needs-review' : '',
+                      ]
+                        .filter((className) => className.length > 0)
+                        .join(' ')
 
                       return (
                         <button
                           type="button"
                           key={entry.id}
-                          className={`timeline-block tier-${blockLabel.tier} ${selectedEntryId === entry.id ? 'selected' : ''}`}
+                          className={blockClassName}
                           style={{
                             top: positionedEntry.top,
                             height: positionedEntry.height,
@@ -1954,11 +2319,19 @@ function App() {
                             }
                             onOpenTimelineContextMenu(event, entry)
                           }}
-                          title={`${blockLabel.fullLabel}\n${entry.description}`}
-                          aria-label={`${blockLabel.fullLabel}. ${entry.description}`}
+                          title={buildTimelineBlockTitle(
+                            blockLabel.fullLabel,
+                            entry.description,
+                            reviewLabel,
+                          )}
+                          aria-label={buildTimelineBlockAriaLabel(
+                            blockLabel.fullLabel,
+                            entry.description,
+                            reviewLabel,
+                          )}
                           aria-haspopup="menu"
                         >
-                          <span className="timeline-block-label">{blockLabel.label}</span>
+                          <TimelineBlockContent label={blockLabel.label} />
                         </button>
                       )
                     })}
@@ -2148,361 +2521,474 @@ function App() {
         {activeView === 'codes' ? (
           <section className="panel code-panel">
             <div className="code-forms">
-              <form className="stack" onSubmit={onSubmitEngagement}>
-                <h2>{engagementForm.id ? 'Edit Engagement' : 'Add Engagement'}</h2>
-                <label>
-                  Code
-                  <input
-                    value={engagementForm.code}
-                    onChange={(event) =>
-                      setEngagementForm((previous) => ({
-                        ...previous,
-                        code: event.target.value,
-                      }))
-                    }
-                    required
-                  />
-                </label>
-                <label>
-                  Name
-                  <input
-                    value={engagementForm.name}
-                    onChange={(event) =>
-                      setEngagementForm((previous) => ({
-                        ...previous,
-                        name: event.target.value,
-                      }))
-                    }
-                    required
-                  />
-                </label>
-                <label>
-                  Client
-                  <input
-                    value={engagementForm.client}
-                    onChange={(event) =>
-                      setEngagementForm((previous) => ({
-                        ...previous,
-                        client: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  Engagement Color (optional)
-                  <div className="color-input-row">
-                    <input
-                      type="color"
-                      value={engagementFormColorValue ?? TIMELINE_NEUTRAL_COLOR}
-                      onChange={(event) =>
-                        setEngagementForm((previous) => ({
-                          ...previous,
-                          colorHex: event.target.value.toUpperCase(),
-                        }))
-                      }
-                      aria-label="Select engagement color"
-                    />
-                    <input
-                      value={engagementForm.colorHex}
-                      onChange={(event) =>
-                        setEngagementForm((previous) => ({
-                          ...previous,
-                          colorHex: event.target.value.toUpperCase(),
-                        }))
-                      }
-                      placeholder="#RRGGBB"
-                      maxLength={7}
-                    />
-                  </div>
-                </label>
-                <div className="color-note-row">
-                  <span
-                    className="color-chip"
-                    style={{ backgroundColor: engagementFormColorValue ?? TIMELINE_NEUTRAL_COLOR }}
-                  />
-                  <p>Global fallback color for activities in this engagement.</p>
-                  <button
-                    type="button"
-                    className="ghost color-clear-button"
-                    onClick={() =>
-                      setEngagementForm((previous) => ({
-                        ...previous,
-                        colorHex: '',
-                      }))
-                    }
-                  >
-                    Use Default
-                  </button>
-                </div>
-                <label>
-                  Describe when to use this engagement
-                  <textarea
-                    rows={3}
-                    maxLength={500}
-                    value={engagementForm.describeWhenToUse}
-                    onChange={(event) =>
-                      setEngagementForm((previous) => ({
-                        ...previous,
-                        describeWhenToUse: event.target.value,
-                      }))
-                    }
-                    placeholder="Use this engagement when..."
-                  />
-                </label>
-                <label>
-                  Tags / Key Words (comma separated)
-                  <input
-                    value={engagementForm.tags}
-                    onChange={(event) =>
-                      setEngagementForm((previous) => ({
-                        ...previous,
-                        tags: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <button type="submit" disabled={isBusy}>
-                  {engagementForm.id ? 'Update Engagement' : 'Create Engagement'}
-                </button>
-                {engagementForm.id ? (
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => setEngagementForm(EMPTY_ENGAGEMENT_FORM)}
-                  >
-                    Cancel Editing
-                  </button>
-                ) : null}
-              </form>
+              <div className="code-panel-header">
+                <h2>Engagements and Activities</h2>
+                <p>These are the projects/engagements that OmniSheet will match to your submitted activity.</p>
+              </div>
 
-              <form className="stack" onSubmit={onSubmitActivity}>
-                <h2>{activityForm.id ? 'Edit Activity' : 'Add Activity'}</h2>
-                <label>
-                  Engagement
-                  <select
-                    value={activityForm.engagementId}
-                    onChange={(event) =>
-                      setActivityForm((previous) => ({
-                        ...previous,
-                        engagementId: event.target.value,
-                      }))
-                    }
-                    required
-                  >
-                    <option value="" disabled>
-                      Select engagement
-                    </option>
-                    {engagements.map((engagement) => (
-                      <option key={engagement.id} value={engagement.id}>
-                        {engagement.code} {engagement.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Code
-                  <input
-                    value={activityForm.code}
-                    onChange={(event) =>
-                      setActivityForm((previous) => ({
-                        ...previous,
-                        code: event.target.value,
-                      }))
-                    }
-                    required
-                  />
-                </label>
-                <label>
-                  Name
-                  <input
-                    value={activityForm.name}
-                    onChange={(event) =>
-                      setActivityForm((previous) => ({
-                        ...previous,
-                        name: event.target.value,
-                      }))
-                    }
-                    required
-                  />
-                </label>
-                <label>
-                  Activity Color (optional)
-                  <div className="color-input-row">
-                    <input
-                      type="color"
-                      value={activityFormColorValue ?? selectedEngagementColorValue ?? TIMELINE_NEUTRAL_COLOR}
-                      onChange={(event) =>
-                        setActivityForm((previous) => ({
-                          ...previous,
-                          colorHex: event.target.value.toUpperCase(),
-                        }))
-                      }
-                      aria-label="Select activity color"
-                    />
-                    <input
-                      value={activityForm.colorHex}
-                      onChange={(event) =>
-                        setActivityForm((previous) => ({
-                          ...previous,
-                          colorHex: event.target.value.toUpperCase(),
-                        }))
-                      }
-                      placeholder="#RRGGBB"
-                      maxLength={7}
-                    />
-                  </div>
-                </label>
-                <div className="color-note-row">
-                  <span
-                    className="color-chip"
-                    style={{
-                      backgroundColor:
-                        activityFormColorValue
-                        ?? selectedEngagementColorValue
-                        ?? TIMELINE_NEUTRAL_COLOR,
-                    }}
-                  />
-                  <p>Activity color overrides engagement color for timeline blocks.</p>
-                  <button
-                    type="button"
-                    className="ghost color-clear-button"
-                    onClick={() =>
-                      setActivityForm((previous) => ({
-                        ...previous,
-                        colorHex: '',
-                      }))
-                    }
-                  >
-                    Use Default
-                  </button>
-                </div>
-                <label>
-                  Describe when to use this activity code
-                  <textarea
-                    rows={3}
-                    maxLength={500}
-                    value={activityForm.describeWhenToUse}
-                    onChange={(event) =>
-                      setActivityForm((previous) => ({
-                        ...previous,
-                        describeWhenToUse: event.target.value,
-                      }))
-                    }
-                    placeholder="Use this activity code when..."
-                  />
-                </label>
-                <label>
-                  Tags / Key Words (comma separated)
-                  <input
-                    value={activityForm.tags}
-                    onChange={(event) =>
-                      setActivityForm((previous) => ({
-                        ...previous,
-                        tags: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <button type="submit" disabled={isBusy || engagements.length === 0}>
-                  {activityForm.id ? 'Update Activity' : 'Create Activity'}
-                </button>
-                {activityForm.id ? (
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() =>
-                      setActivityForm((previous) => ({
-                        ...EMPTY_ACTIVITY_FORM,
-                        engagementId: previous.engagementId,
-                      }))
-                    }
-                  >
-                    Cancel Editing
-                  </button>
-                ) : null}
-              </form>
-            </div>
+              <div ref={codeFormsBodyRef} className="code-forms-body">
+                <div className="code-editor-accordion">
+                  <section className={`code-editor-section ${isEngagementEditorOpen ? 'expanded' : ''}`}>
+                    <button
+                      type="button"
+                      className="code-editor-trigger"
+                      aria-expanded={isEngagementEditorOpen}
+                      aria-controls="engagement-editor-panel"
+                      onClick={toggleEngagementEditor}
+                    >
+                      <span className="code-editor-trigger-title">
+                        {isEditingEngagement ? 'Edit Engagement' : 'Create Engagement'}
+                      </span>
+                      <span
+                        className={`code-editor-trigger-icon ${isEngagementEditorOpen ? 'open' : ''}`}
+                        aria-hidden="true"
+                      />
+                    </button>
 
-            <div className="code-list">
-              {engagements.map((engagement) => {
-                const engagementColor = normalizeColorHexInput(engagement.colorHex) ?? TIMELINE_NEUTRAL_COLOR
-
-                return (
-                  <article key={engagement.id} className="engagement-card">
-                    <header>
-                      <div>
-                        <h3>
-                          {engagement.code} {engagement.name}
-                        </h3>
-                        <p>{engagement.client ?? 'No client'}</p>
-                        <p>
-                          When to use:{' '}
-                          {engagement.describeWhenToUse ?? 'No usage guidance'}
-                        </p>
-                        <p>Tags / Key Words: {joinTags(engagement.tags) || 'No tags'}</p>
-                        <p className="color-list-row">
-                          <span
-                            className="color-chip"
-                            style={{ backgroundColor: engagementColor }}
-                          />
-                          Engagement color
-                        </p>
-                      </div>
-                      <div className="row-actions">
-                        <button type="button" onClick={() => onEditEngagement(engagement)}>
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="danger"
-                          onClick={() => onDeleteEngagement(engagement.id)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </header>
-                    <ul>
-                      {engagement.activities.map((activity) => {
-                        const activityColor =
-                          normalizeColorHexInput(activity.colorHex)
-                          ?? normalizeColorHexInput(engagement.colorHex)
-                          ?? TIMELINE_NEUTRAL_COLOR
-
-                        return (
-                          <li key={activity.id}>
-                            <div>
-                              <strong>{activity.code} {activity.name}</strong>
-                              <span>
-                                When to use: {activity.describeWhenToUse ?? 'No usage guidance'}
-                              </span>
-                              <span>Tags / Key Words: {joinTags(activity.tags) || 'No tags'}</span>
-                              <span className="color-list-row">
-                                <span
-                                  className="color-chip"
-                                  style={{ backgroundColor: activityColor }}
-                                />
-                                {activity.colorHex ? 'Activity color' : 'Inherited from engagement/default'}
-                              </span>
-                            </div>
-                            <div className="row-actions">
-                              <button type="button" onClick={() => onEditActivity(activity)}>
-                                Edit
-                              </button>
+                    {isEngagementEditorOpen ? (
+                      <div id="engagement-editor-panel" className="code-editor-panel">
+                        <form className="stack code-editor-form" onSubmit={onSubmitEngagement}>
+                          <label>
+                            <span className="field-label-row">
+                              Name
+                              <span className="required-indicator" aria-hidden="true">*</span>
+                            </span>
+                            <input
+                              ref={engagementNameInputRef}
+                              value={engagementForm.name}
+                              onChange={(event) =>
+                                setEngagementForm((previous) => ({
+                                  ...previous,
+                                  name: event.target.value,
+                                }))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Code
+                            <input
+                              value={engagementForm.code}
+                              onChange={(event) =>
+                                setEngagementForm((previous) => ({
+                                  ...previous,
+                                  code: event.target.value,
+                                }))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            <span className="field-label-row">
+                              Describe when to use this engagement
+                              <span className="required-indicator" aria-hidden="true">*</span>
+                            </span>
+                            <span className="field-helper">Required for matching</span>
+                            <textarea
+                              rows={3}
+                              maxLength={500}
+                              value={engagementForm.describeWhenToUse}
+                              onChange={(event) =>
+                                setEngagementForm((previous) => ({
+                                  ...previous,
+                                  describeWhenToUse: event.target.value,
+                                }))
+                              }
+                              placeholder="Use this engagement when..."
+                              required
+                            />
+                          </label>
+                          <label>
+                            Tags / Key Words (comma separated)
+                            <input
+                              value={engagementForm.tags}
+                              onChange={(event) =>
+                                setEngagementForm((previous) => ({
+                                  ...previous,
+                                  tags: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            Client
+                            <input
+                              value={engagementForm.client}
+                              onChange={(event) =>
+                                setEngagementForm((previous) => ({
+                                  ...previous,
+                                  client: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            Color
+                            <div className="color-input-row">
+                              <input
+                                type="color"
+                                value={engagementFormColorValue ?? TIMELINE_NEUTRAL_COLOR}
+                                onChange={(event) =>
+                                  setEngagementForm((previous) => ({
+                                    ...previous,
+                                    colorHex: event.target.value.toUpperCase(),
+                                  }))
+                                }
+                                aria-label="Select engagement color"
+                              />
+                              <input
+                                value={engagementForm.colorHex}
+                                onChange={(event) =>
+                                  setEngagementForm((previous) => ({
+                                    ...previous,
+                                    colorHex: event.target.value.toUpperCase(),
+                                  }))
+                                }
+                                placeholder="#RRGGBB"
+                                maxLength={7}
+                              />
                               <button
                                 type="button"
-                                className="danger"
-                                onClick={() => onDeleteActivity(activity.id)}
+                                className="ghost color-clear-button"
+                                onClick={() =>
+                                  setEngagementForm((previous) => ({
+                                    ...previous,
+                                    colorHex: '',
+                                  }))
+                                }
                               >
-                                Delete
+                                Use Default
                               </button>
                             </div>
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  </article>
-                )
-              })}
+                          </label>
+                          <div className="code-editor-actions">
+                            <button type="submit" disabled={isBusy}>
+                              {isEditingEngagement ? 'Update Engagement' : 'Create Engagement'}
+                            </button>
+                            <button type="button" className="ghost" onClick={closeCodeEditor}>
+                              Cancel
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    ) : null}
+                  </section>
+
+                  <section className={`code-editor-section ${isActivityEditorOpen ? 'expanded' : ''}`}>
+                    <button
+                      type="button"
+                      className="code-editor-trigger"
+                      aria-expanded={isActivityEditorOpen}
+                      aria-controls="activity-editor-panel"
+                      onClick={toggleActivityEditor}
+                      disabled={!canCreateActivity}
+                    >
+                      <span className="code-editor-trigger-title">
+                        {isEditingActivity ? 'Edit Activity' : 'Create Activity'}
+                      </span>
+                      <span
+                        className={`code-editor-trigger-icon ${isActivityEditorOpen ? 'open' : ''}`}
+                        aria-hidden="true"
+                      />
+                    </button>
+
+                    {isActivityEditorOpen ? (
+                      <div id="activity-editor-panel" className="code-editor-panel">
+                        {isEditingActivity && selectedActivityEngagement ? (
+                          <p className="code-editor-context">
+                            Editing activity in <strong>{selectedActivityEngagement.code}</strong>
+                            {' '}{selectedActivityEngagement.name}
+                          </p>
+                        ) : null}
+                        <form className="stack code-editor-form" onSubmit={onSubmitActivity}>
+                          <label>
+                            Engagement
+                            <select
+                              ref={activityEngagementSelectRef}
+                              value={activityForm.engagementId}
+                              onChange={(event) =>
+                                setActivityForm((previous) => ({
+                                  ...previous,
+                                  engagementId: event.target.value,
+                                }))
+                              }
+                              required
+                            >
+                              <option value="" disabled>
+                                Select engagement
+                              </option>
+                              {engagements.map((engagement) => (
+                                <option key={engagement.id} value={engagement.id}>
+                                  {engagement.code} {engagement.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            <span className="field-label-row">
+                              Name
+                              <span className="required-indicator" aria-hidden="true">*</span>
+                            </span>
+                            <input
+                              value={activityForm.name}
+                              onChange={(event) =>
+                                setActivityForm((previous) => ({
+                                  ...previous,
+                                  name: event.target.value,
+                                }))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Code
+                            <input
+                              value={activityForm.code}
+                              onChange={(event) =>
+                                setActivityForm((previous) => ({
+                                  ...previous,
+                                  code: event.target.value,
+                                }))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            <span className="field-label-row">
+                              Describe when to use this activity code
+                              <span className="required-indicator" aria-hidden="true">*</span>
+                            </span>
+                            <span className="field-helper">Required for matching</span>
+                            <textarea
+                              rows={3}
+                              maxLength={500}
+                              value={activityForm.describeWhenToUse}
+                              onChange={(event) =>
+                                setActivityForm((previous) => ({
+                                  ...previous,
+                                  describeWhenToUse: event.target.value,
+                                }))
+                              }
+                              placeholder="Use this activity code when..."
+                              required
+                            />
+                          </label>
+                          <label>
+                            Tags / Key Words (comma separated)
+                            <input
+                              value={activityForm.tags}
+                              onChange={(event) =>
+                                setActivityForm((previous) => ({
+                                  ...previous,
+                                  tags: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            Color
+                            <div className="color-input-row">
+                              <input
+                                type="color"
+                                value={activityFormColorValue ?? selectedEngagementColorValue ?? TIMELINE_NEUTRAL_COLOR}
+                                onChange={(event) =>
+                                  setActivityForm((previous) => ({
+                                    ...previous,
+                                    colorHex: event.target.value.toUpperCase(),
+                                  }))
+                                }
+                                aria-label="Select activity color"
+                              />
+                              <input
+                                value={activityForm.colorHex || selectedEngagementColorValue || ''}
+                                onChange={(event) =>
+                                  setActivityForm((previous) => ({
+                                    ...previous,
+                                    colorHex: event.target.value.toUpperCase(),
+                                  }))
+                                }
+                                placeholder="#RRGGBB"
+                                maxLength={7}
+                              />
+                              <button
+                                type="button"
+                                className="ghost color-clear-button"
+                                onClick={() =>
+                                  setActivityForm((previous) => ({
+                                    ...previous,
+                                    colorHex: '',
+                                  }))
+                                }
+                              >
+                                Use Default
+                              </button>
+                            </div>
+                          </label>
+                          <div className="code-editor-actions">
+                            <button type="submit" disabled={isBusy || engagements.length === 0}>
+                              {isEditingActivity ? 'Update Activity' : 'Create Activity'}
+                            </button>
+                            <button type="button" className="ghost" onClick={closeCodeEditor}>
+                              Cancel
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    ) : null}
+
+                    {!canCreateActivity ? (
+                      <p className="code-editor-choice-hint">Create an engagement first.</p>
+                    ) : null}
+                  </section>
+                </div>
+              </div>
+            </div>
+
+            <div className="code-browse-panel">
+              <div className="code-panel-header">
+                <h2>Existing Engagements & Activities</h2>
+                <p>Click to expand and review/edit the related activity codes.</p>
+              </div>
+
+              <div className="code-list" aria-label="Existing engagements and activities">
+                {engagements.length === 0 ? (
+                  <p className="code-list-empty">No engagements yet. Create one to get started.</p>
+                ) : (
+                  engagements.map((engagement) => {
+                    const engagementColor =
+                      normalizeColorHexInput(engagement.colorHex) ?? TIMELINE_NEUTRAL_COLOR
+                    const engagementUsage =
+                      engagement.describeWhenToUse?.trim() || 'Usage guidance not added yet.'
+                    const isExpanded = engagement.id === expandedEngagementId
+                    const engagementPanelId = `engagement-panel-${engagement.id}`
+
+                    return (
+                      <article
+                        key={engagement.id}
+                        className={`engagement-card ${isExpanded ? 'expanded' : ''}`}
+                        style={{ borderLeftColor: engagementColor }}
+                      >
+                        <div className="engagement-card-header">
+                          <div className="engagement-card-main">
+                            <h3 className="engagement-card-heading">
+                              <button
+                                type="button"
+                                className="engagement-disclosure"
+                                aria-expanded={isExpanded}
+                                aria-controls={engagementPanelId}
+                                onClick={() =>
+                                  setExpandedEngagementId((previous) =>
+                                    previous === engagement.id ? null : engagement.id,
+                                  )
+                                }
+                              >
+                                <span className="engagement-disclosure-main">
+                                  <span className="engagement-disclosure-icon" aria-hidden="true" />
+                                  <span className="code-item-copy">
+                                    <span className="code-item-title">
+                                      <span className="code-item-badge">{engagement.code}</span>
+                                      <span className="code-item-name">{engagement.name}</span>
+                                    </span>
+                                    <span
+                                      className={`code-item-usage ${engagement.describeWhenToUse?.trim() ? '' : 'is-placeholder'}`}
+                                    >
+                                      {engagementUsage}
+                                    </span>
+                                    <ResponsiveCodeTagList tags={engagement.tags} itemKeyPrefix={engagement.id} />
+                                  </span>
+                                </span>
+                                <span className="activity-count-pill">
+                                  {formatActivityCount(engagement.activities.length)}
+                                </span>
+                              </button>
+                            </h3>
+                          </div>
+
+                          <div className="code-item-actions">
+                            <button
+                              type="button"
+                              className="icon-action-button"
+                              aria-label={`Edit engagement ${engagement.code}`}
+                              title={`Edit engagement ${engagement.code}`}
+                              onClick={() => onEditEngagement(engagement)}
+                            >
+                              <img src={editIcon} alt="" aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              className="icon-action-button is-danger"
+                              aria-label={`Delete engagement ${engagement.code}`}
+                              title={`Delete engagement ${engagement.code}`}
+                              onClick={() => onDeleteEngagement(engagement.id)}
+                            >
+                              <img src={deleteIcon} alt="" aria-hidden="true" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div id={engagementPanelId} className="engagement-activities" hidden={!isExpanded}>
+                          {engagement.activities.length === 0 ? (
+                            <p className="engagement-empty-state">No activities yet.</p>
+                          ) : (
+                            <ul>
+                              {engagement.activities.map((activity) => {
+                                const activityColor =
+                                  normalizeColorHexInput(activity.colorHex)
+                                  ?? normalizeColorHexInput(engagement.colorHex)
+                                  ?? TIMELINE_NEUTRAL_COLOR
+                                const activityUsage =
+                                  activity.describeWhenToUse?.trim() || 'Usage guidance not added yet.'
+
+                                return (
+                                  <li
+                                    key={activity.id}
+                                    className="activity-row"
+                                    style={{ borderLeftColor: activityColor }}
+                                  >
+                                    <div className="code-item-copy">
+                                      <div className="code-item-title">
+                                        <span className="code-item-badge">{activity.code}</span>
+                                        <span className="code-item-name">{activity.name}</span>
+                                      </div>
+                                      <p
+                                        className={`code-item-usage ${activity.describeWhenToUse?.trim() ? '' : 'is-placeholder'}`}
+                                      >
+                                        {activityUsage}
+                                      </p>
+                                      <ResponsiveCodeTagList tags={activity.tags} itemKeyPrefix={activity.id} />
+                                    </div>
+
+                                    <div className="code-item-actions">
+                                      <button
+                                        type="button"
+                                        className="icon-action-button"
+                                        aria-label={`Edit activity ${activity.code}`}
+                                        title={`Edit activity ${activity.code}`}
+                                        onClick={() => onEditActivity(activity)}
+                                      >
+                                        <img src={editIcon} alt="" aria-hidden="true" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="icon-action-button is-danger"
+                                        aria-label={`Delete activity ${activity.code}`}
+                                        title={`Delete activity ${activity.code}`}
+                                        onClick={() => onDeleteActivity(activity.id)}
+                                      >
+                                        <img src={deleteIcon} alt="" aria-hidden="true" />
+                                      </button>
+                                    </div>
+                                  </li>
+                                )
+                              })}
+                            </ul>
+                          )}
+                        </div>
+                      </article>
+                    )
+                  })
+                )}
+              </div>
             </div>
           </section>
         ) : null}
@@ -2928,6 +3414,18 @@ function WarningBadge({ type }: { type: WarningType }) {
   return <span className={`warning-badge ${type}`}>{label}</span>
 }
 
+function TimelineBlockContent({
+  label,
+}: {
+  label: string
+}) {
+  return (
+    <span className="timeline-block-content">
+      <span className="timeline-block-label">{label}</span>
+    </span>
+  )
+}
+
 function formatDiagnosticsTime(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString()
 }
@@ -3033,6 +3531,14 @@ function formatCodesMutationError(error: unknown): string {
 
   if (normalized.includes('engagement code and name are required')) {
     return 'Engagement code and name are required.'
+  }
+
+  if (
+    normalized.includes('engagement usage guidance is required')
+    || normalized.includes('activity usage guidance is required')
+    || normalized.includes('usage guidance is required')
+  ) {
+    return '"Describe when to use" is required for matching.'
   }
 
   if (normalized.includes('activity engagement, code, and name are required')) {
@@ -3519,6 +4025,53 @@ function colorChannelToHex(value: number): string {
   return value.toString(16).padStart(2, '0').toUpperCase()
 }
 
+function normalizeCodeTags(tags: string[]): string[] {
+  return tags
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0)
+}
+
+function formatActivityCount(count: number): string {
+  return `${count} ${count === 1 ? 'activity' : 'activities'}`
+}
+
+function getTimelineBlockReviewLabel(warningFlags: WarningType[]): string | null {
+  const hasLowConfidence = warningFlags.includes('low_confidence')
+  const hasUnmatched = warningFlags.includes('unmatched')
+
+  if (hasLowConfidence && hasUnmatched) {
+    return 'Low confidence and uncategorized'
+  }
+
+  if (hasLowConfidence) {
+    return 'Low confidence'
+  }
+
+  if (hasUnmatched) {
+    return 'Uncategorized'
+  }
+
+  return null
+}
+
+function buildTimelineBlockTitle(
+  fullLabel: string,
+  description: string,
+  reviewLabel: string | null,
+): string {
+  const reviewLine = reviewLabel ? `\nReview needed: ${reviewLabel}` : ''
+  return `${fullLabel}\n${description}${reviewLine}`
+}
+
+function buildTimelineBlockAriaLabel(
+  fullLabel: string,
+  description: string,
+  reviewLabel: string | null,
+): string {
+  const reviewSentence = reviewLabel ? ` Review needed: ${reviewLabel}.` : ''
+  return `${fullLabel}. ${description}.${reviewSentence}`
+}
+
 function buildTimelineBlockLabel(
   entry: TimelineEntry,
   widthPercent: number,
@@ -3531,38 +4084,27 @@ function buildTimelineBlockLabel(
     activityName.toUpperCase() === activityCode.toUpperCase()
       ? activityCode
       : `${activityCode} ${activityName}`
-  const warningCount = entry.warningFlags.length
-  const warningLong = warningCount > 0
-    ? `${warningCount} warning${warningCount === 1 ? '' : 's'}`
-    : ''
-  const warningCompact = warningCount > 0 ? `${warningCount}w` : ''
-
   const fullLabelBase = `${engagementCode} | ${activityDisplaySegment}`
-  const fullLabel = warningLong ? `${fullLabelBase} | ${warningLong}` : fullLabelBase
 
   if (widthPercent < 36 || blockHeight < 28) {
-    const compactLabel = warningCompact ? `${activityCode} | ${warningCompact}` : activityCode
     return {
-      label: compactLabel,
-      fullLabel,
+      label: activityCode,
+      fullLabel: fullLabelBase,
       tier: 3,
     }
   }
 
   if (widthPercent < 58 || blockHeight < 38) {
-    const compactLabel = warningCompact
-      ? `${engagementCode} | ${activityCode} | ${warningCompact}`
-      : `${engagementCode} | ${activityCode}`
     return {
-      label: compactLabel,
-      fullLabel,
+      label: `${engagementCode} | ${activityCode}`,
+      fullLabel: fullLabelBase,
       tier: 2,
     }
   }
 
   return {
-    label: fullLabel,
-    fullLabel,
+    label: fullLabelBase,
+    fullLabel: fullLabelBase,
     tier: 1,
   }
 }
