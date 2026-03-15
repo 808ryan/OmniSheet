@@ -50,7 +50,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
 
       CREATE TABLE IF NOT EXISTS engagements (
         id TEXT PRIMARY KEY,
-        code TEXT NOT NULL UNIQUE,
+        code TEXT,
         name TEXT NOT NULL,
         client TEXT,
         color_hex TEXT,
@@ -64,7 +64,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
       CREATE TABLE IF NOT EXISTS activities (
         id TEXT PRIMARY KEY,
         engagement_id TEXT NOT NULL,
-        code TEXT NOT NULL,
+        code TEXT,
         name TEXT NOT NULL,
         color_hex TEXT,
         tags TEXT NOT NULL,
@@ -75,8 +75,13 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
       );
 
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_engagements_unique_code
+      ON engagements(code)
+      WHERE code IS NOT NULL AND length(trim(code)) > 0;
+
       CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_unique_code
-      ON activities(engagement_id, code);
+      ON activities(engagement_id, code)
+      WHERE code IS NOT NULL AND length(trim(code)) > 0;
 
       CREATE TABLE IF NOT EXISTS raw_messages (
         id TEXT PRIMARY KEY,
@@ -159,6 +164,8 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
     )?;
 
     ensure_expected_columns(conn)?;
+    migrate_optional_user_code_schema(conn)?;
+    ensure_optional_code_indexes(conn)?;
 
     Ok(())
 }
@@ -233,6 +240,127 @@ fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+fn migrate_optional_user_code_schema(conn: &Connection) -> AppResult<()> {
+    let engagements_code_not_null = column_is_not_null(conn, "engagements", "code")?;
+    let activities_code_not_null = column_is_not_null(conn, "activities", "code")?;
+
+    if !engagements_code_not_null && !activities_code_not_null {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        r#"
+      PRAGMA foreign_keys = OFF;
+      BEGIN IMMEDIATE TRANSACTION;
+
+      CREATE TABLE engagements_new (
+        id TEXT PRIMARY KEY,
+        code TEXT,
+        name TEXT NOT NULL,
+        client TEXT,
+        color_hex TEXT,
+        tags TEXT NOT NULL,
+        describe_when_to_use TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      INSERT INTO engagements_new (
+        id, code, name, client, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+      )
+      SELECT
+        id,
+        NULLIF(TRIM(code), ''),
+        name,
+        client,
+        color_hex,
+        tags,
+        describe_when_to_use,
+        is_active,
+        created_at,
+        updated_at
+      FROM engagements;
+
+      CREATE TABLE activities_new (
+        id TEXT PRIMARY KEY,
+        engagement_id TEXT NOT NULL,
+        code TEXT,
+        name TEXT NOT NULL,
+        color_hex TEXT,
+        tags TEXT NOT NULL,
+        describe_when_to_use TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+      );
+
+      INSERT INTO activities_new (
+        id, engagement_id, code, name, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+      )
+      SELECT
+        id,
+        engagement_id,
+        NULLIF(TRIM(code), ''),
+        name,
+        color_hex,
+        tags,
+        describe_when_to_use,
+        is_active,
+        created_at,
+        updated_at
+      FROM activities;
+
+      DROP TABLE activities;
+      DROP TABLE engagements;
+
+      ALTER TABLE engagements_new RENAME TO engagements;
+      ALTER TABLE activities_new RENAME TO activities;
+
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    "#,
+    )?;
+
+    Ok(())
+}
+
+fn ensure_optional_code_indexes(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        r#"
+      DROP INDEX IF EXISTS idx_engagements_unique_code;
+      DROP INDEX IF EXISTS idx_activities_unique_code;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_engagements_unique_code
+      ON engagements(code)
+      WHERE code IS NOT NULL AND length(trim(code)) > 0;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_unique_code
+      ON activities(engagement_id, code)
+      WHERE code IS NOT NULL AND length(trim(code)) > 0;
+    "#,
+    )?;
+
+    Ok(())
+}
+
+fn column_is_not_null(conn: &Connection, table_name: &str, column_name: &str) -> AppResult<bool> {
+    let query = format!("PRAGMA table_info({table_name})");
+    let mut statement = conn.prepare(&query)?;
+    let mut rows = statement.query([])?;
+
+    while let Some(row) = rows.next()? {
+        let candidate_name: String = row.get(1)?;
+        if candidate_name == column_name {
+            let is_not_null: i64 = row.get(3)?;
+            return Ok(is_not_null == 1);
+        }
+    }
+
+    Ok(false)
+}
+
 fn ensure_column_exists(
     conn: &Connection,
     table_name: &str,
@@ -262,9 +390,9 @@ fn ensure_column_exists(
 }
 
 pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> AppResult<String> {
-    if input.code.trim().is_empty() || input.name.trim().is_empty() {
+    if input.name.trim().is_empty() {
         return Err(AppError::InvalidInput(
-            "engagement code and name are required".to_string(),
+            "engagement name is required".to_string(),
         ));
     }
     if input.describe_when_to_use.trim().is_empty() {
@@ -275,6 +403,7 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
 
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let code = normalize_optional_code(input.code);
     let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
     let describe_when_to_use = normalize_usage_description(input.describe_when_to_use)?;
@@ -302,7 +431,7 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
     "#,
         params![
             id,
-            input.code.trim(),
+            code,
             input.name.trim(),
             input.client.as_ref().map(|client| client.trim()),
             color_hex,
@@ -322,12 +451,9 @@ pub fn delete_engagement(conn: &Connection, id: &str) -> AppResult<()> {
 }
 
 pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResult<String> {
-    if input.engagement_id.trim().is_empty()
-        || input.code.trim().is_empty()
-        || input.name.trim().is_empty()
-    {
+    if input.engagement_id.trim().is_empty() || input.name.trim().is_empty() {
         return Err(AppError::InvalidInput(
-            "activity engagement, code, and name are required".to_string(),
+            "activity engagement and name are required".to_string(),
         ));
     }
     if input.describe_when_to_use.trim().is_empty() {
@@ -338,6 +464,7 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
 
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let code = normalize_optional_code(input.code);
     let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
     let describe_when_to_use = normalize_usage_description(input.describe_when_to_use)?;
@@ -363,10 +490,10 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
         is_active = excluded.is_active,
         updated_at = excluded.updated_at
     "#,
-    params![
+        params![
       id,
       input.engagement_id.trim(),
-      input.code.trim(),
+      code,
       input.name.trim(),
       color_hex,
       tags_json,
@@ -467,7 +594,10 @@ pub fn load_code_context(conn: &Connection) -> AppResult<CodeContext> {
     let contexts = engagements
         .into_iter()
         .filter(|engagement| engagement.is_active)
-        .map(|engagement| ContextEngagement {
+        .enumerate()
+        .map(|(engagement_index, engagement)| ContextEngagement {
+            id: engagement.id,
+            engagement_ref: format!("eng-{:03}", engagement_index + 1),
             code: engagement.code,
             name: engagement.name,
             tags: engagement.tags,
@@ -476,7 +606,14 @@ pub fn load_code_context(conn: &Connection) -> AppResult<CodeContext> {
                 .activities
                 .into_iter()
                 .filter(|activity| activity.is_active)
-                .map(|activity| ContextActivity {
+                .enumerate()
+                .map(|(activity_index, activity)| ContextActivity {
+                    id: activity.id,
+                    activity_ref: format!(
+                        "act-{:03}-{:03}",
+                        engagement_index + 1,
+                        activity_index + 1
+                    ),
                     code: activity.code,
                     name: activity.name,
                     tags: activity.tags,
@@ -813,8 +950,10 @@ pub fn list_timeline_day_summaries_for_month(
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct WeeklySummaryRowKey {
-    engagement_code: String,
-    activity_code: String,
+    engagement_id: Option<String>,
+    activity_id: Option<String>,
+    engagement_code: Option<String>,
+    activity_code: Option<String>,
     activity_name: String,
     engagement_name: String,
     client_name: String,
@@ -823,8 +962,8 @@ struct WeeklySummaryRowKey {
 
 #[derive(Debug, Clone)]
 struct WeeklySummaryRowAccumulator {
-    engagement_code: String,
-    activity_code: String,
+    engagement_code: Option<String>,
+    activity_code: Option<String>,
     activity_name: String,
     engagement_name: String,
     client_name: String,
@@ -850,6 +989,8 @@ pub fn list_timeline_weekly_summary(
         te.end_minute,
         te.duration_minutes,
         te.description,
+        te.engagement_id,
+        te.activity_id,
         e.code,
         e.name,
         e.client,
@@ -877,6 +1018,8 @@ pub fn list_timeline_weekly_summary(
             row.get::<_, Option<String>>(7)?,
             row.get::<_, Option<String>>(8)?,
             row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
         ))
     })?;
 
@@ -887,6 +1030,8 @@ pub fn list_timeline_weekly_summary(
             end_minute,
             duration_minutes,
             description,
+            engagement_id_raw,
+            activity_id_raw,
             engagement_code_raw,
             engagement_name_raw,
             client_name_raw,
@@ -924,15 +1069,29 @@ pub fn list_timeline_weekly_summary(
             .map(str::trim)
             .filter(|value| !value.is_empty());
 
-        let is_uncategorized = engagement_code_trimmed.is_none() || activity_code_trimmed.is_none();
+        let engagement_id = engagement_id_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        let activity_id = activity_id_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        let is_uncategorized = engagement_id.is_none() || activity_id.is_none();
 
-        let engagement_code = engagement_code_trimmed.unwrap_or("UNCAT").to_string();
-        let activity_code = activity_code_trimmed.unwrap_or("UNCAT").to_string();
+        let engagement_code = engagement_code_trimmed.map(|value| value.to_string());
+        let activity_code = activity_code_trimmed.map(|value| value.to_string());
         let activity_name = activity_name_trimmed.unwrap_or("Uncategorized").to_string();
-        let engagement_name = engagement_name_trimmed.unwrap_or("Uncategorized").to_string();
+        let engagement_name = engagement_name_trimmed
+            .unwrap_or("Uncategorized")
+            .to_string();
         let client_name = client_name_trimmed.unwrap_or("").to_string();
 
         let key = WeeklySummaryRowKey {
+            engagement_id: engagement_id.clone(),
+            activity_id: activity_id.clone(),
             engagement_code: engagement_code.clone(),
             activity_code: activity_code.clone(),
             activity_name: activity_name.clone(),
@@ -1000,12 +1159,22 @@ pub fn list_timeline_weekly_summary(
         }
 
         left.engagement_code
+            .as_deref()
+            .unwrap_or("")
             .to_lowercase()
-            .cmp(&right.engagement_code.to_lowercase())
+            .cmp(
+                &right
+                    .engagement_code
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase(),
+            )
             .then_with(|| {
                 left.activity_code
+                    .as_deref()
+                    .unwrap_or("")
                     .to_lowercase()
-                    .cmp(&right.activity_code.to_lowercase())
+                    .cmp(&right.activity_code.as_deref().unwrap_or("").to_lowercase())
             })
             .then_with(|| {
                 left.engagement_name
@@ -1114,49 +1283,6 @@ pub fn get_entry_date(conn: &Connection, entry_id: &str) -> AppResult<Option<Str
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(AppError::Database(error)),
     }
-}
-
-pub fn resolve_code_ids(
-    conn: &Connection,
-    engagement_code: Option<&str>,
-    activity_code: Option<&str>,
-) -> AppResult<(Option<String>, Option<String>)> {
-    let Some(engagement_code) = engagement_code else {
-        return Ok((None, None));
-    };
-
-    let mut engagement_statement =
-        conn.prepare("SELECT id FROM engagements WHERE code = ?1 AND is_active = 1")?;
-    let engagement_id = match engagement_statement
-        .query_row(params![engagement_code], |row| row.get::<_, String>(0))
-    {
-        Ok(id) => Some(id),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(error) => return Err(AppError::Database(error)),
-    };
-
-    let Some(engagement_id_value) = &engagement_id else {
-        return Ok((None, None));
-    };
-
-    let Some(activity_code) = activity_code else {
-        return Ok((engagement_id, None));
-    };
-
-    let mut activity_statement = conn.prepare(
-        "SELECT id FROM activities WHERE engagement_id = ?1 AND code = ?2 AND is_active = 1",
-    )?;
-
-    let activity_id = match activity_statement
-        .query_row(params![engagement_id_value, activity_code], |row| {
-            row.get::<_, String>(0)
-        }) {
-        Ok(id) => Some(id),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(error) => return Err(AppError::Database(error)),
-    };
-
-    Ok((engagement_id, activity_id))
 }
 
 pub fn prune_old_diagnostics(conn: &Connection, retention_days: i64) -> AppResult<()> {
@@ -1338,6 +1464,17 @@ fn normalize_color_hex(raw_value: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(candidate))
 }
 
+fn normalize_optional_code(raw_value: Option<String>) -> Option<String> {
+    raw_value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn normalize_usage_description(raw_value: String) -> AppResult<String> {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
@@ -1383,5 +1520,139 @@ fn db_value_to_warning_type(value: &str) -> WarningType {
         "overlap" => WarningType::Overlap,
         "unmatched" => WarningType::Unmatched,
         _ => WarningType::Unmatched,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::{
+        current_unix_timestamp, insert_raw_message, insert_timesheet_entry, list_engagements,
+        list_timeline_weekly_summary, run_migrations, upsert_activity, upsert_engagement,
+    };
+    use crate::models::{ActivityUpsertInput, EngagementUpsertInput, NormalizedEntry};
+
+    fn test_connection() -> Connection {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        run_migrations(&connection).expect("migrations should run");
+        connection
+    }
+
+    #[test]
+    fn engagement_upsert_allows_missing_code() {
+        let connection = test_connection();
+
+        let engagement_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: None,
+                name: "No Code Engagement".to_string(),
+                client: None,
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use when the user has no external code.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("engagement should save without a code");
+
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        let saved = engagements
+            .into_iter()
+            .find(|engagement| engagement.id == engagement_id)
+            .expect("saved engagement should exist");
+
+        assert!(saved.code.is_none());
+        assert_eq!(saved.name, "No Code Engagement");
+    }
+
+    #[test]
+    fn weekly_summary_keeps_categorized_rows_when_codes_are_blank() {
+        let connection = test_connection();
+
+        let engagement_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: None,
+                name: "Client Work".to_string(),
+                client: Some("Example Client".to_string()),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for client delivery work.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("engagement should save");
+
+        let activity_id = upsert_activity(
+            &connection,
+            ActivityUpsertInput {
+                id: None,
+                engagement_id: engagement_id.clone(),
+                code: None,
+                name: "Fieldwork".to_string(),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for fieldwork activity.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("activity should save");
+
+        insert_raw_message(
+            &connection,
+            "raw-1",
+            "worked on client walkthrough",
+            "{\"entries\":[]}",
+            0.8,
+            current_unix_timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message should save");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-02".to_string(),
+            start_minute: 540,
+            end_minute: 600,
+            duration_minutes: 60,
+            description: "Client walkthrough".to_string(),
+            user_submission_text: "Client walkthrough".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-1",
+            &entry,
+            Some(&engagement_id),
+            Some(&activity_id),
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "text",
+        )
+        .expect("timesheet entry should save");
+
+        let summary = list_timeline_weekly_summary(&connection, "2026-02-28", "2026-03-07")
+            .expect("summary should load");
+        let row = summary.rows.first().expect("summary row should exist");
+
+        assert!(!row.is_uncategorized);
+        assert!(row.engagement_code.is_none());
+        assert!(row.activity_code.is_none());
+        assert_eq!(row.engagement_name, "Client Work");
+        assert_eq!(row.activity_name, "Fieldwork");
     }
 }

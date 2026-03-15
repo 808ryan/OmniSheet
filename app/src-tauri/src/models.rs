@@ -45,7 +45,7 @@ pub enum StatusLevel {
 pub struct Activity {
     pub id: String,
     pub engagement_id: String,
-    pub code: String,
+    pub code: Option<String>,
     pub name: String,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
@@ -59,7 +59,7 @@ pub struct Activity {
 #[serde(rename_all = "camelCase")]
 pub struct Engagement {
     pub id: String,
-    pub code: String,
+    pub code: Option<String>,
     pub name: String,
     pub client: Option<String>,
     pub color_hex: Option<String>,
@@ -75,7 +75,7 @@ pub struct Engagement {
 #[serde(rename_all = "camelCase")]
 pub struct EngagementUpsertInput {
     pub id: Option<String>,
-    pub code: String,
+    pub code: Option<String>,
     pub name: String,
     pub client: Option<String>,
     pub color_hex: Option<String>,
@@ -89,7 +89,7 @@ pub struct EngagementUpsertInput {
 pub struct ActivityUpsertInput {
     pub id: Option<String>,
     pub engagement_id: String,
-    pub code: String,
+    pub code: Option<String>,
     pub name: String,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
@@ -213,8 +213,8 @@ pub struct TimelineWeeklySummaryDay {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineWeeklySummaryRow {
-    pub engagement_code: String,
-    pub activity_code: String,
+    pub engagement_code: Option<String>,
+    pub activity_code: Option<String>,
     pub activity_name: String,
     pub engagement_name: String,
     pub client_name: String,
@@ -249,12 +249,20 @@ pub struct SummaryExportResult {
     pub auto_open_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineUpdateMode {
+    Manual,
+    Drag,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineUpdateInput {
     pub id: String,
     pub engagement_id: Option<String>,
     pub activity_id: Option<String>,
+    pub mode: TimelineUpdateMode,
     pub date: String,
     pub start_minute: i64,
     pub end_minute: i64,
@@ -318,7 +326,11 @@ pub struct CodeContext {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextEngagement {
-    pub code: String,
+    #[serde(skip_serializing)]
+    pub id: String,
+    pub engagement_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub name: String,
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -329,7 +341,11 @@ pub struct ContextEngagement {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextActivity {
-    pub code: String,
+    #[serde(skip_serializing)]
+    pub id: String,
+    pub activity_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub name: String,
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -345,8 +361,8 @@ pub struct LlmResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmEntry {
-    pub engagement_code: Option<String>,
-    pub activity_code: Option<String>,
+    pub engagement_ref: Option<String>,
+    pub activity_ref: Option<String>,
     pub date: Option<String>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
@@ -360,7 +376,7 @@ pub struct LlmEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmAlternativeActivity {
-    pub activity_code: String,
+    pub activity_ref: String,
     pub reason: String,
 }
 
@@ -373,8 +389,8 @@ pub struct NormalizedEntry {
     pub description: String,
     pub user_submission_text: String,
     pub confidence: f64,
-    pub engagement_code: Option<String>,
-    pub activity_code: Option<String>,
+    pub engagement_ref: Option<String>,
+    pub activity_ref: Option<String>,
 }
 
 #[cfg(test)]
@@ -387,12 +403,16 @@ mod tests {
     fn context_serialization_omits_null_usage_description_fields() {
         let context = CodeContext {
             engagements: vec![ContextEngagement {
-                code: "E-001".to_string(),
+                id: "engagement-id-1".to_string(),
+                engagement_ref: "eng-001".to_string(),
+                code: None,
                 name: "Example Engagement".to_string(),
                 tags: vec!["example".to_string()],
                 describe_when_to_use: None,
                 activities: vec![ContextActivity {
-                    code: "A-001".to_string(),
+                    id: "activity-id-1".to_string(),
+                    activity_ref: "act-001".to_string(),
+                    code: None,
                     name: "Example Activity".to_string(),
                     tags: vec!["task".to_string()],
                     describe_when_to_use: None,
@@ -408,6 +428,15 @@ mod tests {
             .and_then(Value::as_object)
             .expect("engagement should exist");
 
+        assert_eq!(
+            engagement
+                .get("engagementRef")
+                .and_then(Value::as_str)
+                .expect("engagement ref should exist"),
+            "eng-001"
+        );
+        assert!(!engagement.contains_key("id"));
+        assert!(!engagement.contains_key("code"));
         assert!(!engagement.contains_key("describeWhenToUse"));
 
         let activity = engagement
@@ -417,6 +446,15 @@ mod tests {
             .and_then(Value::as_object)
             .expect("activity should exist");
 
+        assert_eq!(
+            activity
+                .get("activityRef")
+                .and_then(Value::as_str)
+                .expect("activity ref should exist"),
+            "act-001"
+        );
+        assert!(!activity.contains_key("id"));
+        assert!(!activity.contains_key("code"));
         assert!(!activity.contains_key("describeWhenToUse"));
     }
 
@@ -424,12 +462,16 @@ mod tests {
     fn context_serialization_includes_non_null_usage_description_fields() {
         let context = CodeContext {
             engagements: vec![ContextEngagement {
-                code: "E-001".to_string(),
+                id: "engagement-id-1".to_string(),
+                engagement_ref: "eng-001".to_string(),
+                code: Some("E-001".to_string()),
                 name: "Example Engagement".to_string(),
                 tags: vec!["example".to_string()],
                 describe_when_to_use: Some("Use for client example work.".to_string()),
                 activities: vec![ContextActivity {
-                    code: "A-001".to_string(),
+                    id: "activity-id-1".to_string(),
+                    activity_ref: "act-001".to_string(),
+                    code: Some("A-001".to_string()),
                     name: "Example Activity".to_string(),
                     tags: vec!["task".to_string()],
                     describe_when_to_use: Some("Use for walkthrough sessions.".to_string()),
@@ -452,6 +494,13 @@ mod tests {
                 .expect("engagement description should exist"),
             "Use for client example work."
         );
+        assert_eq!(
+            engagement
+                .get("code")
+                .and_then(Value::as_str)
+                .expect("engagement code should exist"),
+            "E-001"
+        );
 
         let activity = engagement
             .get("activities")
@@ -466,6 +515,13 @@ mod tests {
                 .and_then(Value::as_str)
                 .expect("activity description should exist"),
             "Use for walkthrough sessions."
+        );
+        assert_eq!(
+            activity
+                .get("code")
+                .and_then(Value::as_str)
+                .expect("activity code should exist"),
+            "A-001"
         );
     }
 }

@@ -3,7 +3,7 @@ export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
 export interface Activity {
   id: string
   engagementId: string
-  code: string
+  code: string | null
   name: string
   colorHex: string | null
   tags: string[]
@@ -15,7 +15,7 @@ export interface Activity {
 
 export interface Engagement {
   id: string
-  code: string
+  code: string | null
   name: string
   client: string | null
   colorHex: string | null
@@ -29,7 +29,7 @@ export interface Engagement {
 
 export interface EngagementUpsertInput {
   id?: string
-  code: string
+  code?: string | null
   name: string
   client?: string | null
   colorHex?: string | null
@@ -41,7 +41,7 @@ export interface EngagementUpsertInput {
 export interface ActivityUpsertInput {
   id?: string
   engagementId: string
-  code: string
+  code?: string | null
   name: string
   colorHex?: string | null
   tags: string[]
@@ -135,8 +135,8 @@ export interface TimelineWeeklySummaryDay {
 }
 
 export interface TimelineWeeklySummaryRow {
-  engagementCode: string
-  activityCode: string
+  engagementCode: string | null
+  activityCode: string | null
   activityName: string
   engagementName: string
   clientName: string
@@ -169,6 +169,7 @@ export interface TimelineUpdateInput {
   id: string
   engagementId: string | null
   activityId: string | null
+  mode: 'manual' | 'drag'
   date: string
   startMinute: number
   endMinute: number
