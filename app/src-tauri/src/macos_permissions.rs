@@ -32,11 +32,17 @@ mod imp {
         }
     }
 
+    fn audio_media_type() -> &'static av_foundation::media_format::AVMediaType {
+        // AVFoundation exposes this as an extern static constant. Reading it is safe here
+        // because we only borrow the framework-defined immutable media type identifier.
+        unsafe { AVMediaTypeAudio }
+    }
+
     pub async fn request_microphone_permission(
         app: &AppHandle,
     ) -> Result<MicrophonePermissionRequestOutcome, String> {
         let initial_status = map_status(AVCaptureDevice::authorization_status_for_media_type(
-            AVMediaTypeAudio,
+            audio_media_type(),
         ));
 
         match initial_status {
@@ -54,7 +60,7 @@ mod imp {
 
                 app.run_on_main_thread(move || {
                     AVCaptureDevice::request_access_for_media_type(
-                        AVMediaTypeAudio,
+                        audio_media_type(),
                         move |granted| {
                             let status = if granted.as_bool() {
                                 MicrophonePermissionStatus::Granted
