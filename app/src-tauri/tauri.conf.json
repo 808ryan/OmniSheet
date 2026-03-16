@@ -27,6 +27,7 @@
     "active": true,
     "targets": "all",
     "macOS": {
+      "entitlements": "Entitlements.plist",
       "infoPlist": "Info.plist"
     },
     "icon": [

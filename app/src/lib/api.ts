@@ -14,6 +14,7 @@ import type {
   IdResult,
   InterpretResult,
   InterpretTextInput,
+  MicrophonePermissionResult,
   OpenAiModelId,
   SettingsStatus,
   SummaryExportResult,
@@ -219,6 +220,10 @@ export function interpretTextMessage(input: InterpretTextInput): Promise<Interpr
 
 export function transcribeAudioClip(input: TranscribeAudioInput): Promise<TranscribeAudioResult> {
   return invokeCommand<TranscribeAudioResult>('transcribe_audio_clip', { input })
+}
+
+export function voiceRequestMicrophonePermission(): Promise<MicrophonePermissionResult> {
+  return invokeCommand<MicrophonePermissionResult>('voice_request_microphone_permission')
 }
 
 export function timelineListForDate(input: DateInput): Promise<TimelineEntry[]> {

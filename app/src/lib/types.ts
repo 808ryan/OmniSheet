@@ -102,6 +102,18 @@ export interface TranscribeAudioResult {
   audioDurationMs: number
 }
 
+export type MicrophonePermissionStatus =
+  | 'granted'
+  | 'denied'
+  | 'restricted'
+  | 'not_determined'
+  | 'unsupported'
+
+export interface MicrophonePermissionResult {
+  status: MicrophonePermissionStatus
+  requested: boolean
+}
+
 export interface Warning {
   warningType: WarningType
   entryId: string
