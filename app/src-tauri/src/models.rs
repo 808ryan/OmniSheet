@@ -286,6 +286,23 @@ pub struct TranscribeAudioResult {
     pub audio_duration_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MicrophonePermissionStatus {
+    Granted,
+    Denied,
+    Restricted,
+    NotDetermined,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicrophonePermissionResult {
+    pub status: MicrophonePermissionStatus,
+    pub requested: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InterpretResult {

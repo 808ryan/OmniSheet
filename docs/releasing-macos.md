@@ -169,6 +169,7 @@ npm run tauri build -- --target universal-apple-darwin
 ```
 
 The app bundle includes `NSMicrophoneUsageDescription`, so the packaged app is the correct place to verify the first-run microphone permission prompt.
+The macOS bundle now also includes an entitlements file with `com.apple.security.device.audio-input`, and OmniSheet proactively requests microphone permission through native AVFoundation before the web recorder starts.
 
 ## Troubleshooting
 
@@ -197,7 +198,12 @@ Optional command-line checks:
 ```bash
 spctl -a -vvvv /path/to/OmniSheet.app
 xcrun stapler validate /path/to/OmniSheet.dmg
+codesign -d --entitlements :- /path/to/OmniSheet.app
+tccutil reset Microphone com.omnisheet.desktop
 ```
+
+`codesign -d --entitlements :-` should show `com.apple.security.device.audio-input`.
+Use `tccutil reset` before re-testing the first-run prompt path for the same bundle identifier.
 
 ## Cost and trigger guidance
 

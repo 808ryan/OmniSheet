@@ -14,16 +14,17 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::error::{AppError, AppResult};
+use crate::macos_permissions;
 use crate::models::{
     ActivityUpsertInput, ApiKeyInput, CaptureSourceId, CodeContext, ContextActivity,
     ContextEngagement, DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput,
     DiagnosticsRecordInput, Engagement, EngagementUpsertInput, IdInput, IdResult, InterpretResult,
-    InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, NormalizedEntry,
-    OpenAiModelId, SettingsSetOpenAiModelInput, SettingsSetTranscriptionModelInput, SettingsStatus,
-    StatusLevel, StorageHealth, SummaryExportResult, TimelineDaySummary, TimelineEntry,
-    TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode, TimelineWeeklySummary,
-    TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult, TranscriptionModelId,
-    Warning, WarningType,
+    InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
+    MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId, SettingsSetOpenAiModelInput,
+    SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
+    SummaryExportResult, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
+    TimelineUpdateInput, TimelineUpdateMode, TimelineWeeklySummary, TimelineWeeklySummaryNote,
+    TranscribeAudioInput, TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -140,6 +141,16 @@ fn capture_source_label(value: CaptureSourceId) -> &'static str {
     match value {
         CaptureSourceId::Text => "text",
         CaptureSourceId::Voice => "voice",
+    }
+}
+
+fn microphone_permission_status_label(value: MicrophonePermissionStatus) -> &'static str {
+    match value {
+        MicrophonePermissionStatus::Granted => "granted",
+        MicrophonePermissionStatus::Denied => "denied",
+        MicrophonePermissionStatus::Restricted => "restricted",
+        MicrophonePermissionStatus::NotDetermined => "not_determined",
+        MicrophonePermissionStatus::Unsupported => "unsupported",
     }
 }
 
@@ -1592,6 +1603,93 @@ pub fn timeline_delete_entry(state: State<'_, AppState>, input: IdInput) -> Resu
 
     Ok(())
 }
+
+#[tauri::command]
+pub async fn voice_request_microphone_permission(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<MicrophonePermissionResult, String> {
+    let command = "voice_request_microphone_permission";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    record_backend_event_with_state(
+        &state,
+        &correlation_id,
+        "command_start",
+        command,
+        "ok",
+        None,
+        None,
+        json!({
+          "platform": if cfg!(target_os = "macos") { "macos" } else { "non_macos" },
+        }),
+    );
+
+    let outcome = match macos_permissions::request_microphone_permission(&app).await {
+        Ok(value) => value,
+        Err(error) => {
+            let message = error.to_string();
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "message": message,
+                  "platform": if cfg!(target_os = "macos") { "macos" } else { "non_macos" },
+                }),
+            );
+            return Err(format_command_error(&correlation_id, message));
+        }
+    };
+
+    let result_status = outcome.result.status;
+    let diagnostic_status = match result_status {
+        MicrophonePermissionStatus::Granted | MicrophonePermissionStatus::Unsupported => "ok",
+        MicrophonePermissionStatus::Denied
+        | MicrophonePermissionStatus::Restricted
+        | MicrophonePermissionStatus::NotDetermined => "warning",
+    };
+
+    record_backend_event_with_state(
+        &state,
+        &correlation_id,
+        "voice_permission_status",
+        command,
+        diagnostic_status,
+        Some(duration_ms(started_at)),
+        None,
+        json!({
+          "initialStatus": microphone_permission_status_label(outcome.initial_status),
+          "finalStatus": microphone_permission_status_label(result_status),
+          "requested": outcome.result.requested,
+          "platform": if cfg!(target_os = "macos") { "macos" } else { "non_macos" },
+        }),
+    );
+
+    record_backend_event_with_state(
+        &state,
+        &correlation_id,
+        "command_success",
+        command,
+        diagnostic_status,
+        Some(duration_ms(started_at)),
+        None,
+        json!({
+          "initialStatus": microphone_permission_status_label(outcome.initial_status),
+          "finalStatus": microphone_permission_status_label(result_status),
+          "requested": outcome.result.requested,
+          "platform": if cfg!(target_os = "macos") { "macos" } else { "non_macos" },
+        }),
+    );
+
+    Ok(outcome.result)
+}
+
 fn truncate_for_bundle(value: &str, limit: usize) -> String {
     if value.len() <= limit {
         value.to_string()

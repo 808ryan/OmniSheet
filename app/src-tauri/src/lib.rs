@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod error;
+mod macos_permissions;
 mod models;
 mod openai;
 mod state;
@@ -61,6 +62,7 @@ pub fn run() {
             commands::timeline_update_entry,
             commands::timeline_delete_entry,
             commands::transcribe_audio_clip,
+            commands::voice_request_microphone_permission,
             commands::interpret_text_message,
             commands::diagnostics_record_frontend_event,
             commands::diagnostics_list,

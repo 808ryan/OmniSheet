@@ -29,6 +29,7 @@ import {
   timelineMonthSummary,
   timelineWeeklySummary,
   timelineUpdateEntry,
+  voiceRequestMicrophonePermission,
 } from './lib/api'
 import { isTauriRuntime } from './lib/runtime'
 import {
@@ -45,6 +46,7 @@ import type {
   CaptureSourceId,
   DiagnosticsEvent,
   Engagement,
+  MicrophonePermissionStatus,
   OpenAiModelId,
   SettingsStatus,
   TimelineDaySummary,
@@ -167,6 +169,7 @@ type VoicePermissionOutcome =
   | 'not_requested'
   | 'granted'
   | 'denied'
+  | 'restricted'
   | 'device_unavailable'
   | 'device_unreadable'
   | 'unknown'
@@ -183,7 +186,13 @@ interface VoiceEnvironmentSupport {
 }
 
 interface VoiceRecordingErrorDetails {
-  errorCategory: 'permission_denied' | 'device_unavailable' | 'device_unreadable' | 'unknown'
+  errorCategory:
+    | 'permission_denied'
+    | 'permission_restricted'
+    | 'permission_request_failed'
+    | 'device_unavailable'
+    | 'device_unreadable'
+    | 'unknown'
   message: string
   permissionErrorName: string | null
   permissionOutcome: VoicePermissionOutcome
@@ -1657,6 +1666,46 @@ function App() {
       })
       voiceCaptureCorrelationIdRef.current = null
       return
+    }
+
+    if (support.platform === 'macos' && isTauriRuntime()) {
+      recordVoiceDiagnostic('voice_native_permission_check_started', 'ok', {
+        ...supportDiagnosticDetails,
+        permissionOutcome: 'not_requested',
+      })
+
+      try {
+        const permissionResult = await voiceRequestMicrophonePermission()
+        recordVoiceDiagnostic(
+          'voice_native_permission_result',
+          voiceDiagnosticStatusForMacosPermission(permissionResult.status),
+          {
+            ...supportDiagnosticDetails,
+            nativePermissionRequested: permissionResult.requested,
+            permissionOutcome: mapMacosPermissionOutcome(permissionResult.status),
+            permissionStatus: permissionResult.status,
+          },
+        )
+
+        if (permissionResult.status !== 'granted' && permissionResult.status !== 'unsupported') {
+          const errorDetails = mapMacosNativeMicrophonePermissionStatus(permissionResult.status)
+          setErrorMessage(errorDetails.message)
+          voiceCaptureCorrelationIdRef.current = null
+          return
+        }
+      } catch (error) {
+        const errorDetails = buildMacosNativePermissionRequestFailedDetails(error)
+        setErrorMessage(errorDetails.message)
+        recordVoiceDiagnostic('voice_native_permission_failed', 'error', {
+          ...supportDiagnosticDetails,
+          errorCategory: errorDetails.errorCategory,
+          message: errorDetails.message,
+          permissionErrorName: errorDetails.permissionErrorName,
+          permissionOutcome: errorDetails.permissionOutcome,
+        })
+        voiceCaptureCorrelationIdRef.current = null
+        return
+      }
     }
 
     let stream: MediaStream | null = null
@@ -4313,6 +4362,72 @@ function mapVoiceRecordingError(error: unknown): VoiceRecordingErrorDetails {
     errorCategory: 'unknown',
     message: extractErrorMessage(error),
     permissionErrorName,
+    permissionOutcome: 'unknown',
+  }
+}
+
+function voiceDiagnosticStatusForMacosPermission(
+  status: MicrophonePermissionStatus,
+): 'ok' | 'warning' {
+  if (status === 'granted' || status === 'unsupported') {
+    return 'ok'
+  }
+
+  return 'warning'
+}
+
+function mapMacosPermissionOutcome(status: MicrophonePermissionStatus): VoicePermissionOutcome {
+  if (status === 'granted') {
+    return 'granted'
+  }
+
+  if (status === 'denied') {
+    return 'denied'
+  }
+
+  if (status === 'restricted') {
+    return 'restricted'
+  }
+
+  return 'unknown'
+}
+
+function mapMacosNativeMicrophonePermissionStatus(
+  status: MicrophonePermissionStatus,
+): VoiceRecordingErrorDetails {
+  if (status === 'denied') {
+    return {
+      errorCategory: 'permission_denied',
+      message: 'Microphone access was denied. Enable OmniSheet in System Settings > Privacy & Security > Microphone, then try again.',
+      permissionErrorName: null,
+      permissionOutcome: 'denied',
+    }
+  }
+
+  if (status === 'restricted') {
+    return {
+      errorCategory: 'permission_restricted',
+      message: 'Microphone access is restricted by macOS or an administrator policy, so OmniSheet cannot start voice recording on this Mac.',
+      permissionErrorName: null,
+      permissionOutcome: 'restricted',
+    }
+  }
+
+  return {
+    errorCategory: 'permission_request_failed',
+    message: 'OmniSheet could not confirm microphone access with macOS. Respond to the macOS permission prompt if it is open, then try again.',
+    permissionErrorName: null,
+    permissionOutcome: 'unknown',
+  }
+}
+
+function buildMacosNativePermissionRequestFailedDetails(
+  error: unknown,
+): VoiceRecordingErrorDetails {
+  return {
+    errorCategory: 'permission_request_failed',
+    message: 'OmniSheet could not request microphone access from macOS. Close the app, reopen it from Finder, and try again.',
+    permissionErrorName: getVoiceErrorName(error),
     permissionOutcome: 'unknown',
   }
 }
