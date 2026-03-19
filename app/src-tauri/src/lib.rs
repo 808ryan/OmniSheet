@@ -60,6 +60,7 @@ pub fn run() {
             commands::timeline_weekly_summary,
             commands::summary_export_weekly_excel,
             commands::timeline_update_entry,
+            commands::timeline_create_entry,
             commands::timeline_delete_entry,
             commands::transcribe_audio_clip,
             commands::voice_request_microphone_permission,

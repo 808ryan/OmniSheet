@@ -227,6 +227,12 @@ export interface TimelineUpdateInput {
   description: string
 }
 
+export interface TimelineCreateInput {
+  date: string
+  startMinute: number
+  endMinute: number
+}
+
 export interface SettingsStatus {
   hasOpenAiKey: boolean
   storageHealth: 'ok' | 'unavailable' | 'read_error'

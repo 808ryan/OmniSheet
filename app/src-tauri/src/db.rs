@@ -771,6 +771,41 @@ pub fn insert_timesheet_entry(
     Ok(id)
 }
 
+pub fn insert_manual_timeline_entry(
+    conn: &Connection,
+    date: &str,
+    start_minute: i64,
+    end_minute: i64,
+    duration_minutes: i64,
+    description: &str,
+) -> AppResult<String> {
+    let id = Uuid::new_v4().to_string();
+    let now = current_unix_timestamp();
+
+    conn.execute(
+        r#"
+      INSERT INTO timesheet_entries (
+        id, engagement_id, activity_id, date, start_minute, end_minute,
+        duration_minutes, description, user_submission_text, source, raw_message_id, confidence,
+        used_activity_fallback, used_temporal_fallback, duration_defaulted,
+        fallback_summary, source_message_entry_index, source_message_entry_count, created_at, updated_at
+      )
+      VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, 'Manual Entry', 'manual', NULL, 1.0, 0, 0, 0, NULL, NULL, NULL, ?7, ?7)
+    "#,
+        params![
+            id,
+            date,
+            start_minute,
+            end_minute,
+            duration_minutes,
+            description.trim(),
+            now,
+        ],
+    )?;
+
+    Ok(id)
+}
+
 pub fn add_warning(
     conn: &Connection,
     entry_id: &str,
@@ -1598,9 +1633,10 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        current_unix_timestamp, get_app_setting, insert_raw_message, insert_timesheet_entry,
-        list_engagements, list_timeline_entries, list_timeline_weekly_summary, run_migrations,
-        upsert_activity, upsert_app_setting, upsert_engagement,
+        current_unix_timestamp, get_app_setting, insert_manual_timeline_entry, insert_raw_message,
+        insert_timesheet_entry, list_engagements, list_timeline_entries,
+        list_timeline_weekly_summary, run_migrations, upsert_activity, upsert_app_setting,
+        upsert_engagement,
     };
     use crate::models::{
         ActivityUpsertInput, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
@@ -1917,6 +1953,27 @@ mod tests {
             saved_entry.transcription_model_used_label.as_deref(),
             Some("Whisper")
         );
+    }
+
+    #[test]
+    fn manual_timeline_entry_uses_manual_defaults() {
+        let connection = test_connection();
+
+        insert_manual_timeline_entry(&connection, "2026-03-19", 600, 630, 30, "")
+            .expect("manual timeline entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-19")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.source, "manual");
+        assert_eq!(saved_entry.description, "");
+        assert_eq!(saved_entry.user_submission_text, "Manual Entry");
+        assert_eq!(saved_entry.confidence, 1.0);
+        assert_eq!(saved_entry.source_message_entry_index, None);
+        assert_eq!(saved_entry.source_message_entry_count, None);
     }
 
     #[test]

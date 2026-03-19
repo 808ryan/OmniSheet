@@ -24,6 +24,7 @@ import {
   settingsSetTranscriptionModel,
   summaryExportWeeklyExcel,
   transcribeAudioClip,
+  timelineCreateEntry,
   timelineDeleteEntry,
   timelineListForDate,
   timelineMonthSummary,
@@ -228,11 +229,22 @@ interface TimelineHeaderDate {
   weekday: string
 }
 
-interface TimelineContextMenuState {
-  entryId: string
-  x: number
-  y: number
-}
+type TimelineContextMenuKind = 'entry' | 'empty'
+
+type TimelineContextMenuState =
+  | {
+    kind: 'entry'
+    entryId: string
+    createStartMinute: number
+    x: number
+    y: number
+  }
+  | {
+    kind: 'empty'
+    createStartMinute: number
+    x: number
+    y: number
+  }
 
 interface TimelineToast {
   id: number
@@ -314,6 +326,7 @@ const TIMELINE_ACCENT_SATURATION_BOOST = 1.18
 const TIMELINE_ACCENT_LIGHTEN_RATIO = 0.24
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
+const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
 const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
   startMinute: 0,
   endMinute: MINUTES_IN_DAY,
@@ -1149,6 +1162,8 @@ function App() {
 
     if (
       timelineContextMenu
+      && timelineContextMenu.kind === 'entry'
+      && timelineContextMenu.entryId
       && timelineEntries.every((entry) => entry.id !== timelineContextMenu.entryId)
     ) {
       setTimelineContextMenu(null)
@@ -2353,14 +2368,109 @@ function App() {
     entry: TimelineEntry,
   ) => {
     event.preventDefault()
+
+    if (isBusy || isTimelineLoading || isTimelineDeleteBusy) {
+      return
+    }
+
+    event.stopPropagation()
     onSelectEntry(entry)
 
-    const position = clampTimelineContextMenuPosition(event.clientX, event.clientY)
+    const grid = timelineGridRef.current
+    const pointerMinute = grid
+      ? clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+      : entry.startMinute
+    const { startMinute } = resolveManualTimelineCreateWindow(pointerMinute, timelineWindow)
+    const position = clampTimelineContextMenuPosition(event.clientX, event.clientY, 'entry')
     setTimelineContextMenu({
+      kind: 'entry',
       entryId: entry.id,
+      createStartMinute: startMinute,
       x: position.x,
       y: position.y,
     })
+  }
+
+  const onCreateTimelineEntryAtMinute = useCallback(
+    (anchorMinute: number) => {
+      const { startMinute, endMinute } = resolveManualTimelineCreateWindow(anchorMinute, timelineWindow)
+
+      void runAction(async () => {
+        const date = selectedDateRef.current
+        const result = await timelineCreateEntry({
+          date,
+          startMinute,
+          endMinute,
+        })
+        const entries = await loadTimeline(date)
+        await loadWeeklySummary(date)
+        invalidateMonthSummaries([monthKeyFromDate(date)])
+        const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
+        if (createdEntry) {
+          setSelectedEntryId(createdEntry.id)
+          setEntryDraft(buildEntryDraft(createdEntry))
+        }
+        setTimelineContextMenu(null)
+        setSuccessMessage('Timeline entry created.')
+      })
+    },
+    [invalidateMonthSummaries, loadTimeline, loadWeeklySummary, runAction, timelineWindow],
+  )
+
+  const onCreateTimelineEntryFromContextMenu = () => {
+    if (!timelineContextMenu) {
+      return
+    }
+
+    const startMinute = timelineContextMenu.createStartMinute
+    setTimelineContextMenu(null)
+    onCreateTimelineEntryAtMinute(startMinute)
+  }
+
+  const onOpenTimelineEmptyContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault()
+
+    if (isBusy || isTimelineLoading || isTimelineDeleteBusy || timelineDragState?.isDragging) {
+      return
+    }
+
+    if (isTargetWithinTimelineBlock(event.target)) {
+      return
+    }
+
+    const grid = timelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    const { startMinute } = resolveManualTimelineCreateWindow(pointerMinute, timelineWindow)
+    const position = clampTimelineContextMenuPosition(event.clientX, event.clientY, 'empty')
+    setTimelineContextMenu({
+      kind: 'empty',
+      createStartMinute: startMinute,
+      x: position.x,
+      y: position.y,
+    })
+  }
+
+  const onDoubleClickTimelineEmptySpace = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (isBusy || isTimelineLoading || isTimelineDeleteBusy || timelineDragState?.isDragging) {
+      return
+    }
+
+    if (isTargetWithinTimelineBlock(event.target)) {
+      return
+    }
+
+    const grid = timelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    event.preventDefault()
+    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    onCreateTimelineEntryAtMinute(pointerMinute)
   }
 
   const onSaveEntryDraft = (event: FormEvent<HTMLFormElement>) => {
@@ -2847,6 +2957,8 @@ function App() {
                 <div
                   className="timeline-canvas"
                   style={{ minHeight: `${timelineCanvasHeight}px` }}
+                  onContextMenu={onOpenTimelineEmptyContextMenu}
+                  onDoubleClick={onDoubleClickTimelineEmptySpace}
                 >
                   {timelineHourMarks.map((minute) => (
                     <div
@@ -2972,6 +3084,7 @@ function App() {
                               event.preventDefault()
                               return
                             }
+                            event.stopPropagation()
                             onOpenTimelineContextMenu(event, entry)
                           }}
                           title={buildTimelineBlockTitle(
@@ -3140,7 +3253,9 @@ function App() {
                       Confidence: {(selectedEntry.confidence * 100).toFixed(0)}%
                     </p>
                     <p>Source: {selectedEntry.source}</p>
-                    <p>User Submission: {selectedEntry.userSubmissionText || 'Unavailable'}</p>
+                    {selectedEntry.source !== 'manual' ? (
+                      <p>User Submission: {selectedEntry.userSubmissionText || 'Unavailable'}</p>
+                    ) : null}
                     <p>Description: {selectedEntry.description}</p>
                     {selectedEntry.modelUsedLabel ? (
                       <p>Model Used: {selectedEntry.modelUsedLabel}</p>
@@ -3978,17 +4093,32 @@ function App() {
             top: `${timelineContextMenu.y}px`,
           }}
           role="menu"
-          aria-label="Timeline entry actions"
+          aria-label={
+            timelineContextMenu.kind === 'entry'
+              ? 'Timeline entry actions'
+              : 'Timeline actions'
+          }
         >
           <button
             type="button"
-            className="timeline-context-menu-item danger"
+            className="timeline-context-menu-item"
             role="menuitem"
-            onClick={() => onDeleteTimelineEntry(timelineContextMenu.entryId)}
+            onClick={onCreateTimelineEntryFromContextMenu}
             disabled={isBusy || isTimelineDeleteBusy}
           >
-            Delete Entry
+            Create new entry
           </button>
+          {timelineContextMenu.kind === 'entry' && timelineContextMenu.entryId ? (
+            <button
+              type="button"
+              className="timeline-context-menu-item danger"
+              role="menuitem"
+              onClick={() => onDeleteTimelineEntry(timelineContextMenu.entryId)}
+              disabled={isBusy || isTimelineDeleteBusy}
+            >
+              Delete entry
+            </button>
+          ) : null}
         </div>,
         document.body,
       ) : null}
@@ -5226,10 +5356,34 @@ function buildTimelineBlockLabel(
   }
 }
 
-function clampTimelineContextMenuPosition(clientX: number, clientY: number): { x: number; y: number } {
+function resolveManualTimelineCreateWindow(
+  anchorMinute: number,
+  timelineWindow: TimelineWindow,
+): { startMinute: number; endMinute: number } {
+  const snappedStartMinute = snapMinute(anchorMinute, TIMELINE_DRAG_SNAP_MINUTES)
+  const startMinute = clampStartMinuteForDuration(
+    snappedStartMinute,
+    TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
+    timelineWindow,
+  )
+  return {
+    startMinute,
+    endMinute: startMinute + TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
+  }
+}
+
+function isTargetWithinTimelineBlock(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('.timeline-block') !== null
+}
+
+function clampTimelineContextMenuPosition(
+  clientX: number,
+  clientY: number,
+  menuKind: TimelineContextMenuKind,
+): { x: number; y: number } {
   const viewportPadding = 8
   const menuWidth = 170
-  const menuHeight = 46
+  const menuHeight = menuKind === 'entry' ? 82 : 46
   const maxX = Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding)
   const maxY = Math.max(viewportPadding, window.innerHeight - menuHeight - viewportPadding)
 
