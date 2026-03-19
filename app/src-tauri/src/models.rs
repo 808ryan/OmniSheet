@@ -453,6 +453,14 @@ pub struct TimelineUpdateInput {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineCreateInput {
+    pub date: String,
+    pub start_minute: i64,
+    pub end_minute: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdResult {

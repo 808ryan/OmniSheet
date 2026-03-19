@@ -22,6 +22,7 @@ import type {
   TranscribeAudioResult,
   TranscriptionModelId,
   TimelineDaySummary,
+  TimelineCreateInput,
   TimelineEntry,
   TimelineWeeklySummary,
   TimelineMonthSummaryInput,
@@ -246,6 +247,10 @@ export function summaryExportWeeklyExcel(input: DateInput): Promise<SummaryExpor
 
 export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {
   return invokeCommand<void>('timeline_update_entry', { input })
+}
+
+export function timelineCreateEntry(input: TimelineCreateInput): Promise<IdResult> {
+  return invokeCommand<IdResult>('timeline_create_entry', { input })
 }
 
 export function timelineDeleteEntry(id: string): Promise<void> {

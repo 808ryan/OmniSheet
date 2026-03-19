@@ -63,11 +63,15 @@ Temporal inference rules (priority order):
    - Infer endTime from clientLocalTime.
    - Infer startTime as endTime - durationMinutes.
    - Set durationMinutes consistently.
-4) Relative anchor cues (for example: "since lunch", "since 1pm"):
+4) Bare duration worklog cues without explicit clock times (for example: "15 minutes to non-sap", "30 minutes on pcc review", "spent 15 minutes on non-sap"):
+   - When the phrasing indicates recent/current work, infer endTime from clientLocalTime.
+   - Infer startTime as endTime - durationMinutes.
+   - If the phrasing is clearly future/planned (for example: "tomorrow 15 minutes on non-sap", "going to spend 15 minutes on non-sap"), do not anchor to clientLocalTime without a stronger time cue.
+5) Relative anchor cues (for example: "since lunch", "since 1pm"):
    - Infer a reasonable start from the anchor.
    - Infer endTime from clientLocalTime.
    - Set durationMinutes consistently.
-5) Only when no usable temporal intent exists:
+6) Only when no usable temporal intent exists:
    - Set startTime/endTime/durationMinutes to null.
 
 Additional rules:
@@ -78,16 +82,21 @@ Additional rules:
 - Infer date from capture context and inferred time window.
 - Never default missing times to 00:00.
 - If uncertain, set lower confidence.
-- Use describeWhenToUse as the primary categorization signal for engagements and activities.
+- Use the strongest evidence across both engagement-level and activity-level context.
+- Use describeWhenToUse as the primary categorization signal, especially when it is more specific than names or tags.
 - Use names as the primary visible categorization cue.
 - If a user-provided code appears in the context, treat it as a secondary hint only.
 - Use tags/key words as secondary hints; exact keyword overlap is not required.
 - engagementRef must be selected from engagementActivityContext.engagements[].engagementRef only.
 - activityRef must be selected from the chosen engagement's activities[].activityRef only.
 - Never invent or modify refs.
+- A strong match to an activity is sufficient to infer that activity's parent engagementRef.
+- If an activity under engagement X is the best match, return that activityRef together with engagement X's engagementRef.
+- Do not require the parent engagement's own describeWhenToUse, name, or tags to independently match when the child activity is a clear best match.
 - If you identify an engagementRef and that engagement has activities in the provided context, choose the best available activityRef from that engagement.
+- Prefer the most specific workstream activity over generic meeting/admin activities when the message contains workstream-specific terms such as non-sap, rr itacs, firefighter, sap itgcs, or pcc review work.
 - Use activityRef = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
-- If no engagement match exists, set engagementRef/activityRef to null.
+- If no specific activity or engagement can be reasonably inferred, set engagementRef/activityRef to null.
 - If activityRef is not null, include activityReason that cites the strongest evidence from message text plus provided context.
 - If activityRef is not null, include alternativeActivities with up to 3 rejected activityRef values from the same engagement and concise rejection reasons.
 - If activityRef is null, set activityReason and alternativeActivities to null.
@@ -106,6 +115,16 @@ Examples:
   Expected temporal intent: startTime "18:00", endTime "18:30", durationMinutes 30.
 - Message: "finished a 30-minute meeting at 6pm"
   Expected temporal intent: startTime "17:30", endTime "18:00", durationMinutes 30.
+- Message: "15 minutes to non-sap FDT-DB-02 with Nick"
+  clientLocalTime: "18:18"
+  Expected temporal intent: when the phrasing indicates recent/current work, infer startTime "18:03", endTime "18:18", durationMinutes 15.
+- Message: "tomorrow 15 minutes on non-sap"
+  Expected temporal intent: startTime null, endTime null, durationMinutes 15.
+- Message: "uploading prior year workpapers for non-sap, 30 minutes"
+  Expected categorization intent: if the context contains a child activity whose name or describeWhenToUse clearly matches "non-sap", return that activityRef together with its parent engagementRef even if the parent engagement description is generic audit wording.
+  Expected temporal intent: startTime null, endTime null, durationMinutes 30.
+- Message: "team sync and status meeting, 30 minutes"
+  Expected categorization intent: use a generic meeting/admin activity only when there is no more specific workstream activity signal in the message.
 - Message: "worked on controls testing"
   Expected temporal intent: startTime null, endTime null, durationMinutes null.
 "#
@@ -605,6 +624,7 @@ mod tests {
         assert!(prompt.contains("Relative duration cues"));
         assert!(prompt.contains("Infer endTime from clientLocalTime"));
         assert!(prompt.contains("for the past hour"));
+        assert!(prompt.contains("Bare duration worklog cues without explicit clock times"));
     }
 
     #[test]
@@ -653,15 +673,44 @@ mod tests {
         let prompt = build_system_prompt();
         assert!(prompt.contains("choose the best available activityRef"));
         assert!(prompt.contains("Use activityRef = null only as a last resort"));
-        assert!(prompt.contains("If no engagement match exists"));
+        assert!(prompt.contains("If no specific activity or engagement can be reasonably inferred"));
     }
 
     #[test]
     fn prompt_prioritizes_description_over_tags_for_categorization() {
         let prompt = build_system_prompt();
+        assert!(prompt.contains(
+            "Use the strongest evidence across both engagement-level and activity-level context"
+        ));
         assert!(prompt.contains("Use describeWhenToUse as the primary categorization signal"));
         assert!(prompt.contains("Use names as the primary visible categorization cue"));
         assert!(prompt.contains("Use tags/key words as secondary hints"));
+    }
+
+    #[test]
+    fn prompt_allows_activity_to_imply_parent_engagement() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("A strong match to an activity is sufficient to infer that activity's parent engagementRef"));
+        assert!(
+            prompt.contains("return that activityRef together with engagement X's engagementRef")
+        );
+        assert!(prompt.contains("Do not require the parent engagement's own describeWhenToUse"));
+    }
+
+    #[test]
+    fn prompt_includes_non_sap_and_generic_meeting_disambiguation_examples() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("\"15 minutes to non-sap FDT-DB-02 with Nick\""));
+        assert!(prompt.contains(
+            "when the phrasing indicates recent/current work, infer startTime \"18:03\", endTime \"18:18\", durationMinutes 15."
+        ));
+        assert!(prompt.contains("\"tomorrow 15 minutes on non-sap\""));
+        assert!(prompt.contains("\"uploading prior year workpapers for non-sap, 30 minutes\""));
+        assert!(prompt.contains(
+            "child activity whose name or describeWhenToUse clearly matches \"non-sap\""
+        ));
+        assert!(prompt.contains("\"team sync and status meeting, 30 minutes\""));
+        assert!(prompt.contains("generic meeting/admin activity only when there is no more specific workstream activity signal"));
     }
 
     #[test]
