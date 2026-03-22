@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   CSSProperties,
   FormEvent,
@@ -23,6 +23,8 @@ import {
   settingsSetOpenAiModel,
   settingsSetTranscriptionModel,
   summaryExportWeeklyExcel,
+  summaryLayoutStateGet,
+  summaryLayoutStateSet,
   transcribeAudioClip,
   timelineCreateEntry,
   timelineDeleteEntry,
@@ -33,6 +35,15 @@ import {
   voiceRequestMicrophonePermission,
 } from './lib/api'
 import { isTauriRuntime } from './lib/runtime'
+import {
+  buildDefaultSummaryLayoutState,
+  cloneSummaryLayoutPreset,
+  createSummaryLayoutFreeTextColumn,
+  generateSummaryLayoutId,
+  getSummaryLayoutFieldOption,
+  SUMMARY_LAYOUT_FIELD_OPTIONS,
+  SUMMARY_LAYOUT_MAX_NAME_LENGTH,
+} from './lib/summaryLayout'
 import {
   formatDate,
   joinTags,
@@ -50,6 +61,10 @@ import type {
   MicrophonePermissionStatus,
   OpenAiModelId,
   SettingsStatus,
+  SummaryLayoutColumn,
+  SummaryLayoutFieldKey,
+  SummaryLayoutPreset,
+  SummaryLayoutState,
   TimelineDaySummary,
   TimelineEntry,
   TimelineWeeklySummary,
@@ -271,6 +286,39 @@ interface SummaryNotesModalState {
   dayIndex: number
 }
 
+interface SummaryLayoutModalState {
+  mode: 'create' | 'edit'
+  presetId: string | null
+}
+
+interface SummaryLayoutDragSnapshot {
+  columnId: string
+  left: number
+  width: number
+  centerX: number
+}
+
+interface SummaryLayoutDragState {
+  columnId: string
+  pointerId: number
+  startClientX: number
+  latestClientX: number
+  draggedCenterX: number
+  sourceIndex: number
+  insertionIndex: number
+  columnSnapshots: SummaryLayoutDragSnapshot[]
+}
+
+interface SummaryLayoutViewColumn {
+  kind: 'field' | 'day' | 'freeText'
+  id: string
+  header: string
+  width: string
+  wraps: boolean
+  fieldKey?: SummaryLayoutFieldKey
+  dayIndex?: number
+}
+
 interface PositionTimelineEntriesOptions {
   lockedEntryId?: string
   lockedLaneIndex?: number
@@ -362,6 +410,8 @@ const SUMMARY_DAY_NAMES = [
   'Thursday',
   'Friday',
 ] as const
+const SUMMARY_LAYOUT_DAY_COLUMN_WIDTH = '8.5rem'
+const SUMMARY_LAYOUT_ROW_TOTAL_WIDTH = '8.5rem'
 
 interface ResponsiveCodeTagListProps {
   tags: string[]
@@ -588,8 +638,57 @@ function App() {
   const [isWeeklySummaryLoading, setIsWeeklySummaryLoading] = useState(false)
   const [weeklySummaryError, setWeeklySummaryError] = useState<string | null>(null)
   const [isSummaryExporting, setIsSummaryExporting] = useState(false)
+  const [summaryLayoutState, setSummaryLayoutState] = useState<SummaryLayoutState | null>(null)
+  const [isSummaryLayoutSaving, setIsSummaryLayoutSaving] = useState(false)
+  const [summaryLayoutModal, setSummaryLayoutModal] = useState<SummaryLayoutModalState | null>(null)
+  const [summaryLayoutDraft, setSummaryLayoutDraft] = useState<SummaryLayoutPreset | null>(null)
+  const [summaryLayoutDraftName, setSummaryLayoutDraftName] = useState('')
+  const [summaryLayoutDraftError, setSummaryLayoutDraftError] = useState<string | null>(null)
+  const [summaryLayoutInsertionIndex, setSummaryLayoutInsertionIndex] = useState<number | null>(null)
+  const [summaryLayoutDragState, setSummaryLayoutDragState] = useState<SummaryLayoutDragState | null>(null)
+  const [summaryLayoutDropCommitColumnIds, setSummaryLayoutDropCommitColumnIds] = useState<string[]>([])
   const [summaryNotesModal, setSummaryNotesModal] = useState<SummaryNotesModalState | null>(null)
+  const summaryLayoutModalRef = useRef<HTMLDivElement | null>(null)
+  const summaryLayoutColumnRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const summaryLayoutDragStateRef = useRef<SummaryLayoutDragState | null>(null)
+  const summaryLayoutDragCaptureTargetRef = useRef<HTMLButtonElement | null>(null)
+  const summaryLayoutDropCommitFrameRef = useRef<number | null>(null)
   const summaryNotesModalRef = useRef<HTMLDivElement | null>(null)
+  const commitSummaryLayoutDragState = useCallback((next: SummaryLayoutDragState | null) => {
+    summaryLayoutDragStateRef.current = next
+    setSummaryLayoutDragState(next)
+  }, [])
+  const releaseSummaryLayoutPointerCapture = useCallback((pointerId?: number | null) => {
+    const captureTarget = summaryLayoutDragCaptureTargetRef.current
+    if (
+      captureTarget
+      && pointerId !== null
+      && pointerId !== undefined
+      && captureTarget.hasPointerCapture(pointerId)
+    ) {
+      captureTarget.releasePointerCapture(pointerId)
+    }
+
+    summaryLayoutDragCaptureTargetRef.current = null
+  }, [])
+  const clearSummaryLayoutDropAnimation = useCallback(() => {
+    if (summaryLayoutDropCommitFrameRef.current !== null) {
+      window.cancelAnimationFrame(summaryLayoutDropCommitFrameRef.current)
+      summaryLayoutDropCommitFrameRef.current = null
+    }
+    setSummaryLayoutDropCommitColumnIds([])
+  }, [])
+  const resetSummaryLayoutEditor = useCallback(() => {
+    setSummaryLayoutModal(null)
+    setSummaryLayoutDraft(null)
+    setSummaryLayoutDraftName('')
+    setSummaryLayoutDraftError(null)
+    setSummaryLayoutInsertionIndex(null)
+    releaseSummaryLayoutPointerCapture(summaryLayoutDragStateRef.current?.pointerId ?? null)
+    commitSummaryLayoutDragState(null)
+    clearSummaryLayoutDropAnimation()
+    summaryLayoutColumnRefs.current = {}
+  }, [clearSummaryLayoutDropAnimation, commitSummaryLayoutDragState, releaseSummaryLayoutPointerCapture])
 
   const selectedEntry = useMemo(
     () => timelineEntries.find((entry) => entry.id === selectedEntryId) ?? null,
@@ -636,6 +735,54 @@ function App() {
       notes: cell.notes,
     }
   }, [summaryNotesModal, weeklySummary])
+  const resolvedSummaryLayoutState = useMemo(
+    () => summaryLayoutState ?? buildDefaultSummaryLayoutState(),
+    [summaryLayoutState],
+  )
+  const selectedSummaryLayoutPreset = useMemo(
+    () => (
+      resolvedSummaryLayoutState.presets.find(
+        (preset) => preset.id === resolvedSummaryLayoutState.selectedPresetId,
+      ) ?? resolvedSummaryLayoutState.presets[0]
+    ),
+    [resolvedSummaryLayoutState],
+  )
+  const engagementById = useMemo(() => {
+    const values = new Map<string, Engagement>()
+    for (const engagement of engagements) {
+      values.set(engagement.id, engagement)
+    }
+    return values
+  }, [engagements])
+  const activityById = useMemo(() => {
+    const values = new Map<string, Activity>()
+    for (const engagement of engagements) {
+      for (const activity of engagement.activities) {
+        values.set(activity.id, activity)
+      }
+    }
+    return values
+  }, [engagements])
+  const summaryViewColumns = useMemo(
+    () => buildSummaryViewColumns(selectedSummaryLayoutPreset),
+    [selectedSummaryLayoutPreset],
+  )
+  const summaryFooterLabelIndex = useMemo(
+    () => summaryViewColumns.findIndex((column) => column.kind !== 'day'),
+    [summaryViewColumns],
+  )
+  const summaryLayoutPreviewRows = useMemo(
+    () => weeklySummary?.rows.slice(0, 3) ?? [],
+    [weeklySummary],
+  )
+  const summaryLayoutDragTransforms = useMemo(
+    () => buildSummaryLayoutDragTransforms(
+      summaryLayoutDraft?.columns ?? [],
+      summaryLayoutDragState,
+    ),
+    [summaryLayoutDraft, summaryLayoutDragState],
+  )
+  const activeSummaryLayoutDragPointerId = summaryLayoutDragState?.pointerId ?? null
   const submissionQueueDisplayItems = useMemo(() => {
     const processing = submissionQueue.filter((item) => item.state === 'running')
     const pending = submissionQueue.filter((item) => item.state === 'pending')
@@ -1018,6 +1165,12 @@ function App() {
     setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
   }, [])
 
+  const loadSummaryLayoutState = useCallback(async () => {
+    const value = await summaryLayoutStateGet()
+    setSummaryLayoutState(value)
+    return value
+  }, [])
+
   const loadTimeline = useCallback(async (date: string) => {
     const entries = await timelineListForDate({ date })
     lastLoadedTimelineDateRef.current = date
@@ -1075,6 +1228,7 @@ function App() {
         await Promise.all([
           loadEngagements(),
           loadSettings(),
+          loadSummaryLayoutState(),
           loadTimeline(todayDate),
           loadDiagnostics('all'),
         ])
@@ -1087,7 +1241,15 @@ function App() {
     }
 
     void initialize()
-  }, [loadDiagnostics, loadEngagements, loadSettings, loadTimeline, tauriRuntime, todayDate])
+  }, [
+    loadDiagnostics,
+    loadEngagements,
+    loadSettings,
+    loadSummaryLayoutState,
+    loadTimeline,
+    tauriRuntime,
+    todayDate,
+  ])
 
   useEffect(() => {
     if (!tauriRuntime || !hasInitializedRef.current) {
@@ -1268,6 +1430,12 @@ function App() {
   }, [activeView, summaryNotesModal])
 
   useEffect(() => {
+    if (activeView !== 'summary' && summaryLayoutModal) {
+      resetSummaryLayoutEditor()
+    }
+  }, [activeView, resetSummaryLayoutEditor, summaryLayoutModal])
+
+  useEffect(() => {
     if (!summaryNotesModal) {
       return
     }
@@ -1288,6 +1456,122 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown)
     }
   }, [selectedSummaryNotesContext, summaryNotesModal])
+
+  useEffect(() => {
+    if (!summaryLayoutModal) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        resetSummaryLayoutEditor()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [resetSummaryLayoutEditor, summaryLayoutModal])
+
+  useLayoutEffect(() => {
+    if (summaryLayoutDropCommitColumnIds.length === 0) {
+      return
+    }
+
+    if (summaryLayoutDropCommitFrameRef.current !== null) {
+      window.cancelAnimationFrame(summaryLayoutDropCommitFrameRef.current)
+    }
+
+    summaryLayoutDropCommitFrameRef.current = window.requestAnimationFrame(() => {
+      summaryLayoutDropCommitFrameRef.current = null
+      setSummaryLayoutDropCommitColumnIds([])
+    })
+  }, [summaryLayoutDropCommitColumnIds])
+
+  useEffect(() => () => {
+    if (summaryLayoutDropCommitFrameRef.current !== null) {
+      window.cancelAnimationFrame(summaryLayoutDropCommitFrameRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (activeSummaryLayoutDragPointerId === null || !summaryLayoutDraft) {
+      return
+    }
+
+    const finishDrag = (pointerId: number, shouldCommit: boolean) => {
+      const current = summaryLayoutDragStateRef.current
+      if (!current || current.pointerId !== pointerId) {
+        return
+      }
+
+      releaseSummaryLayoutPointerCapture(pointerId)
+      commitSummaryLayoutDragState(null)
+
+      if (shouldCommit && current.insertionIndex !== current.sourceIndex) {
+        const currentDragTransforms = buildSummaryLayoutDragTransforms(summaryLayoutDraft.columns, current)
+        const commitResetColumnIds = summaryLayoutDraft.columns
+          .filter((column) => Math.abs(currentDragTransforms.get(column.id) ?? 0) > 0.5)
+          .map((column) => column.id)
+        const nextColumns = moveSummaryLayoutColumn(
+          summaryLayoutDraft.columns,
+          current.sourceIndex,
+          current.insertionIndex,
+        )
+
+        setSummaryLayoutDropCommitColumnIds(commitResetColumnIds)
+
+        setSummaryLayoutDraft((previous) => {
+          if (!previous) {
+            return previous
+          }
+
+          return {
+            ...previous,
+            columns: nextColumns,
+          }
+        })
+      }
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const current = summaryLayoutDragStateRef.current
+      if (!current || event.pointerId !== current.pointerId) {
+        return
+      }
+
+      const nextInsertionIndex = findSummaryLayoutInsertionIndex(event.clientX, current)
+      commitSummaryLayoutDragState({
+        ...current,
+        latestClientX: event.clientX,
+        insertionIndex: nextInsertionIndex,
+      })
+    }
+
+    const handlePointerUp = (event: PointerEvent) => {
+      finishDrag(event.pointerId, true)
+    }
+
+    const handlePointerCancel = (event: PointerEvent) => {
+      finishDrag(event.pointerId, false)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerCancel)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerCancel)
+    }
+  }, [
+    activeSummaryLayoutDragPointerId,
+    commitSummaryLayoutDragState,
+    releaseSummaryLayoutPointerCapture,
+    summaryLayoutDraft,
+  ])
 
   useEffect(() => {
     if (activeView !== 'timeline') {
@@ -2680,6 +2964,292 @@ function App() {
     })
   }
 
+  const persistSummaryLayoutState = useCallback(async (
+    nextState: SummaryLayoutState,
+    options?: { successMessage?: string },
+  ) => {
+    setIsSummaryLayoutSaving(true)
+    setErrorMessage(null)
+    try {
+      const savedState = await summaryLayoutStateSet(nextState)
+      setSummaryLayoutState(savedState)
+      if (options?.successMessage) {
+        setSuccessMessage(options.successMessage)
+      }
+      return savedState
+    } finally {
+      setIsSummaryLayoutSaving(false)
+    }
+  }, [])
+
+  const openSummaryLayoutEditor = useCallback((mode: 'create' | 'edit') => {
+    const basePreset = selectedSummaryLayoutPreset
+    if (!basePreset) {
+      return
+    }
+
+    if (mode === 'create') {
+      const nextName = buildNextSummaryLayoutPresetName(
+        `${basePreset.name} Copy`,
+        resolvedSummaryLayoutState.presets,
+      )
+      const draft = cloneSummaryLayoutPreset(basePreset, {
+        id: generateSummaryLayoutId('preset'),
+        name: nextName,
+      })
+      setSummaryLayoutDraft(draft)
+      setSummaryLayoutDraftName(draft.name)
+      setSummaryLayoutModal({
+        mode,
+        presetId: null,
+      })
+    } else {
+      const draft = cloneSummaryLayoutPreset(basePreset)
+      setSummaryLayoutDraft(draft)
+      setSummaryLayoutDraftName(draft.name)
+      setSummaryLayoutModal({
+        mode,
+        presetId: basePreset.id,
+      })
+    }
+
+    setSummaryLayoutDraftError(null)
+    setSummaryLayoutInsertionIndex(null)
+    releaseSummaryLayoutPointerCapture(summaryLayoutDragStateRef.current?.pointerId ?? null)
+    commitSummaryLayoutDragState(null)
+    clearSummaryLayoutDropAnimation()
+  }, [
+    clearSummaryLayoutDropAnimation,
+    commitSummaryLayoutDragState,
+    releaseSummaryLayoutPointerCapture,
+    resolvedSummaryLayoutState.presets,
+    selectedSummaryLayoutPreset,
+  ])
+
+  const onSelectSummaryLayoutPreset = (presetId: string) => {
+    if (
+      isSummaryLayoutSaving
+      || presetId === resolvedSummaryLayoutState.selectedPresetId
+    ) {
+      return
+    }
+
+    void (async () => {
+      try {
+        await persistSummaryLayoutState({
+          ...resolvedSummaryLayoutState,
+          selectedPresetId: presetId,
+        })
+      } catch (error) {
+        setErrorMessage(extractErrorMessage(error))
+      }
+    })()
+  }
+
+  const onRemoveSummaryLayoutColumn = (columnId: string) => {
+    clearSummaryLayoutDropAnimation()
+    setSummaryLayoutDraft((previous) => {
+      if (!previous) {
+        return previous
+      }
+
+      if (previous.columns.length <= 1) {
+        setSummaryLayoutDraftError('A preset must keep at least one column before Row Total.')
+        return previous
+      }
+
+      const nextColumns = previous.columns.filter((column) => column.id !== columnId)
+      if (nextColumns.length === previous.columns.length) {
+        return previous
+      }
+
+      setSummaryLayoutDraftError(null)
+      setSummaryLayoutInsertionIndex(null)
+      return {
+        ...previous,
+        columns: nextColumns,
+      }
+    })
+  }
+
+  const onInsertSummaryLayoutColumn = (column: SummaryLayoutColumn, atIndex: number) => {
+    clearSummaryLayoutDropAnimation()
+    setSummaryLayoutDraft((previous) => {
+      if (!previous) {
+        return previous
+      }
+
+      const nextColumns = [...previous.columns]
+      nextColumns.splice(atIndex, 0, column)
+      return {
+        ...previous,
+        columns: nextColumns,
+      }
+    })
+    setSummaryLayoutInsertionIndex(null)
+    setSummaryLayoutDraftError(null)
+  }
+
+  const onUpdateSummaryLayoutFreeTextLabel = (columnId: string, label: string) => {
+    setSummaryLayoutDraft((previous) => {
+      if (!previous) {
+        return previous
+      }
+
+      return {
+        ...previous,
+        columns: previous.columns.map((column) => (
+          column.kind === 'freeText' && column.id === columnId
+            ? { ...column, label }
+            : column
+        )),
+      }
+    })
+    setSummaryLayoutDraftError(null)
+  }
+
+  const onSaveSummaryLayoutPreset = () => {
+    if (!summaryLayoutDraft || !summaryLayoutModal) {
+      return
+    }
+
+    const trimmedName = summaryLayoutDraftName.trim()
+    if (!trimmedName) {
+      setSummaryLayoutDraftError('Enter a preset name before saving.')
+      return
+    }
+
+    if (trimmedName.length > SUMMARY_LAYOUT_MAX_NAME_LENGTH) {
+      setSummaryLayoutDraftError(
+        `Preset names must be ${SUMMARY_LAYOUT_MAX_NAME_LENGTH} characters or fewer.`,
+      )
+      return
+    }
+
+    const duplicateName = resolvedSummaryLayoutState.presets.some((preset) => (
+      preset.id !== summaryLayoutDraft.id
+      && preset.name.trim().toLowerCase() === trimmedName.toLowerCase()
+    ))
+    if (duplicateName) {
+      setSummaryLayoutDraftError('Preset names must be unique.')
+      return
+    }
+
+    const draftToSave = {
+      ...summaryLayoutDraft,
+      name: trimmedName,
+    }
+
+    const nextPresets = (
+      summaryLayoutModal.mode === 'create'
+        ? [...resolvedSummaryLayoutState.presets, draftToSave]
+        : resolvedSummaryLayoutState.presets.map((preset) => (
+          preset.id === draftToSave.id ? draftToSave : preset
+        ))
+    )
+
+    void (async () => {
+      try {
+        await persistSummaryLayoutState({
+          ...resolvedSummaryLayoutState,
+          selectedPresetId: draftToSave.id,
+          presets: nextPresets,
+        }, {
+          successMessage:
+            summaryLayoutModal.mode === 'create'
+              ? 'Summary layout preset created.'
+              : 'Summary layout preset updated.',
+        })
+        resetSummaryLayoutEditor()
+      } catch (error) {
+        setSummaryLayoutDraftError(extractErrorMessage(error))
+      }
+    })()
+  }
+
+  const onDeleteSummaryLayoutPreset = () => {
+    if (!summaryLayoutDraft || !summaryLayoutModal || resolvedSummaryLayoutState.presets.length <= 1) {
+      setSummaryLayoutDraftError('At least one preset must remain.')
+      return
+    }
+
+    const confirmed = window.confirm(`Delete preset "${summaryLayoutDraft.name}"?`)
+    if (!confirmed) {
+      return
+    }
+
+    const remainingPresets = resolvedSummaryLayoutState.presets.filter(
+      (preset) => preset.id !== summaryLayoutDraft.id,
+    )
+    const nextSelectedPresetId = (
+      resolvedSummaryLayoutState.selectedPresetId === summaryLayoutDraft.id
+        ? remainingPresets[0]?.id ?? resolvedSummaryLayoutState.selectedPresetId
+        : resolvedSummaryLayoutState.selectedPresetId
+    )
+
+    void (async () => {
+      try {
+        await persistSummaryLayoutState({
+          ...resolvedSummaryLayoutState,
+          selectedPresetId: nextSelectedPresetId,
+          presets: remainingPresets,
+        }, {
+          successMessage: 'Summary layout preset deleted.',
+        })
+        resetSummaryLayoutEditor()
+      } catch (error) {
+        setSummaryLayoutDraftError(extractErrorMessage(error))
+      }
+    })()
+  }
+
+  const onStartSummaryLayoutDrag = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    columnId: string,
+    sourceIndex: number,
+  ) => {
+    if (!summaryLayoutDraft) {
+      return
+    }
+
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    summaryLayoutDragCaptureTargetRef.current = event.currentTarget
+    clearSummaryLayoutDropAnimation()
+    const columnSnapshots: SummaryLayoutDragSnapshot[] = []
+    for (const column of summaryLayoutDraft.columns) {
+      const columnNode = summaryLayoutColumnRefs.current[column.id]
+      if (!columnNode) {
+        return
+      }
+
+      const columnRect = columnNode.getBoundingClientRect()
+      columnSnapshots.push({
+        columnId: column.id,
+        left: columnRect.left,
+        width: columnRect.width,
+        centerX: columnRect.left + (columnRect.width / 2),
+      })
+    }
+
+    const draggedSnapshot = columnSnapshots[sourceIndex]
+    if (!draggedSnapshot) {
+      return
+    }
+
+    setSummaryLayoutInsertionIndex(null)
+    commitSummaryLayoutDragState({
+      columnId,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      latestClientX: event.clientX,
+      draggedCenterX: draggedSnapshot.centerX,
+      sourceIndex,
+      insertionIndex: sourceIndex,
+      columnSnapshots,
+    })
+  }
+
   const onOpenSummaryNotes = (rowIndex: number, dayIndex: number) => {
     setSummaryNotesModal({
       rowIndex,
@@ -3986,6 +4556,47 @@ function App() {
               </div>
             </div>
 
+            <section className="summary-layout-toolbar" aria-label="Table layout presets">
+              <div className="summary-layout-toolbar-copy">
+                <span className="summary-layout-toolbar-eyebrow">Table Layout Presets</span>
+                <p>Choose a saved layout or open the editor to change columns and ordering.</p>
+              </div>
+              <div className="summary-layout-toolbar-main">
+                <div className="summary-layout-preset-list" role="tablist" aria-label="Summary layout presets">
+                  {resolvedSummaryLayoutState.presets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      className={preset.id === selectedSummaryLayoutPreset?.id ? 'active' : ''}
+                      role="tab"
+                      aria-selected={preset.id === selectedSummaryLayoutPreset?.id}
+                      onClick={() => onSelectSummaryLayoutPreset(preset.id)}
+                      disabled={isBusy || isSummaryLayoutSaving}
+                    >
+                      {preset.name}
+                    </button>
+                  ))}
+                </div>
+                <div className="summary-layout-toolbar-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => openSummaryLayoutEditor('edit')}
+                    disabled={isBusy || isSummaryLayoutSaving || !selectedSummaryLayoutPreset}
+                  >
+                    Edit Layout
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openSummaryLayoutEditor('create')}
+                    disabled={isBusy || isSummaryLayoutSaving || !selectedSummaryLayoutPreset}
+                  >
+                    New Preset
+                  </button>
+                </div>
+              </div>
+            </section>
+
             <div className="summary-week-total">
               <span>Week Total Hours</span>
               <strong>
@@ -4006,57 +4617,47 @@ function App() {
                 <table className="summary-table">
                   <thead>
                     <tr>
-                      <th>Engagement Code</th>
-                      <th>Activity Code</th>
-                      <th>Activity Name</th>
-                      <th>Engagement Name</th>
-                      <th>Client Name</th>
-                      {weeklySummary.days.map((day, dayIndex) => (
-                        <th key={day.date}>
-                          {SUMMARY_DAY_NAMES[dayIndex]} ({formatMonthDay(day.date)})
+                      {summaryViewColumns.map((column) => (
+                        <th
+                          key={column.id}
+                          className={column.wraps ? 'summary-cell-wrap' : ''}
+                          style={{ minWidth: column.width }}
+                        >
+                          {column.kind === 'day' && column.dayIndex !== undefined
+                            ? `${SUMMARY_DAY_NAMES[column.dayIndex]} (${formatMonthDay(weeklySummary.days[column.dayIndex]?.date ?? weeklySummary.weekStartDate)})`
+                            : column.header}
                         </th>
                       ))}
-                      <th>Row Total</th>
+                      <th style={{ minWidth: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH }}>Row Total</th>
                     </tr>
                   </thead>
                   <tbody>
                     {weeklySummary.rows.length === 0 ? (
                       <tr>
-                        <td colSpan={13} className="summary-empty-row">
+                        <td colSpan={summaryViewColumns.length + 1} className="summary-empty-row">
                           No time entries for this week.
                         </td>
                       </tr>
                     ) : (
                       weeklySummary.rows.map((row, rowIndex) => (
                         <tr key={`${row.engagementCode}-${row.activityCode}-${rowIndex}`}>
-                          <td className={row.isUncategorized ? 'summary-uncategorized' : ''}>
-                            {formatSummaryCodeValue(row.engagementCode, row.isUncategorized)}
-                          </td>
-                          <td className={row.isUncategorized ? 'summary-uncategorized' : ''}>
-                            {formatSummaryCodeValue(row.activityCode, row.isUncategorized)}
-                          </td>
-                          <td>{row.activityName}</td>
-                          <td>{row.engagementName}</td>
-                          <td>{row.clientName || '-'}</td>
-                          {row.cells.map((cell, dayIndex) => (
-                            <td key={`${rowIndex}-${dayIndex}`}>
-                              {cell.totalMinutes > 0 ? (
-                                <div className="summary-cell-value-wrap">
-                                  <span>{formatMinutesAsHours(cell.totalMinutes)}</span>
-                                  <button
-                                    type="button"
-                                    className="ghost summary-notes-button"
-                                    onClick={() => onOpenSummaryNotes(rowIndex, dayIndex)}
-                                  >
-                                    Notes
-                                  </button>
-                                </div>
-                              ) : (
-                                <span className="summary-zero">-</span>
+                          {summaryViewColumns.map((column) => (
+                            <td
+                              key={`${rowIndex}-${column.id}`}
+                              className={buildSummaryTableCellClassName(column, row)}
+                              style={{ minWidth: column.width }}
+                            >
+                              {renderSummaryTableCell(
+                                column,
+                                row,
+                                rowIndex,
+                                engagementById,
+                                activityById,
+                                onOpenSummaryNotes,
                               )}
                             </td>
                           ))}
-                          <td className="summary-row-total">
+                          <td className="summary-row-total" style={{ minWidth: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH }}>
                             {formatMinutesAsHours(row.rowTotalMinutes)}
                           </td>
                         </tr>
@@ -4065,13 +4666,33 @@ function App() {
                   </tbody>
                   <tfoot>
                     <tr className="summary-total-row">
-                      <th colSpan={5}>Day Totals</th>
-                      {weeklySummary.dayTotalMinutes.map((totalMinutes, dayIndex) => (
-                        <td key={`total-${dayIndex}`}>
-                          {formatMinutesAsHours(totalMinutes)}
+                      {summaryViewColumns.map((column, columnIndex) => (
+                        <td
+                          key={`total-${column.id}`}
+                          className={(
+                            column.wraps
+                            || (
+                              summaryFooterLabelIndex >= 0
+                              && columnIndex === summaryFooterLabelIndex
+                              && column.kind !== 'day'
+                            )
+                          ) ? 'summary-cell-wrap' : ''}
+                          style={{ minWidth: column.width }}
+                        >
+                          {column.kind === 'day' && column.dayIndex !== undefined
+                            ? formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
+                            : (
+                              summaryFooterLabelIndex >= 0
+                              && columnIndex === summaryFooterLabelIndex
+                              && column.kind !== 'day'
+                                ? 'Day Totals'
+                                : ''
+                            )}
                         </td>
                       ))}
-                      <td>{formatMinutesAsHours(weeklySummary.weekTotalMinutes)}</td>
+                      <td style={{ minWidth: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH }}>
+                        {formatMinutesAsHours(weeklySummary.weekTotalMinutes)}
+                      </td>
                     </tr>
                   </tfoot>
                 </table>
@@ -4134,6 +4755,229 @@ function App() {
             >
               x
             </button>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+      {summaryLayoutModal && summaryLayoutDraft ? createPortal(
+        <div
+          className="summary-layout-editor-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              resetSummaryLayoutEditor()
+            }
+          }}
+        >
+          <div
+            ref={summaryLayoutModalRef}
+            className="summary-layout-editor-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={summaryLayoutModal.mode === 'create' ? 'Create summary layout preset' : 'Edit summary layout preset'}
+          >
+            <div className="summary-layout-editor-header">
+              <div>
+                <h3>{summaryLayoutModal.mode === 'create' ? 'New Layout Preset' : 'Edit Layout Preset'}</h3>
+                <p>Reorder, remove, or insert columns. Row Total always stays pinned on the right.</p>
+              </div>
+              <button
+                type="button"
+                className="ghost"
+                onClick={resetSummaryLayoutEditor}
+              >
+                Close
+              </button>
+            </div>
+
+            <label className="summary-layout-editor-name-field">
+              <span>Preset Name</span>
+              <input
+                type="text"
+                value={summaryLayoutDraftName}
+                onChange={(event) => {
+                  setSummaryLayoutDraftName(event.target.value)
+                  setSummaryLayoutDraftError(null)
+                }}
+                maxLength={SUMMARY_LAYOUT_MAX_NAME_LENGTH}
+                placeholder="Preset name"
+              />
+            </label>
+
+            {summaryLayoutDraftError ? (
+              <p className="mini-calendar-error">{summaryLayoutDraftError}</p>
+            ) : null}
+
+            <div className="summary-layout-editor-preview-wrap">
+              <div className="summary-layout-editor-preview-scroll">
+                <div className="summary-layout-editor-track">
+                  <button
+                    type="button"
+                    className={`summary-layout-insert-slot ${summaryLayoutInsertionIndex === 0 ? 'active' : ''}`}
+                    onClick={() => setSummaryLayoutInsertionIndex((previous) => previous === 0 ? null : 0)}
+                    aria-label="Add a column at the beginning"
+                  >
+                    <span className="summary-layout-insert-button">+</span>
+                    <span className="summary-layout-insert-line" aria-hidden="true" />
+                  </button>
+                  {summaryLayoutDraft.columns.map((column, columnIndex) => {
+                    const previewColumn = buildSummaryViewColumn(column)
+                    const isDragging = summaryLayoutDragState?.columnId === column.id
+                    const isCommitReset = summaryLayoutDropCommitColumnIds.includes(column.id)
+                    const activeTransformX = (
+                      isDragging || activeSummaryLayoutDragPointerId !== null
+                        ? summaryLayoutDragTransforms.get(column.id) ?? 0
+                        : 0
+                    )
+                    const isDisplaced = !isDragging && Math.abs(activeTransformX) > 0.5
+
+                    return (
+                      <Fragment key={column.id}>
+                        <div
+                          ref={(node) => {
+                            summaryLayoutColumnRefs.current[column.id] = node
+                          }}
+                          className={`summary-layout-editor-column ${previewColumn.wraps ? 'wraps' : ''} ${isDragging ? 'dragging' : ''} ${isDisplaced ? 'displaced' : ''} ${isCommitReset ? 'commit-reset' : ''}`}
+                          style={{
+                            width: previewColumn.width,
+                            transform: buildSummaryLayoutColumnTransform(activeTransformX, isDragging),
+                            zIndex: isDragging ? 5 : isDisplaced ? 2 : undefined,
+                          }}
+                        >
+                          <div className="summary-layout-editor-column-controls">
+                            <button
+                              type="button"
+                              className="summary-layout-editor-remove"
+                              onClick={() => onRemoveSummaryLayoutColumn(column.id)}
+                              aria-label={`Remove ${previewColumn.header}`}
+                            >
+                              -
+                            </button>
+                            <button
+                              type="button"
+                              className="summary-layout-editor-handle"
+                              aria-label={`Reorder ${previewColumn.header}`}
+                              onPointerDown={(event) => onStartSummaryLayoutDrag(event, column.id, columnIndex)}
+                            >
+                              <span className="summary-layout-editor-dots" aria-hidden="true" />
+                            </button>
+                          </div>
+                          <div className={`summary-layout-editor-cell summary-layout-editor-header-cell ${previewColumn.wraps ? 'wraps' : ''}`}>
+                            {column.kind === 'freeText' ? (
+                              <input
+                                type="text"
+                                className="summary-layout-editor-free-text-input"
+                                value={column.label}
+                                onChange={(event) => onUpdateSummaryLayoutFreeTextLabel(column.id, event.target.value)}
+                                placeholder="Free Text"
+                              />
+                            ) : (
+                              previewColumn.kind === 'day' && previewColumn.dayIndex !== undefined && weeklySummary
+                                ? `${SUMMARY_DAY_NAMES[previewColumn.dayIndex]} (${formatMonthDay(weeklySummary.days[previewColumn.dayIndex]?.date ?? weeklySummary.weekStartDate)})`
+                                : previewColumn.header
+                            )}
+                          </div>
+                          {(summaryLayoutPreviewRows.length > 0 ? summaryLayoutPreviewRows : [null, null, null]).map((row, previewRowIndex) => (
+                            <div
+                              key={`${column.id}-preview-${previewRowIndex}`}
+                              className={`summary-layout-editor-cell ${previewColumn.wraps ? 'wraps' : ''}`}
+                            >
+                              {row
+                                ? renderSummaryPreviewCell(
+                                  previewColumn,
+                                  row,
+                                  engagementById,
+                                  activityById,
+                                )
+                                : <span className="summary-layout-editor-placeholder">Preview</span>}
+                            </div>
+                          ))}
+                          <div className="summary-layout-editor-cell summary-layout-editor-footer-cell">
+                            {renderSummaryPreviewFooter(previewColumn, weeklySummary)}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className={`summary-layout-insert-slot ${summaryLayoutInsertionIndex === columnIndex + 1 ? 'active' : ''}`}
+                          onClick={() => setSummaryLayoutInsertionIndex((previous) => (
+                            previous === columnIndex + 1 ? null : columnIndex + 1
+                          ))}
+                          aria-label={`Add a column after ${previewColumn.header}`}
+                        >
+                          <span className="summary-layout-insert-button">+</span>
+                          <span className="summary-layout-insert-line" aria-hidden="true" />
+                        </button>
+                      </Fragment>
+                    )
+                  })}
+                  <div className="summary-layout-editor-column summary-layout-editor-column-fixed" style={{ width: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH }}>
+                    <div className="summary-layout-editor-column-controls summary-layout-editor-column-controls-fixed">
+                      <span className="summary-layout-editor-fixed-pill">Fixed</span>
+                    </div>
+                    <div className="summary-layout-editor-cell summary-layout-editor-header-cell">Row Total</div>
+                    {(summaryLayoutPreviewRows.length > 0 ? summaryLayoutPreviewRows : [null, null, null]).map((row, previewRowIndex) => (
+                      <div key={`row-total-preview-${previewRowIndex}`} className="summary-layout-editor-cell">
+                        {row ? formatMinutesAsHours(row.rowTotalMinutes) : <span className="summary-layout-editor-placeholder">Preview</span>}
+                      </div>
+                    ))}
+                    <div className="summary-layout-editor-cell summary-layout-editor-footer-cell">
+                      {weeklySummary ? formatMinutesAsHours(weeklySummary.weekTotalMinutes) : ''}
+                    </div>
+                  </div>
+                </div>
+
+                {summaryLayoutInsertionIndex !== null ? (
+                  <div className="summary-layout-picker">
+                    <div className="summary-layout-picker-header">
+                      <h4>Add Column</h4>
+                      <p>Select a hidden field, a hidden day, or add a new free-text column.</p>
+                    </div>
+                    <div className="summary-layout-picker-table" role="table" aria-label="Available summary columns">
+                      <div className="summary-layout-picker-head" role="row">
+                        <span role="columnheader">Column</span>
+                        <span role="columnheader">Description</span>
+                      </div>
+                      {buildSummaryLayoutInsertOptions(summaryLayoutDraft).map((option) => (
+                        <button
+                          key={option.key}
+                          type="button"
+                          className="summary-layout-picker-row"
+                          role="row"
+                          onClick={() => onInsertSummaryLayoutColumn(option.createColumn(), summaryLayoutInsertionIndex)}
+                        >
+                          <span role="cell">{option.label}</span>
+                          <span role="cell">{option.description}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="summary-layout-editor-actions">
+              {summaryLayoutModal.mode === 'edit' ? (
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={onDeleteSummaryLayoutPreset}
+                  disabled={isSummaryLayoutSaving || resolvedSummaryLayoutState.presets.length <= 1}
+                >
+                  Delete Preset
+                </button>
+              ) : <span />}
+              <div className="summary-layout-editor-actions-group">
+                <button type="button" className="ghost" onClick={resetSummaryLayoutEditor}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={onSaveSummaryLayoutPreset}
+                  disabled={isSummaryLayoutSaving}
+                >
+                  {isSummaryLayoutSaving ? 'Saving...' : 'Save Preset'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>,
         document.body,
@@ -5391,6 +6235,373 @@ function clampTimelineContextMenuPosition(
     x: Math.min(Math.max(clientX, viewportPadding), maxX),
     y: Math.min(Math.max(clientY, viewportPadding), maxY),
   }
+}
+
+function buildSummaryViewColumns(preset: SummaryLayoutPreset | undefined): SummaryLayoutViewColumn[] {
+  return (preset?.columns ?? []).map((column) => buildSummaryViewColumn(column))
+}
+
+function buildSummaryViewColumn(column: SummaryLayoutColumn): SummaryLayoutViewColumn {
+  if (column.kind === 'field') {
+    const option = getSummaryLayoutFieldOption(column.fieldKey)
+    return {
+      kind: 'field',
+      id: column.id,
+      header: option?.label ?? 'Column',
+      width: option?.width ?? '13rem',
+      wraps: option?.wraps ?? false,
+      fieldKey: column.fieldKey,
+    }
+  }
+
+  if (column.kind === 'day') {
+    return {
+      kind: 'day',
+      id: column.id,
+      header: SUMMARY_DAY_NAMES[column.dayIndex] ?? 'Day',
+      width: SUMMARY_LAYOUT_DAY_COLUMN_WIDTH,
+      wraps: false,
+      dayIndex: column.dayIndex,
+    }
+  }
+
+  return {
+    kind: 'freeText',
+    id: column.id,
+    header: column.label,
+    width: '13rem',
+    wraps: true,
+  }
+}
+
+function buildSummaryTableCellClassName(
+  column: SummaryLayoutViewColumn,
+  row: TimelineWeeklySummary['rows'][number],
+): string {
+  const classNames: string[] = []
+
+  if (
+    column.kind === 'field'
+    && (column.fieldKey === 'engagementCode' || column.fieldKey === 'activityCode')
+    && row.isUncategorized
+  ) {
+    classNames.push('summary-uncategorized')
+  }
+
+  if (column.wraps) {
+    classNames.push('summary-cell-wrap')
+  }
+
+  return classNames.join(' ')
+}
+
+function resolveSummaryFieldValue(
+  fieldKey: SummaryLayoutFieldKey,
+  row: TimelineWeeklySummary['rows'][number],
+  engagementById: Map<string, Engagement>,
+  activityById: Map<string, Activity>,
+): string {
+  const engagement = row.engagementId ? engagementById.get(row.engagementId) ?? null : null
+  const activity = row.activityId ? activityById.get(row.activityId) ?? null : null
+
+  switch (fieldKey) {
+    case 'engagementCode':
+      return formatSummaryCodeValue(row.engagementCode, row.isUncategorized)
+    case 'engagementName':
+      return row.engagementName
+    case 'clientName':
+      return normalizeDisplayText(row.clientName) ?? '-'
+    case 'engagementTags':
+      return engagement && engagement.tags.length > 0 ? engagement.tags.join(', ') : '-'
+    case 'engagementUsage':
+      return normalizeDisplayText(engagement?.describeWhenToUse) ?? '-'
+    case 'activityCode':
+      return formatSummaryCodeValue(row.activityCode, row.isUncategorized)
+    case 'activityName':
+      return row.activityName
+    case 'activityTags':
+      return activity && activity.tags.length > 0 ? activity.tags.join(', ') : '-'
+    case 'activityUsage':
+      return normalizeDisplayText(activity?.describeWhenToUse) ?? '-'
+    default:
+      return '-'
+  }
+}
+
+function renderSummaryTableCell(
+  column: SummaryLayoutViewColumn,
+  row: TimelineWeeklySummary['rows'][number],
+  rowIndex: number,
+  engagementById: Map<string, Engagement>,
+  activityById: Map<string, Activity>,
+  onOpenSummaryNotes: (rowIndex: number, dayIndex: number) => void,
+) {
+  if (column.kind === 'day' && column.dayIndex !== undefined) {
+    const cell = row.cells[column.dayIndex]
+    if (!cell || cell.totalMinutes <= 0) {
+      return <span className="summary-zero">-</span>
+    }
+
+    return (
+      <div className="summary-cell-value-wrap">
+        <span>{formatMinutesAsHours(cell.totalMinutes)}</span>
+        <button
+          type="button"
+          className="ghost summary-notes-button"
+          onClick={() => onOpenSummaryNotes(rowIndex, column.dayIndex ?? 0)}
+        >
+          Notes
+        </button>
+      </div>
+    )
+  }
+
+  if (column.kind === 'freeText') {
+    return <span className="summary-free-text-cell" aria-hidden="true" />
+  }
+
+  return resolveSummaryFieldValue(
+    column.fieldKey ?? 'engagementName',
+    row,
+    engagementById,
+    activityById,
+  )
+}
+
+function renderSummaryPreviewCell(
+  column: SummaryLayoutViewColumn,
+  row: TimelineWeeklySummary['rows'][number],
+  engagementById: Map<string, Engagement>,
+  activityById: Map<string, Activity>,
+) {
+  if (column.kind === 'day' && column.dayIndex !== undefined) {
+    const cell = row.cells[column.dayIndex]
+    return cell && cell.totalMinutes > 0 ? formatMinutesAsHours(cell.totalMinutes) : '-'
+  }
+
+  if (column.kind === 'freeText') {
+    return <span className="summary-layout-editor-placeholder">Blank</span>
+  }
+
+  return resolveSummaryFieldValue(
+    column.fieldKey ?? 'engagementName',
+    row,
+    engagementById,
+    activityById,
+  )
+}
+
+function renderSummaryPreviewFooter(
+  column: SummaryLayoutViewColumn,
+  weeklySummary: TimelineWeeklySummary | null,
+) {
+  if (!weeklySummary) {
+    return ''
+  }
+
+  if (column.kind === 'day' && column.dayIndex !== undefined) {
+    return formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
+  }
+
+  return ''
+}
+
+function buildSummaryLayoutInsertOptions(preset: SummaryLayoutPreset): Array<{
+  key: string
+  label: string
+  description: string
+  createColumn: () => SummaryLayoutColumn
+}> {
+  const usedFields = new Set(
+    preset.columns
+      .filter((column): column is Extract<SummaryLayoutColumn, { kind: 'field' }> => column.kind === 'field')
+      .map((column) => column.fieldKey),
+  )
+  const usedDays = new Set(
+    preset.columns
+      .filter((column): column is Extract<SummaryLayoutColumn, { kind: 'day' }> => column.kind === 'day')
+      .map((column) => column.dayIndex),
+  )
+
+  const fieldOptions = SUMMARY_LAYOUT_FIELD_OPTIONS
+    .filter((option) => !usedFields.has(option.key))
+    .map((option) => ({
+      key: `field-${option.key}`,
+      label: option.label,
+      description: option.description,
+      createColumn: (): SummaryLayoutColumn => ({
+        kind: 'field',
+        id: generateSummaryLayoutId(`field-${option.key}`),
+        fieldKey: option.key,
+      }),
+    }))
+
+  const dayOptions = SUMMARY_DAY_NAMES
+    .map((dayName, dayIndex) => ({ dayName, dayIndex }))
+    .filter(({ dayIndex }) => !usedDays.has(dayIndex))
+    .map(({ dayName, dayIndex }) => ({
+      key: `day-${dayIndex}`,
+      label: dayName,
+      description: `Shows the ${dayName.toLowerCase()} hours and notes for the selected week.`,
+      createColumn: (): SummaryLayoutColumn => ({
+        kind: 'day',
+        id: generateSummaryLayoutId(`day-${dayIndex}`),
+        dayIndex,
+      }),
+    }))
+
+  return [
+    ...fieldOptions,
+    ...dayOptions,
+    {
+      key: 'free-text',
+      label: 'Free Text',
+      description: 'Adds a custom column with a user-defined header and empty row values.',
+      createColumn: () => createSummaryLayoutFreeTextColumn(),
+    },
+  ]
+}
+
+function moveSummaryLayoutColumn(
+  columns: SummaryLayoutColumn[],
+  sourceIndex: number,
+  targetIndex: number,
+): SummaryLayoutColumn[] {
+  if (
+    sourceIndex < 0
+    || targetIndex < 0
+    || sourceIndex >= columns.length
+    || targetIndex >= columns.length
+    || sourceIndex === targetIndex
+  ) {
+    return columns
+  }
+
+  const nextColumns = [...columns]
+  const [movedColumn] = nextColumns.splice(sourceIndex, 1)
+  nextColumns.splice(targetIndex, 0, movedColumn)
+  return nextColumns
+}
+
+function findSummaryLayoutInsertionIndex(
+  clientX: number,
+  dragState: SummaryLayoutDragState,
+): number {
+  if (dragState.columnSnapshots.length <= 1) {
+    return dragState.sourceIndex
+  }
+
+  const dragDeltaX = clientX - dragState.startClientX
+  const draggedSnapshot = dragState.columnSnapshots[dragState.sourceIndex]
+  if (!draggedSnapshot) {
+    return dragState.sourceIndex
+  }
+
+  const draggedCenterX = draggedSnapshot.centerX + dragDeltaX
+
+  let insertionIndex = 0
+  for (const [index, snapshot] of dragState.columnSnapshots.entries()) {
+    if (index === dragState.sourceIndex) {
+      continue
+    }
+
+    if (draggedCenterX > snapshot.centerX) {
+      insertionIndex += 1
+    }
+  }
+
+  return Math.min(Math.max(insertionIndex, 0), dragState.columnSnapshots.length - 1)
+}
+
+function buildSummaryLayoutDragTransforms(
+  columns: SummaryLayoutColumn[],
+  dragState: SummaryLayoutDragState | null,
+): Map<string, number> {
+  const transforms = new Map<string, number>()
+  if (!dragState || columns.length === 0) {
+    return transforms
+  }
+
+  const snapshotById = new Map(
+    dragState.columnSnapshots.map((snapshot) => [snapshot.columnId, snapshot]),
+  )
+  if (snapshotById.size !== columns.length) {
+    transforms.set(dragState.columnId, dragState.latestClientX - dragState.startClientX)
+    return transforms
+  }
+
+  const slotGaps = dragState.columnSnapshots.map((snapshot, index) => {
+    const nextSnapshot = dragState.columnSnapshots[index + 1]
+    if (!nextSnapshot) {
+      return 0
+    }
+
+    return nextSnapshot.left - (snapshot.left + snapshot.width)
+  })
+
+  const previewColumns = moveSummaryLayoutColumn(
+    columns,
+    dragState.sourceIndex,
+    dragState.insertionIndex,
+  )
+  const previewLeftById = new Map<string, number>()
+  let nextLeft = dragState.columnSnapshots[0]?.left ?? 0
+  previewColumns.forEach((column, index) => {
+    const snapshot = snapshotById.get(column.id)
+    if (!snapshot) {
+      return
+    }
+
+    previewLeftById.set(column.id, nextLeft)
+    nextLeft += snapshot.width + (slotGaps[index] ?? 0)
+  })
+
+  columns.forEach((column) => {
+    if (column.id === dragState.columnId) {
+      transforms.set(column.id, dragState.latestClientX - dragState.startClientX)
+      return
+    }
+
+    const snapshot = snapshotById.get(column.id)
+    const previewLeft = previewLeftById.get(column.id)
+    if (!snapshot || previewLeft === undefined) {
+      return
+    }
+
+    transforms.set(column.id, previewLeft - snapshot.left)
+  })
+
+  return transforms
+}
+
+function buildSummaryLayoutColumnTransform(offsetX: number, isDragging: boolean): string | undefined {
+  if (Math.abs(offsetX) <= 0.01 && !isDragging) {
+    return undefined
+  }
+
+  const baseTransform = `translateX(${offsetX}px)`
+  return isDragging
+    ? `${baseTransform} translateY(-2px) rotate(-1deg)`
+    : baseTransform
+}
+
+function buildNextSummaryLayoutPresetName(
+  baseName: string,
+  presets: SummaryLayoutPreset[],
+): string {
+  const trimmedBaseName = baseName.trim() || 'New Preset'
+  const existingNames = new Set(presets.map((preset) => preset.name.trim().toLowerCase()))
+
+  if (!existingNames.has(trimmedBaseName.toLowerCase())) {
+    return trimmedBaseName
+  }
+
+  let suffix = 2
+  while (existingNames.has(`${trimmedBaseName} ${suffix}`.toLowerCase())) {
+    suffix += 1
+  }
+
+  return `${trimmedBaseName} ${suffix}`
 }
 
 export default App

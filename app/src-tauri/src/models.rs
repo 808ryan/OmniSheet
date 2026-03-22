@@ -397,6 +397,8 @@ pub struct TimelineWeeklySummaryDay {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineWeeklySummaryRow {
+    pub engagement_id: Option<String>,
+    pub activity_id: Option<String>,
     pub engagement_code: Option<String>,
     pub activity_code: Option<String>,
     pub activity_name: String,
@@ -431,6 +433,52 @@ pub struct SummaryExportResult {
     pub auto_open_attempted: bool,
     pub auto_open_succeeded: bool,
     pub auto_open_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SummaryLayoutFieldKey {
+    EngagementCode,
+    EngagementName,
+    ClientName,
+    EngagementTags,
+    EngagementUsage,
+    ActivityCode,
+    ActivityName,
+    ActivityTags,
+    ActivityUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SummaryLayoutColumn {
+    Field {
+        id: String,
+        #[serde(rename = "fieldKey", alias = "field_key")]
+        field_key: SummaryLayoutFieldKey,
+    },
+    Day {
+        id: String,
+        #[serde(rename = "dayIndex", alias = "day_index")]
+        day_index: u8,
+    },
+    FreeText { id: String, label: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryLayoutPreset {
+    pub id: String,
+    pub name: String,
+    pub columns: Vec<SummaryLayoutColumn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryLayoutState {
+    pub version: i64,
+    pub selected_preset_id: String,
+    pub presets: Vec<SummaryLayoutPreset>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,7 +638,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        CodeContext, ContextActivity, ContextEngagement, OpenAiModelId, TranscriptionModelId,
+        CodeContext, ContextActivity, ContextEngagement, OpenAiModelId, SummaryLayoutColumn,
+        SummaryLayoutFieldKey, TranscriptionModelId,
     };
 
     #[test]
@@ -772,5 +821,36 @@ mod tests {
                 .expect("activity code should exist"),
             "A-001"
         );
+    }
+
+    #[test]
+    fn summary_layout_column_serializes_and_deserializes_camel_case_variant_fields() {
+        let column = SummaryLayoutColumn::Field {
+            id: "field-1".to_string(),
+            field_key: SummaryLayoutFieldKey::EngagementName,
+        };
+
+        let serialized = serde_json::to_value(&column).expect("column serialization should work");
+        let serialized_object = serialized.as_object().expect("column should serialize to an object");
+        assert_eq!(
+            serialized_object
+                .get("fieldKey")
+                .and_then(Value::as_str)
+                .expect("fieldKey should exist"),
+            "engagementName"
+        );
+        assert!(!serialized_object.contains_key("field_key"));
+
+        let parsed: SummaryLayoutColumn = serde_json::from_value(serde_json::json!({
+            "kind": "day",
+            "id": "day-1",
+            "dayIndex": 1
+        }))
+        .expect("camelCase payload should deserialize");
+
+        match parsed {
+            SummaryLayoutColumn::Day { day_index, .. } => assert_eq!(day_index, 1),
+            _ => panic!("expected day column"),
+        }
     }
 }

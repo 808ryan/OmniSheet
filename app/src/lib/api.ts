@@ -18,6 +18,7 @@ import type {
   OpenAiModelId,
   SettingsStatus,
   SummaryExportResult,
+  SummaryLayoutState,
   TranscribeAudioInput,
   TranscribeAudioResult,
   TranscriptionModelId,
@@ -187,6 +188,14 @@ export function settingsSetTranscriptionModel(model: TranscriptionModelId): Prom
   return invokeCommand<void>('settings_set_transcription_model', {
     input: { model },
   })
+}
+
+export function summaryLayoutStateGet(): Promise<SummaryLayoutState> {
+  return invokeCommand<SummaryLayoutState>('summary_layout_state_get')
+}
+
+export function summaryLayoutStateSet(input: SummaryLayoutState): Promise<SummaryLayoutState> {
+  return invokeCommand<SummaryLayoutState>('summary_layout_state_set', { input })
 }
 
 export function engagementList(): Promise<Engagement[]> {
