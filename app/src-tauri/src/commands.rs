@@ -22,7 +22,8 @@ use crate::models::{
     InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
     MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId, SettingsSetOpenAiModelInput,
     SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
-    SummaryExportResult, TimelineCreateInput, TimelineDaySummary, TimelineEntry,
+    SummaryExportResult, SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset,
+    SummaryLayoutState, TimelineCreateInput, TimelineDaySummary, TimelineEntry,
     TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode, TimelineWeeklySummary,
     TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult,
     TranscriptionModelId, Warning, WarningType,
@@ -40,6 +41,10 @@ const GLOBAL_ACTIVITY_FALLBACK_MIN_MARGIN: f64 = 0.75;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
 const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
 const APP_SETTING_TRANSCRIPTION_MODEL: &str = "openai_transcription_model";
+const APP_SETTING_SUMMARY_LAYOUT_STATE: &str = "summary_layout_state";
+const SUMMARY_LAYOUT_STATE_VERSION: i64 = 1;
+const SUMMARY_LAYOUT_MAX_NAME_LENGTH: usize = 40;
+const DEFAULT_SUMMARY_LAYOUT_PRESET_ID: &str = "preset-standard";
 const SUMMARY_DAY_NAMES: [&str; 7] = [
     "Saturday",
     "Sunday",
@@ -131,6 +136,207 @@ fn read_saved_transcription_model(
 ) -> AppResult<(TranscriptionModelId, Option<String>)> {
     let saved_value = db::get_app_setting(connection, APP_SETTING_TRANSCRIPTION_MODEL)?;
     Ok(resolve_saved_transcription_model_value(saved_value))
+}
+
+fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
+    vec![
+        SummaryLayoutColumn::Field {
+            id: "field-engagement-code".to_string(),
+            field_key: SummaryLayoutFieldKey::EngagementCode,
+        },
+        SummaryLayoutColumn::Field {
+            id: "field-activity-code".to_string(),
+            field_key: SummaryLayoutFieldKey::ActivityCode,
+        },
+        SummaryLayoutColumn::Field {
+            id: "field-activity-name".to_string(),
+            field_key: SummaryLayoutFieldKey::ActivityName,
+        },
+        SummaryLayoutColumn::Field {
+            id: "field-engagement-name".to_string(),
+            field_key: SummaryLayoutFieldKey::EngagementName,
+        },
+        SummaryLayoutColumn::Field {
+            id: "field-client-name".to_string(),
+            field_key: SummaryLayoutFieldKey::ClientName,
+        },
+        SummaryLayoutColumn::Day {
+            id: "day-0".to_string(),
+            day_index: 0,
+        },
+        SummaryLayoutColumn::Day {
+            id: "day-1".to_string(),
+            day_index: 1,
+        },
+        SummaryLayoutColumn::Day {
+            id: "day-2".to_string(),
+            day_index: 2,
+        },
+        SummaryLayoutColumn::Day {
+            id: "day-3".to_string(),
+            day_index: 3,
+        },
+        SummaryLayoutColumn::Day {
+            id: "day-4".to_string(),
+            day_index: 4,
+        },
+        SummaryLayoutColumn::Day {
+            id: "day-5".to_string(),
+            day_index: 5,
+        },
+        SummaryLayoutColumn::Day {
+            id: "day-6".to_string(),
+            day_index: 6,
+        },
+    ]
+}
+
+fn default_summary_layout_state() -> SummaryLayoutState {
+    SummaryLayoutState {
+        version: SUMMARY_LAYOUT_STATE_VERSION,
+        selected_preset_id: DEFAULT_SUMMARY_LAYOUT_PRESET_ID.to_string(),
+        presets: vec![SummaryLayoutPreset {
+            id: DEFAULT_SUMMARY_LAYOUT_PRESET_ID.to_string(),
+            name: "Standard".to_string(),
+            columns: default_summary_layout_columns(),
+        }],
+    }
+}
+
+fn normalize_summary_layout_state(
+    mut state: SummaryLayoutState,
+) -> Result<SummaryLayoutState, String> {
+    state.version = SUMMARY_LAYOUT_STATE_VERSION;
+    state.selected_preset_id = state.selected_preset_id.trim().to_string();
+
+    if state.presets.is_empty() {
+        return Err("At least one summary layout preset is required.".to_string());
+    }
+
+    let mut preset_ids = HashSet::new();
+    let mut preset_names = HashSet::new();
+
+    for preset in &mut state.presets {
+        preset.id = preset.id.trim().to_string();
+        preset.name = preset.name.trim().to_string();
+
+        if preset.id.is_empty() {
+            return Err("Summary layout preset IDs cannot be empty.".to_string());
+        }
+
+        if preset.name.is_empty() {
+            return Err("Summary layout preset names cannot be empty.".to_string());
+        }
+
+        if preset.name.chars().count() > SUMMARY_LAYOUT_MAX_NAME_LENGTH {
+            return Err(format!(
+                "Summary layout preset names must be {} characters or fewer.",
+                SUMMARY_LAYOUT_MAX_NAME_LENGTH
+            ));
+        }
+
+        if !preset_ids.insert(preset.id.clone()) {
+            return Err("Summary layout preset IDs must be unique.".to_string());
+        }
+
+        if !preset_names.insert(preset.name.to_lowercase()) {
+            return Err("Summary layout preset names must be unique.".to_string());
+        }
+
+        if preset.columns.is_empty() {
+            return Err("Each summary layout preset must include at least one column.".to_string());
+        }
+
+        let mut column_ids = HashSet::new();
+        let mut field_keys = HashSet::new();
+        let mut day_indexes = HashSet::new();
+
+        for column in &mut preset.columns {
+            match column {
+                SummaryLayoutColumn::Field { id, field_key } => {
+                    *id = id.trim().to_string();
+                    if id.is_empty() {
+                        return Err(
+                            "Summary layout field column IDs cannot be empty.".to_string(),
+                        );
+                    }
+                    if !column_ids.insert(id.clone()) {
+                        return Err("Summary layout column IDs must be unique.".to_string());
+                    }
+                    if !field_keys.insert(*field_key) {
+                        return Err(
+                            "A summary layout preset cannot include the same field twice."
+                                .to_string(),
+                        );
+                    }
+                }
+                SummaryLayoutColumn::Day { id, day_index } => {
+                    *id = id.trim().to_string();
+                    if id.is_empty() {
+                        return Err("Summary layout day column IDs cannot be empty.".to_string());
+                    }
+                    if !column_ids.insert(id.clone()) {
+                        return Err("Summary layout column IDs must be unique.".to_string());
+                    }
+                    if *day_index > 6 {
+                        return Err("Summary layout day indexes must be between 0 and 6.".to_string());
+                    }
+                    if !day_indexes.insert(*day_index) {
+                        return Err(
+                            "A summary layout preset cannot include the same day twice.".to_string(),
+                        );
+                    }
+                }
+                SummaryLayoutColumn::FreeText { id, label } => {
+                    *id = id.trim().to_string();
+                    *label = label.trim().to_string();
+                    if id.is_empty() {
+                        return Err(
+                            "Summary layout free-text column IDs cannot be empty.".to_string(),
+                        );
+                    }
+                    if !column_ids.insert(id.clone()) {
+                        return Err("Summary layout column IDs must be unique.".to_string());
+                    }
+                    if label.is_empty() {
+                        return Err(
+                            "Summary layout free-text column labels cannot be empty.".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if state.selected_preset_id.is_empty() {
+        return Err("A selected summary layout preset is required.".to_string());
+    }
+
+    if !preset_ids.contains(&state.selected_preset_id) {
+        return Err("The selected summary layout preset does not exist.".to_string());
+    }
+
+    Ok(state)
+}
+
+fn read_summary_layout_state(connection: &Connection) -> AppResult<SummaryLayoutState> {
+    let saved_value = db::get_app_setting(connection, APP_SETTING_SUMMARY_LAYOUT_STATE)?;
+    let state = saved_value
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<SummaryLayoutState>(value).ok())
+        .and_then(|state| normalize_summary_layout_state(state).ok())
+        .unwrap_or_else(default_summary_layout_state);
+
+    let serialized_state = serde_json::to_string(&state)?;
+    if saved_value.as_deref() != Some(serialized_state.as_str()) {
+        db::upsert_app_setting(
+            connection,
+            APP_SETTING_SUMMARY_LAYOUT_STATE,
+            serialized_state.as_str(),
+        )?;
+    }
+
+    Ok(state)
 }
 
 fn resolve_requested_openai_model(
@@ -1422,6 +1628,149 @@ pub fn settings_set_transcription_model(
                   "message": message,
                   "selectedTranscriptionModel": selected_model.api_name(),
                   "selectedTranscriptionModelLabel": selected_model.display_label(),
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn summary_layout_state_get(state: State<'_, AppState>) -> Result<SummaryLayoutState, String> {
+    let command = "summary_layout_state_get";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    match read_summary_layout_state(&connection) {
+        Ok(layout_state) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "presetCount": layout_state.presets.len(),
+                  "selectedPresetId": layout_state.selected_preset_id,
+                }),
+            );
+            Ok(layout_state)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({ "stage": "read_summary_layout_state", "message": message }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn summary_layout_state_set(
+    state: State<'_, AppState>,
+    input: SummaryLayoutState,
+) -> Result<SummaryLayoutState, String> {
+    let command = "summary_layout_state_set";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+    let normalized_state = normalize_summary_layout_state(input)
+        .map_err(|message| format_command_error(&correlation_id, message))?;
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let save_result: Result<(), String> = (|| {
+        let serialized_state =
+            serde_json::to_string(&normalized_state).map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_SUMMARY_LAYOUT_STATE,
+            serialized_state.as_str(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified = db::get_app_setting(&connection, APP_SETTING_SUMMARY_LAYOUT_STATE)
+            .map_err(|error| error.to_string())?;
+        if verified.as_deref() != Some(serialized_state.as_str()) {
+            return Err("Summary layout preset save verification failed.".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "presetCount": normalized_state.presets.len(),
+                  "selectedPresetId": normalized_state.selected_preset_id,
+                  "verified": true,
+                }),
+            );
+            Ok(normalized_state)
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_summary_layout_state",
+                  "message": message,
+                  "presetCount": normalized_state.presets.len(),
+                  "selectedPresetId": normalized_state.selected_preset_id,
                 }),
             );
             Err(format_command_error(&correlation_id, message))
@@ -3827,7 +4176,8 @@ mod tests {
 
     use crate::models::{
         CodeContext, ContextActivity, ContextEngagement, KeySource, LlmEntry, NormalizedEntry,
-        OpenAiModelId, StatusLevel, TranscriptionModelId,
+        OpenAiModelId, StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey,
+        SummaryLayoutPreset, SummaryLayoutState, TranscriptionModelId,
     };
     use crate::openai::LlmAttemptTelemetry;
 
@@ -3838,7 +4188,8 @@ mod tests {
         message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
         normalize_snapped_update_window, reconcile_context_refs, resolve_requested_openai_model,
         resolve_saved_openai_model_value, resolve_saved_transcription_model_value,
-        round_to_nearest_15, timeline_week_bounds, validate_manual_update_window, PreparedEntry,
+        round_to_nearest_15, timeline_week_bounds, validate_manual_update_window,
+        default_summary_layout_state, normalize_summary_layout_state, PreparedEntry,
         TemporalCueType, TemporalReference, MINUTES_IN_DAY,
     };
 
@@ -3966,6 +4317,82 @@ mod tests {
             resolve_saved_transcription_model_value(Some("legacy-transcribe".to_string()));
         assert_eq!(invalid_model, TranscriptionModelId::Gpt4oMiniTranscribe);
         assert_eq!(invalid_value.as_deref(), Some("legacy-transcribe"));
+    }
+
+    #[test]
+    fn default_summary_layout_state_seeds_standard_preset() {
+        let state = default_summary_layout_state();
+        assert_eq!(state.presets.len(), 1);
+        assert_eq!(state.presets[0].name, "Standard");
+        assert_eq!(state.selected_preset_id, state.presets[0].id);
+        assert_eq!(state.presets[0].columns.len(), 12);
+    }
+
+    #[test]
+    fn summary_layout_state_rejects_duplicate_preset_names() {
+        let state = SummaryLayoutState {
+            version: 99,
+            selected_preset_id: "preset-a".to_string(),
+            presets: vec![
+                SummaryLayoutPreset {
+                    id: "preset-a".to_string(),
+                    name: "Alpha".to_string(),
+                    columns: vec![SummaryLayoutColumn::Field {
+                        id: "field-a".to_string(),
+                        field_key: SummaryLayoutFieldKey::EngagementCode,
+                    }],
+                },
+                SummaryLayoutPreset {
+                    id: "preset-b".to_string(),
+                    name: " alpha ".to_string(),
+                    columns: vec![SummaryLayoutColumn::FreeText {
+                        id: "free-text".to_string(),
+                        label: "Notes".to_string(),
+                    }],
+                },
+            ],
+        };
+
+        let error = normalize_summary_layout_state(state).expect_err("duplicate names rejected");
+        assert_eq!(error, "Summary layout preset names must be unique.");
+    }
+
+    #[test]
+    fn summary_layout_state_trims_and_validates_columns() {
+        let normalized = normalize_summary_layout_state(SummaryLayoutState {
+            version: 0,
+            selected_preset_id: " preset-a ".to_string(),
+            presets: vec![SummaryLayoutPreset {
+                id: " preset-a ".to_string(),
+                name: " Working Layout ".to_string(),
+                columns: vec![
+                    SummaryLayoutColumn::Field {
+                        id: " field-a ".to_string(),
+                        field_key: SummaryLayoutFieldKey::EngagementName,
+                    },
+                    SummaryLayoutColumn::Day {
+                        id: " day-2 ".to_string(),
+                        day_index: 2,
+                    },
+                    SummaryLayoutColumn::FreeText {
+                        id: " free-text ".to_string(),
+                        label: " Notes ".to_string(),
+                    },
+                ],
+            }],
+        })
+        .expect("state should normalize");
+
+        assert_eq!(normalized.version, 1);
+        assert_eq!(normalized.selected_preset_id, "preset-a");
+        assert_eq!(normalized.presets[0].name, "Working Layout");
+        match &normalized.presets[0].columns[2] {
+            SummaryLayoutColumn::FreeText { id, label } => {
+                assert_eq!(id, "free-text");
+                assert_eq!(label, "Notes");
+            }
+            _ => panic!("expected free-text column"),
+        }
     }
 
     #[test]

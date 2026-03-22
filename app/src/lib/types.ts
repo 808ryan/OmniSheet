@@ -186,6 +186,8 @@ export interface TimelineWeeklySummaryDay {
 }
 
 export interface TimelineWeeklySummaryRow {
+  engagementId: string | null
+  activityId: string | null
   engagementCode: string | null
   activityCode: string | null
   activityName: string
@@ -214,6 +216,46 @@ export interface SummaryExportResult {
   autoOpenAttempted: boolean
   autoOpenSucceeded: boolean
   autoOpenError: string | null
+}
+
+export type SummaryLayoutFieldKey =
+  | 'engagementCode'
+  | 'engagementName'
+  | 'clientName'
+  | 'engagementTags'
+  | 'engagementUsage'
+  | 'activityCode'
+  | 'activityName'
+  | 'activityTags'
+  | 'activityUsage'
+
+export type SummaryLayoutColumn =
+  | {
+    kind: 'field'
+    id: string
+    fieldKey: SummaryLayoutFieldKey
+  }
+  | {
+    kind: 'day'
+    id: string
+    dayIndex: number
+  }
+  | {
+    kind: 'freeText'
+    id: string
+    label: string
+  }
+
+export interface SummaryLayoutPreset {
+  id: string
+  name: string
+  columns: SummaryLayoutColumn[]
+}
+
+export interface SummaryLayoutState {
+  version: number
+  selectedPresetId: string
+  presets: SummaryLayoutPreset[]
 }
 
 export interface TimelineUpdateInput {

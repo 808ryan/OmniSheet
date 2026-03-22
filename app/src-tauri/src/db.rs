@@ -1059,6 +1059,8 @@ struct WeeklySummaryRowKey {
 
 #[derive(Debug, Clone)]
 struct WeeklySummaryRowAccumulator {
+    engagement_id: Option<String>,
+    activity_id: Option<String>,
     engagement_code: Option<String>,
     activity_code: Option<String>,
     activity_name: String,
@@ -1200,6 +1202,8 @@ pub fn list_timeline_weekly_summary(
         let accumulator = rows_by_key
             .entry(key)
             .or_insert_with(|| WeeklySummaryRowAccumulator {
+                engagement_id: engagement_id.clone(),
+                activity_id: activity_id.clone(),
                 engagement_code: engagement_code.clone(),
                 activity_code: activity_code.clone(),
                 activity_name: activity_name.clone(),
@@ -1234,6 +1238,8 @@ pub fn list_timeline_weekly_summary(
                 .collect::<Vec<_>>();
 
             TimelineWeeklySummaryRow {
+                engagement_id: accumulator.engagement_id,
+                activity_id: accumulator.activity_id,
                 engagement_code: accumulator.engagement_code,
                 activity_code: accumulator.activity_code,
                 activity_name: accumulator.activity_name,

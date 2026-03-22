@@ -50,6 +50,8 @@ pub fn run() {
             commands::settings_set_openai_key,
             commands::settings_set_openai_model,
             commands::settings_set_transcription_model,
+            commands::summary_layout_state_get,
+            commands::summary_layout_state_set,
             commands::engagement_list,
             commands::engagement_upsert,
             commands::engagement_delete,
