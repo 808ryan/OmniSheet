@@ -739,6 +739,19 @@ button.danger {
   font-size: 0.94rem;
   font-weight: 500;
   color: var(--ink-soft);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.timeline-range-separator {
+  color: rgba(97, 113, 138, 0.68);
+}
+
+.timeline-range-total {
+  font-weight: 650;
+  color: var(--ink);
 }
 
 .timeline-controls {
@@ -859,12 +872,26 @@ button.danger {
 
 .week-timeline-day-header {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 0.14rem;
   font-size: 0.86rem;
   font-weight: 700;
   color: var(--ink-soft);
   border-left: 1px solid rgba(125, 144, 170, 0.16);
+  text-align: center;
+}
+
+.week-timeline-day-label {
+  line-height: 1.1;
+}
+
+.week-timeline-day-total {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: rgba(97, 113, 138, 0.9);
+  line-height: 1.1;
 }
 
 .week-timeline-day-header.is-selected {
@@ -872,8 +899,16 @@ button.danger {
   background: rgba(255, 255, 255, 0.58);
 }
 
+.week-timeline-day-header.is-selected .week-timeline-day-total {
+  color: rgba(15, 23, 42, 0.8);
+}
+
 .week-timeline-day-header.is-today {
   color: #1d4ed8;
+}
+
+.week-timeline-day-header.is-today .week-timeline-day-total {
+  color: rgba(29, 78, 216, 0.86);
 }
 
 .week-timeline-body {
