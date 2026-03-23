@@ -210,6 +210,17 @@ export interface TimelineWeeklySummaryNote {
   description: string
 }
 
+export interface TimelineWeekView {
+  weekStartDate: string
+  weekEndDate: string
+  days: TimelineWeekViewDay[]
+  entries: TimelineEntry[]
+}
+
+export interface TimelineWeekViewDay {
+  date: string
+}
+
 export interface SummaryExportResult {
   filePath: string
   fileName: string

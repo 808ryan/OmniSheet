@@ -24,9 +24,9 @@ use crate::models::{
     SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
     SummaryExportResult, SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset,
     SummaryLayoutState, TimelineCreateInput, TimelineDaySummary, TimelineEntry,
-    TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode, TimelineWeeklySummary,
-    TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult,
-    TranscriptionModelId, Warning, WarningType,
+    TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
+    TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput,
+    TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -450,6 +450,19 @@ fn timeline_week_bounds(date: &str) -> Result<(String, String), String> {
         .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
     let days_since_saturday = (selected_date.weekday().num_days_from_sunday() + 1) % 7;
     let week_start = selected_date - Duration::days(days_since_saturday as i64);
+    let week_end_exclusive = week_start + Duration::days(7);
+
+    Ok((
+        week_start.format("%Y-%m-%d").to_string(),
+        week_end_exclusive.format("%Y-%m-%d").to_string(),
+    ))
+}
+
+fn timeline_week_view_bounds(date: &str) -> Result<(String, String), String> {
+    let selected_date = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
+        .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
+    let days_since_sunday = selected_date.weekday().num_days_from_sunday() as i64;
+    let week_start = selected_date - Duration::days(days_since_sunday);
     let week_end_exclusive = week_start + Duration::days(7);
 
     Ok((
@@ -1847,6 +1860,35 @@ pub fn timeline_weekly_summary(
 
     db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn timeline_list_for_week_view(
+    state: State<'_, AppState>,
+    input: DateInput,
+) -> Result<TimelineWeekView, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    let (start_date, end_date_exclusive) = timeline_week_view_bounds(&input.date)?;
+    let week_start = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
+        .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
+    let entries = db::list_timeline_entries_for_date_range(&connection, &start_date, &end_date_exclusive)
+        .map_err(|error| error.to_string())?;
+    let days = (0..7)
+        .map(|index| TimelineWeekViewDay {
+            date: (week_start + Duration::days(index)).format("%Y-%m-%d").to_string(),
+        })
+        .collect::<Vec<_>>();
+    let week_end_date = days
+        .last()
+        .map(|day| day.date.clone())
+        .unwrap_or_else(|| start_date.clone());
+
+    Ok(TimelineWeekView {
+        week_start_date: start_date,
+        week_end_date,
+        days,
+        entries,
+    })
 }
 
 #[tauri::command]
@@ -4188,9 +4230,10 @@ mod tests {
         message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
         normalize_snapped_update_window, reconcile_context_refs, resolve_requested_openai_model,
         resolve_saved_openai_model_value, resolve_saved_transcription_model_value,
-        round_to_nearest_15, timeline_week_bounds, validate_manual_update_window,
-        default_summary_layout_state, normalize_summary_layout_state, PreparedEntry,
-        TemporalCueType, TemporalReference, MINUTES_IN_DAY,
+        round_to_nearest_15, timeline_week_bounds, timeline_week_view_bounds,
+        validate_manual_update_window, default_summary_layout_state,
+        normalize_summary_layout_state, PreparedEntry, TemporalCueType, TemporalReference,
+        MINUTES_IN_DAY,
     };
 
     #[test]
@@ -4206,6 +4249,14 @@ mod tests {
         let (start, end_exclusive) = timeline_week_bounds("2026-03-04").expect("valid bounds");
         assert_eq!(start, "2026-02-28");
         assert_eq!(end_exclusive, "2026-03-07");
+    }
+
+    #[test]
+    fn timeline_week_view_bounds_uses_sunday_start_and_saturday_end() {
+        let (start, end_exclusive) =
+            timeline_week_view_bounds("2026-04-01").expect("valid bounds");
+        assert_eq!(start, "2026-03-29");
+        assert_eq!(end_exclusive, "2026-04-05");
     }
 
     #[test]

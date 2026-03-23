@@ -299,22 +299,30 @@
 
 .app-main {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0.75rem;
   height: 100%;
   min-width: 0;
   min-height: 0;
+  position: relative;
 }
 
 .app-notices {
   display: grid;
   gap: 0.5rem;
   min-height: 0;
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(32rem, calc(100vw - 2rem));
+  z-index: 1250;
+  pointer-events: none;
 }
 
 .segmented-control {
   display: inline-grid;
-  grid-template-columns: repeat(5, minmax(0, max-content));
+  grid-template-columns: repeat(6, minmax(0, max-content));
   justify-content: start;
   align-items: center;
   gap: 0.25rem;
@@ -461,6 +469,10 @@ button.danger {
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.6rem;
+  pointer-events: auto;
+  box-shadow: 0 14px 28px rgba(16, 24, 40, 0.2);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
 }
 
 .alert-message {
@@ -748,6 +760,14 @@ button.danger {
   min-height: 0;
 }
 
+.week-timeline-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.week-timeline-layout.has-editor {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+}
+
 .timeline-layout > * {
   min-width: 0;
   min-height: 0;
@@ -801,6 +821,93 @@ button.danger {
   bottom: 0;
   left: var(--timeline-gutter-left);
   right: var(--timeline-gutter-right);
+}
+
+.week-panel {
+  gap: 0.85rem;
+}
+
+.week-timeline-grid {
+  --week-timeline-gutter-left: 68px;
+  --week-timeline-day-width: 176px;
+  --week-timeline-header-height: 64px;
+  overflow: auto;
+  scrollbar-gutter: auto;
+}
+
+.week-timeline-surface {
+  position: relative;
+}
+
+.week-timeline-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: var(--week-timeline-gutter-left) repeat(7, var(--week-timeline-day-width));
+  min-height: var(--week-timeline-header-height);
+  background:
+    linear-gradient(180deg, rgba(247, 250, 255, 0.95), rgba(240, 246, 255, 0.86));
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border-bottom: 1px solid rgba(125, 144, 170, 0.22);
+}
+
+.week-timeline-header-spacer {
+  border-right: 1px solid rgba(125, 144, 170, 0.16);
+}
+
+.week-timeline-day-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+  border-left: 1px solid rgba(125, 144, 170, 0.16);
+}
+
+.week-timeline-day-header.is-selected {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.week-timeline-day-header.is-today {
+  color: #1d4ed8;
+}
+
+.week-timeline-body {
+  position: relative;
+}
+
+.week-timeline-hour-mark {
+  left: 0;
+  right: 0;
+}
+
+.week-timeline-hour-mark span {
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.week-timeline-day-column {
+  position: absolute;
+  border-left: 1px solid rgba(125, 144, 170, 0.16);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.04));
+  pointer-events: none;
+}
+
+.week-timeline-day-column.is-selected {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(219, 234, 254, 0.2));
+}
+
+.week-timeline-entry-layer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
 }
 
 .timeline-block {
@@ -934,60 +1041,6 @@ button.danger {
   width: 100%;
   min-width: 9rem;
   text-align: left;
-}
-
-.timeline-toast-stack {
-  position: fixed;
-  top: 1rem;
-  right: 1rem;
-  z-index: 1300;
-  pointer-events: none;
-}
-
-.timeline-toast {
-  pointer-events: auto;
-  display: flex;
-  align-items: flex-start;
-  gap: 0.55rem;
-  min-width: 14.5rem;
-  max-width: min(24rem, calc(100vw - 2rem));
-  border-radius: 12px;
-  border: 1px solid transparent;
-  padding: 0.55rem 0.65rem;
-  box-shadow: 0 14px 28px rgba(16, 24, 40, 0.2);
-  animation: fade-slide 160ms ease-out;
-}
-
-.timeline-toast.success {
-  border-color: #86efac;
-  background: #f0fdf4;
-  color: #05603a;
-}
-
-.timeline-toast.error {
-  border-color: #fda29b;
-  background: #fff6f5;
-  color: #912018;
-}
-
-.timeline-toast p {
-  margin: 0;
-  font-size: 0.84rem;
-}
-
-.timeline-toast-close {
-  align-self: center;
-  background: transparent;
-  border: 1px solid transparent;
-  color: inherit;
-  padding: 0.1rem 0.35rem;
-  line-height: 1;
-  font-size: 1rem;
-  border-radius: 6px;
-}
-
-.timeline-toast-close:hover {
-  background: rgba(0, 0, 0, 0.08);
 }
 
 .timeline-editor {
@@ -2303,6 +2356,11 @@ button.danger {
 
   .timeline-grid {
     --timeline-gutter-left: 3.8rem;
+  }
+
+  .week-timeline-grid {
+    --week-timeline-gutter-left: 58px;
+    --week-timeline-day-width: 154px;
   }
 
   .segmented-control {

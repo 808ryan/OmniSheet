@@ -29,6 +29,7 @@ import {
   timelineCreateEntry,
   timelineDeleteEntry,
   timelineListForDate,
+  timelineListForWeekView,
   timelineMonthSummary,
   timelineWeeklySummary,
   timelineUpdateEntry,
@@ -67,6 +68,7 @@ import type {
   SummaryLayoutState,
   TimelineDaySummary,
   TimelineEntry,
+  TimelineWeekView,
   TimelineWeeklySummary,
   TimelineWeeklySummaryNote,
   TranscriptionModelId,
@@ -77,7 +79,7 @@ import editIcon from './assets/icons/edit.svg'
 import microphoneIcon from './assets/icons/microphone.svg'
 import './App.css'
 
-type View = 'timeline' | 'codes' | 'settings' | 'diagnostics' | 'summary'
+type View = 'timeline' | 'week' | 'codes' | 'settings' | 'diagnostics' | 'summary'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 type CodeEditorSurface =
@@ -85,6 +87,7 @@ type CodeEditorSurface =
   | 'edit-engagement'
   | 'create-activity'
   | 'edit-activity'
+type TimelineSurface = 'day' | 'week'
 
 type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
 
@@ -250,35 +253,41 @@ type TimelineContextMenuState =
   | {
     kind: 'entry'
     entryId: string
+    createDate: string
     createStartMinute: number
     x: number
     y: number
   }
   | {
     kind: 'empty'
+    createDate: string
     createStartMinute: number
     x: number
     y: number
   }
 
-interface TimelineToast {
-  id: number
-  kind: 'success' | 'error'
-  message: string
-}
-
 interface TimelineDragState {
+  surface: TimelineSurface
   entryId: string
   pointerId: number
+  initialClientX: number
   initialClientY: number
   lockedLaneIndex: number
   pointerOffsetMinutes: number
   durationMinutes: number
+  originalDate: string
   originalStartMinute: number
   originalEndMinute: number
+  previewDate: string
   previewStartMinute: number
   previewEndMinute: number
   isDragging: boolean
+}
+
+interface PositionedWeekTimelineEntry extends PositionedTimelineEntry {
+  dayIndex: number
+  left: number
+  width: number
 }
 
 interface SummaryNotesModalState {
@@ -375,6 +384,9 @@ const TIMELINE_ACCENT_LIGHTEN_RATIO = 0.24
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
+const WEEK_TIMELINE_HEADER_HEIGHT = 64
+const WEEK_TIMELINE_GUTTER_LEFT = 68
+const WEEK_TIMELINE_DAY_WIDTH = 176
 const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
   startMinute: 0,
   endMinute: MINUTES_IN_DAY,
@@ -394,7 +406,8 @@ const PREFERRED_VOICE_MIME_TYPES = [
   'audio/wav',
 ] as const
 const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
-  { id: 'timeline', label: 'Timeline' },
+  { id: 'timeline', label: 'Day' },
+  { id: 'week', label: 'Week' },
   { id: 'codes', label: 'Codes' },
   { id: 'settings', label: 'Settings' },
   { id: 'diagnostics', label: 'Diagnostics' },
@@ -596,12 +609,14 @@ function App() {
   const [selectedDate, setSelectedDate] = useState(todayDate)
   const [visibleMonth, setVisibleMonth] = useState(() => monthKeyFromDate(todayDate))
   const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([])
+  const [weekTimeline, setWeekTimeline] = useState<TimelineWeekView | null>(null)
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
-  const [timelineToast, setTimelineToast] = useState<TimelineToast | null>(null)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
+  const [isWeekTimelineLoading, setIsWeekTimelineLoading] = useState(false)
+  const [weekTimelineError, setWeekTimelineError] = useState<string | null>(null)
   const [timelineLanePreferences, setTimelineLanePreferences] = useState(() => ({
     byEntryId: new Map<string, number>(),
     order: [] as string[],
@@ -613,12 +628,12 @@ function App() {
   const engagementNameInputRef = useRef<HTMLInputElement | null>(null)
   const activityEngagementSelectRef = useRef<HTMLSelectElement | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
+  const weekTimelineGridRef = useRef<HTMLDivElement | null>(null)
   const timelineContextMenuRef = useRef<HTMLDivElement | null>(null)
   const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
   const selectedDateRef = useRef(selectedDate)
-  const timelineToastIdRef = useRef(0)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
   const timelineEntriesRef = useRef<TimelineEntry[]>([])
   const suppressTimelineClickRef = useRef(false)
@@ -690,9 +705,19 @@ function App() {
     summaryLayoutColumnRefs.current = {}
   }, [clearSummaryLayoutDropAnimation, commitSummaryLayoutDragState, releaseSummaryLayoutPointerCapture])
 
+  const loadedTimelineEntries = useMemo(() => {
+    const byId = new Map<string, TimelineEntry>()
+    for (const entry of weekTimeline?.entries ?? []) {
+      byId.set(entry.id, entry)
+    }
+    for (const entry of timelineEntries) {
+      byId.set(entry.id, entry)
+    }
+    return [...byId.values()]
+  }, [timelineEntries, weekTimeline])
   const selectedEntry = useMemo(
-    () => timelineEntries.find((entry) => entry.id === selectedEntryId) ?? null,
-    [selectedEntryId, timelineEntries],
+    () => loadedTimelineEntries.find((entry) => entry.id === selectedEntryId) ?? null,
+    [loadedTimelineEntries, selectedEntryId],
   )
   const selectedEntryHasMultiEventSource = (selectedEntry?.sourceMessageEntryCount ?? 0) > 1
   const visibleMonthSummaries = useMemo(
@@ -712,6 +737,17 @@ function App() {
 
     return new Set(weeklySummary.days.map((day) => day.date))
   }, [activeView, weeklySummary])
+  const weekViewHighlightedDates = useMemo(() => {
+    if (activeView !== 'week' || !weekTimeline) {
+      return new Set<string>()
+    }
+
+    return new Set(weekTimeline.days.map((day) => day.date))
+  }, [activeView, weekTimeline])
+  const miniCalendarHighlightedDates = useMemo(
+    () => (activeView === 'week' ? weekViewHighlightedDates : summaryWeekHighlightedDates),
+    [activeView, summaryWeekHighlightedDates, weekViewHighlightedDates],
+  )
   const selectedSummaryNotesContext = useMemo(() => {
     if (!weeklySummary || !summaryNotesModal) {
       return null
@@ -937,6 +973,59 @@ function App() {
       (positionedEntry) => positionedEntry.entry.id === timelineDragState.entryId,
     ) ?? null
   }, [baselinePositionedTimelineEntries, timelineDragState])
+  const weekTimelineDays = useMemo(
+    () => weekTimeline?.days ?? buildWeekViewDays(selectedDate),
+    [selectedDate, weekTimeline],
+  )
+  const weekTimelineEntries = useMemo(
+    () => weekTimeline?.entries ?? [],
+    [weekTimeline],
+  )
+  const weekTimelineEntriesForLayout = useMemo(
+    () => applyDragPreviewToTimelineEntries(weekTimelineEntries, timelineDragState),
+    [timelineDragState, weekTimelineEntries],
+  )
+  const baselinePositionedWeekTimelineEntries = useMemo(
+    () => positionWeekTimelineEntries(
+      weekTimelineEntries,
+      weekTimelineDays,
+      timelineWindow,
+      timelinePositioningPreferences,
+      timelineDragState,
+    ),
+    [
+      timelineDragState,
+      timelinePositioningPreferences,
+      timelineWindow,
+      weekTimelineDays,
+      weekTimelineEntries,
+    ],
+  )
+  const previewPositionedWeekTimelineEntries = useMemo(
+    () => positionWeekTimelineEntries(
+      weekTimelineEntriesForLayout,
+      weekTimelineDays,
+      timelineWindow,
+      timelinePositioningPreferences,
+      timelineDragState,
+    ),
+    [
+      timelineDragState,
+      timelinePositioningPreferences,
+      timelineWindow,
+      weekTimelineDays,
+      weekTimelineEntriesForLayout,
+    ],
+  )
+  const draggedWeekEntryOriginPosition = useMemo(() => {
+    if (!timelineDragState?.isDragging) {
+      return null
+    }
+
+    return baselinePositionedWeekTimelineEntries.find(
+      (positionedEntry) => positionedEntry.entry.id === timelineDragState.entryId,
+    ) ?? null
+  }, [baselinePositionedWeekTimelineEntries, timelineDragState])
 
   const timelineHourMarks = useMemo(() => {
     const marks: number[] = []
@@ -1178,6 +1267,12 @@ function App() {
     return entries
   }, [])
 
+  const loadWeekTimeline = useCallback(async (date: string) => {
+    const value = await timelineListForWeekView({ date })
+    setWeekTimeline(value)
+    return value
+  }, [])
+
   const loadTimelineMonthSummary = useCallback(async (month: string) => {
     const rows = await timelineMonthSummary({ month })
     setMonthSummaryCache((previous) => ({
@@ -1317,7 +1412,7 @@ function App() {
   }, [hasVisibleMonthSummary, loadTimelineMonthSummary, tauriRuntime, visibleMonth])
 
   useEffect(() => {
-    if (selectedEntryId && timelineEntries.every((entry) => entry.id !== selectedEntryId)) {
+    if (selectedEntryId && loadedTimelineEntries.every((entry) => entry.id !== selectedEntryId)) {
       setSelectedEntryId(null)
       setEntryDraft(null)
     }
@@ -1326,11 +1421,11 @@ function App() {
       timelineContextMenu
       && timelineContextMenu.kind === 'entry'
       && timelineContextMenu.entryId
-      && timelineEntries.every((entry) => entry.id !== timelineContextMenu.entryId)
+      && loadedTimelineEntries.every((entry) => entry.id !== timelineContextMenu.entryId)
     ) {
       setTimelineContextMenu(null)
     }
-  }, [selectedEntryId, timelineContextMenu, timelineEntries])
+  }, [loadedTimelineEntries, selectedEntryId, timelineContextMenu])
 
   useEffect(() => {
     if (!timelineContextMenu) {
@@ -1383,6 +1478,41 @@ function App() {
   }, [activeView, diagnosticsFilter, loadDiagnostics, tauriRuntime])
 
   useEffect(() => {
+    if (!tauriRuntime || !hasInitializedRef.current || activeView !== 'week') {
+      return
+    }
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        setIsWeekTimelineLoading(true)
+        setWeekTimelineError(null)
+        await loadWeekTimeline(selectedDate)
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+        if (isAppCommandError(error)) {
+          setWeekTimelineError(
+            `${error.message} (command: ${error.command}, correlationId: ${error.correlationId})`,
+          )
+        } else {
+          setWeekTimelineError((error as Error).message)
+        }
+      } finally {
+        if (!cancelled) {
+          setIsWeekTimelineLoading(false)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeView, loadWeekTimeline, selectedDate, tauriRuntime])
+
+  useEffect(() => {
     if (!tauriRuntime || !hasInitializedRef.current || activeView !== 'summary') {
       return
     }
@@ -1418,7 +1548,7 @@ function App() {
   }, [activeView, loadWeeklySummary, selectedDate, tauriRuntime])
 
   useEffect(() => {
-    if (activeView !== 'timeline' && timelineContextMenu) {
+    if (activeView !== 'timeline' && activeView !== 'week' && timelineContextMenu) {
       setTimelineContextMenu(null)
     }
   }, [activeView, timelineContextMenu])
@@ -1635,28 +1765,15 @@ function App() {
     }
   }, [successMessage])
 
-  useEffect(() => {
-    if (!timelineToast) {
-      return
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setTimelineToast(null)
-    }, 4000)
-
-    return () => {
-      window.clearTimeout(timeoutId)
-    }
-  }, [timelineToast])
-
   const refreshAfterMutation = useCallback(async () => {
     await Promise.all([
       loadEngagements(),
       loadTimeline(selectedDate),
+      loadWeekTimeline(selectedDate),
       loadSettings(),
       loadWeeklySummary(selectedDate),
     ])
-  }, [loadEngagements, loadSettings, loadTimeline, loadWeeklySummary, selectedDate])
+  }, [loadEngagements, loadSettings, loadTimeline, loadWeekTimeline, loadWeeklySummary, selectedDate])
 
   const runAction = useCallback(
     async (action: () => Promise<void>, options?: RunActionOptions) => {
@@ -1671,13 +1788,7 @@ function App() {
           return
         }
 
-        if (isAppCommandError(error)) {
-          setErrorMessage(
-            `${error.message} (command: ${error.command}, correlationId: ${error.correlationId})`,
-          )
-        } else {
-          setErrorMessage((error as Error).message)
-        }
+        setErrorMessage(formatActionErrorMessage(error))
       } finally {
         setIsBusy(false)
       }
@@ -1696,72 +1807,168 @@ function App() {
     [],
   )
 
+  const updateSelectedDate = useCallback((
+    nextDate: string,
+    options?: {
+      clearSelection?: boolean
+    },
+  ) => {
+    if (nextDate === selectedDateRef.current) {
+      return
+    }
+
+    pendingAutoCenterDateRef.current = nextDate
+    selectedDateRef.current = nextDate
+    setSelectedDate(nextDate)
+    setVisibleMonth(monthKeyFromDate(nextDate))
+
+    if (options?.clearSelection === false) {
+      return
+    }
+
+    setSelectedEntryId(null)
+    setEntryDraft(null)
+    setTimelineContextMenu(null)
+    setTimelineDragStateWithRef(() => null)
+  }, [setTimelineDragStateWithRef])
+
   const commitTimelineDragDrop = useCallback(
     (dragState: TimelineDragState) => {
       const draggedEntry = timelineEntriesRef.current.find((entry) => entry.id === dragState.entryId) ?? null
       if (!draggedEntry) {
+        setTimelineDragStateWithRef(() => null)
         return
       }
 
       const hasMoved =
-        dragState.previewStartMinute !== dragState.originalStartMinute
+        dragState.previewDate !== dragState.originalDate
+        || dragState.previewStartMinute !== dragState.originalStartMinute
         || dragState.previewEndMinute !== dragState.originalEndMinute
       if (!hasMoved) {
+        setTimelineDragStateWithRef(() => null)
         return
       }
 
-      const monthKey = monthKeyFromDate(draggedEntry.date)
+      const previousMonthKey = monthKeyFromDate(draggedEntry.date)
+      const nextMonthKey = monthKeyFromDate(dragState.previewDate)
+      const previousSelectedDate = selectedDateRef.current
+      const previousTimelineEntries = timelineEntries
+      const previousWeekTimeline = weekTimeline
+      const previousEntryDraft = entryDraft
+      const refreshDate = dragState.previewDate
       const nextStartMinute = dragState.previewStartMinute
       const nextEndMinute = dragState.previewEndMinute
+      const nextDurationMinutes = Math.max(nextEndMinute - nextStartMinute, TIMELINE_DRAG_SNAP_MINUTES)
+      const optimisticEntry: TimelineEntry = {
+        ...draggedEntry,
+        date: refreshDate,
+        startMinute: nextStartMinute,
+        endMinute: nextEndMinute,
+        durationMinutes: nextDurationMinutes,
+      }
+      const optimisticWeekEntries = previousWeekTimeline
+        ? replaceTimelineEntry(previousWeekTimeline.entries, optimisticEntry)
+        : null
+      const nextDraftEndState = buildEntryDraftEndState(nextEndMinute)
 
-      void runAction(async () => {
-        await timelineUpdateEntry({
-          id: draggedEntry.id,
-          engagementId: draggedEntry.engagementId,
-          activityId: draggedEntry.activityId,
-          mode: 'drag',
-          date: draggedEntry.date,
-          startMinute: nextStartMinute,
-          endMinute: nextEndMinute,
-          description: draggedEntry.description,
-        })
-
-        setTimelineLanePreferences((previous) => {
-          const nextByEntryId = new Map(previous.byEntryId)
-          nextByEntryId.set(draggedEntry.id, dragState.lockedLaneIndex)
-          const nextOrder = [
-            ...previous.order.filter((entryId) => entryId !== draggedEntry.id),
-            draggedEntry.id,
-          ]
-          return {
-            byEntryId: nextByEntryId,
-            order: nextOrder,
-          }
-        })
-
-        await loadTimeline(selectedDateRef.current)
-        await loadWeeklySummary(selectedDateRef.current)
-        invalidateMonthSummaries([monthKey])
-        const nextDraftEndState = buildEntryDraftEndState(nextEndMinute)
-        setEntryDraft((previous) =>
-          previous && previous.id === draggedEntry.id
-            ? {
-                ...previous,
-                startTime: minuteToTimeInput(nextStartMinute),
-                endTime: nextDraftEndState.endTime,
-                preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
-              }
-            : previous,
-        )
-        setSuccessMessage('Timeline entry moved.')
+      setIsBusy(true)
+      setErrorMessage(null)
+      setSuccessMessage(null)
+      setTimelineLanePreferences((previous) => {
+        const nextByEntryId = new Map(previous.byEntryId)
+        nextByEntryId.set(draggedEntry.id, dragState.lockedLaneIndex)
+        const nextOrder = [
+          ...previous.order.filter((entryId) => entryId !== draggedEntry.id),
+          draggedEntry.id,
+        ]
+        return {
+          byEntryId: nextByEntryId,
+          order: nextOrder,
+        }
       })
+      updateSelectedDate(refreshDate, { clearSelection: false })
+      if (previousWeekTimeline && optimisticWeekEntries) {
+        setWeekTimeline({
+          ...previousWeekTimeline,
+          entries: optimisticWeekEntries,
+        })
+      }
+      if (dragState.surface === 'week' && optimisticWeekEntries) {
+        setTimelineEntries(filterTimelineEntriesForDate(optimisticWeekEntries, refreshDate))
+      } else {
+        setTimelineEntries((previous) => replaceTimelineEntry(previous, optimisticEntry))
+      }
+      setEntryDraft((previous) =>
+        previous && previous.id === draggedEntry.id
+          ? {
+              ...previous,
+              date: refreshDate,
+              startTime: minuteToTimeInput(nextStartMinute),
+              endTime: nextDraftEndState.endTime,
+              preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
+            }
+          : previous,
+      )
+      setTimelineDragStateWithRef(() => null)
+
+      void (async () => {
+        try {
+          await timelineUpdateEntry({
+            id: draggedEntry.id,
+            engagementId: draggedEntry.engagementId,
+            activityId: draggedEntry.activityId,
+            mode: 'drag',
+            date: refreshDate,
+            startMinute: nextStartMinute,
+            endMinute: nextEndMinute,
+            description: draggedEntry.description,
+          })
+        } catch (error) {
+          if (previousSelectedDate !== refreshDate) {
+            updateSelectedDate(previousSelectedDate, { clearSelection: false })
+          }
+          if (previousWeekTimeline) {
+            setWeekTimeline(previousWeekTimeline)
+          }
+          if (dragState.surface === 'week' && previousWeekTimeline) {
+            setTimelineEntries(
+              filterTimelineEntriesForDate(previousWeekTimeline.entries, previousSelectedDate),
+            )
+          } else {
+            setTimelineEntries(previousTimelineEntries)
+          }
+          setEntryDraft(previousEntryDraft)
+          setErrorMessage(formatActionErrorMessage(error))
+          setIsBusy(false)
+          return
+        }
+
+        invalidateMonthSummaries([previousMonthKey, nextMonthKey])
+
+        try {
+          await Promise.all([
+            loadTimeline(refreshDate),
+            loadWeekTimeline(refreshDate),
+            loadWeeklySummary(refreshDate),
+          ])
+        } catch (error) {
+          setErrorMessage(formatActionErrorMessage(error))
+        } finally {
+          setIsBusy(false)
+        }
+      })()
     },
     [
+      entryDraft,
       invalidateMonthSummaries,
       loadTimeline,
+      loadWeekTimeline,
       loadWeeklySummary,
-      runAction,
       setTimelineLanePreferences,
+      setTimelineDragStateWithRef,
+      timelineEntries,
+      updateSelectedDate,
+      weekTimeline,
     ],
   )
 
@@ -1828,6 +2035,7 @@ function App() {
 
         await Promise.allSettled([
           loadTimeline(refreshDate),
+          loadWeekTimeline(refreshDate),
           loadWeeklySummary(refreshDate),
         ])
       } catch (error) {
@@ -1855,6 +2063,7 @@ function App() {
     [
       invalidateMonthSummaries,
       loadTimeline,
+      loadWeekTimeline,
       loadWeeklySummary,
       trimSubmissionQueue,
     ],
@@ -2227,8 +2436,8 @@ function App() {
   }, [selectedDate])
 
   useEffect(() => {
-    timelineEntriesRef.current = timelineEntries
-  }, [timelineEntries])
+    timelineEntriesRef.current = loadedTimelineEntries
+  }, [loadedTimelineEntries])
 
   useEffect(() => {
     const presentEntryIds = new Set(timelineEntries.map((entry) => entry.id))
@@ -2275,11 +2484,13 @@ function App() {
       if (current.isDragging) {
         suppressTimelineClickRef.current = true
       }
-      setTimelineDragStateWithRef(() => null)
 
       if (shouldCommit && current.isDragging) {
         commitTimelineDragDrop(current)
+        return
       }
+
+      setTimelineDragStateWithRef(() => null)
     }
 
     const handlePointerMove = (event: PointerEvent) => {
@@ -2288,7 +2499,7 @@ function App() {
         return
       }
 
-      const grid = timelineGridRef.current
+      const grid = current.surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
       if (!grid) {
         return
       }
@@ -2300,7 +2511,19 @@ function App() {
         return
       }
 
-      const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+      const pointerSlot = current.surface === 'week'
+        ? resolveWeekTimelinePointerSlot(
+          event.clientX,
+          event.clientY,
+          grid,
+          weekTimelineDays,
+          timelineWindow,
+        )
+        : {
+          date: current.originalDate,
+          minute: clientYToTimelineMinute(event.clientY, grid, timelineWindow),
+        }
+      const pointerMinute = pointerSlot.minute
       const rawStartMinute = pointerMinute - current.pointerOffsetMinutes
       const snappedStartMinute = snapMinute(rawStartMinute, TIMELINE_DRAG_SNAP_MINUTES)
       const clampedStartMinute = clampStartMinuteForDuration(
@@ -2317,6 +2540,7 @@ function App() {
 
         if (
           previous.isDragging
+          && previous.previewDate === pointerSlot.date
           && previous.previewStartMinute === clampedStartMinute
           && previous.previewEndMinute === nextEndMinute
         ) {
@@ -2326,6 +2550,7 @@ function App() {
         return {
           ...previous,
           isDragging: true,
+          previewDate: pointerSlot.date,
           previewStartMinute: clampedStartMinute,
           previewEndMinute: nextEndMinute,
         }
@@ -2370,6 +2595,7 @@ function App() {
     commitTimelineDragDrop,
     setTimelineDragStateWithRef,
     timelineWindow,
+    weekTimelineDays,
   ])
 
   useEffect(() => {
@@ -2566,29 +2792,31 @@ function App() {
   }
 
   const onSetDate = (nextDate: string) => {
-    if (nextDate === selectedDate) {
-      return
-    }
-
-    pendingAutoCenterDateRef.current = nextDate
-    setSelectedDate(nextDate)
-    setVisibleMonth(monthKeyFromDate(nextDate))
-    setSelectedEntryId(null)
-    setEntryDraft(null)
-    setTimelineContextMenu(null)
-    setTimelineDragStateWithRef(() => null)
+    updateSelectedDate(nextDate)
   }
 
   const onJumpToToday = () => {
     onSetDate(formatDate(new Date()))
   }
 
+  const onJumpToThisWeek = () => {
+    updateSelectedDate(formatDate(new Date()))
+  }
+
   const onSelectCalendarDate = (nextDate: string) => {
     onSetDate(nextDate)
   }
 
-  const onSelectEntry = (entry: TimelineEntry) => {
+  const onSelectEntry = (
+    entry: TimelineEntry,
+    options?: {
+      syncSelectedDate?: boolean
+    },
+  ) => {
     setTimelineContextMenu(null)
+    if (options?.syncSelectedDate) {
+      updateSelectedDate(entry.date, { clearSelection: false })
+    }
     setSelectedEntryId(entry.id)
     setEntryDraft(buildEntryDraft(entry))
   }
@@ -2602,15 +2830,30 @@ function App() {
     onSelectEntry(entry)
   }
 
-  const onStartTimelineDrag = (
-    event: ReactPointerEvent<HTMLButtonElement>,
-    entry: TimelineEntry,
-  ) => {
-    if (event.button !== 0 || isBusy || isTimelineLoading || isTimelineDeleteBusy) {
+  const onSelectWeekTimelineBlock = (entry: TimelineEntry) => {
+    if (suppressTimelineClickRef.current) {
+      suppressTimelineClickRef.current = false
       return
     }
 
-    const grid = timelineGridRef.current
+    onSelectEntry(entry, { syncSelectedDate: true })
+  }
+
+  const onStartTimelineDrag = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    entry: TimelineEntry,
+    surface: TimelineSurface = 'day',
+  ) => {
+    if (
+      event.button !== 0
+      || isBusy
+      || isTimelineDeleteBusy
+      || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
+    ) {
+      return
+    }
+
+    const grid = surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
     if (!grid) {
       return
     }
@@ -2619,7 +2862,15 @@ function App() {
       entry.endMinute - entry.startMinute,
       TIMELINE_DRAG_SNAP_MINUTES,
     )
-    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    const pointerMinute = surface === 'week'
+      ? resolveWeekTimelinePointerSlot(
+        event.clientX,
+        event.clientY,
+        grid,
+        weekTimelineDays,
+        timelineWindow,
+      ).minute
+      : clientYToTimelineMinute(event.clientY, grid, timelineWindow)
     const pointerOffsetMinutes = Math.min(
       durationMinutes,
       Math.max(0, pointerMinute - entry.startMinute),
@@ -2627,20 +2878,26 @@ function App() {
 
     event.preventDefault()
     suppressTimelineClickRef.current = false
-    onSelectEntry(entry)
-    const lockedLaneIndex = baselinePositionedTimelineEntries.find(
+    onSelectEntry(entry, { syncSelectedDate: surface === 'week' })
+    const lockedLaneIndex = (
+      surface === 'week' ? baselinePositionedWeekTimelineEntries : baselinePositionedTimelineEntries
+    ).find(
       (positionedEntry) => positionedEntry.entry.id === entry.id,
     )?.laneIndex ?? 0
 
     setTimelineDragStateWithRef(() => ({
+      surface,
       entryId: entry.id,
       pointerId: event.pointerId,
+      initialClientX: event.clientX,
       initialClientY: event.clientY,
       lockedLaneIndex,
       pointerOffsetMinutes,
       durationMinutes,
+      originalDate: entry.date,
       originalStartMinute: entry.startMinute,
       originalEndMinute: entry.endMinute,
+      previewDate: entry.date,
       previewStartMinute: entry.startMinute,
       previewEndMinute: entry.endMinute,
       isDragging: false,
@@ -2650,25 +2907,45 @@ function App() {
   const onOpenTimelineContextMenu = (
     event: ReactMouseEvent<HTMLButtonElement>,
     entry: TimelineEntry,
+    surface: TimelineSurface = 'day',
   ) => {
     event.preventDefault()
 
-    if (isBusy || isTimelineLoading || isTimelineDeleteBusy) {
+    if (
+      isBusy
+      || isTimelineDeleteBusy
+      || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
+    ) {
       return
     }
 
     event.stopPropagation()
-    onSelectEntry(entry)
+    onSelectEntry(entry, { syncSelectedDate: surface === 'week' })
 
-    const grid = timelineGridRef.current
-    const pointerMinute = grid
-      ? clientYToTimelineMinute(event.clientY, grid, timelineWindow)
-      : entry.startMinute
+    const grid = surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
+    const pointerMinute = surface === 'week'
+      ? (
+        grid
+          ? resolveWeekTimelinePointerSlot(
+            event.clientX,
+            event.clientY,
+            grid,
+            weekTimelineDays,
+            timelineWindow,
+          ).minute
+          : entry.startMinute
+      )
+      : (
+        grid
+          ? clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+          : entry.startMinute
+      )
     const { startMinute } = resolveManualTimelineCreateWindow(pointerMinute, timelineWindow)
     const position = clampTimelineContextMenuPosition(event.clientX, event.clientY, 'entry')
     setTimelineContextMenu({
       kind: 'entry',
       entryId: entry.id,
+      createDate: entry.date,
       createStartMinute: startMinute,
       x: position.x,
       y: position.y,
@@ -2676,18 +2953,21 @@ function App() {
   }
 
   const onCreateTimelineEntryAtMinute = useCallback(
-    (anchorMinute: number) => {
+    (date: string, anchorMinute: number) => {
       const { startMinute, endMinute } = resolveManualTimelineCreateWindow(anchorMinute, timelineWindow)
 
       void runAction(async () => {
-        const date = selectedDateRef.current
         const result = await timelineCreateEntry({
           date,
           startMinute,
           endMinute,
         })
-        const entries = await loadTimeline(date)
-        await loadWeeklySummary(date)
+        updateSelectedDate(date, { clearSelection: false })
+        const [entries] = await Promise.all([
+          loadTimeline(date),
+          loadWeekTimeline(date),
+          loadWeeklySummary(date),
+        ])
         invalidateMonthSummaries([monthKeyFromDate(date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
         if (createdEntry) {
@@ -2698,7 +2978,7 @@ function App() {
         setSuccessMessage('Timeline entry created.')
       })
     },
-    [invalidateMonthSummaries, loadTimeline, loadWeeklySummary, runAction, timelineWindow],
+    [invalidateMonthSummaries, loadTimeline, loadWeekTimeline, loadWeeklySummary, runAction, timelineWindow, updateSelectedDate],
   )
 
   const onCreateTimelineEntryFromContextMenu = () => {
@@ -2706,15 +2986,24 @@ function App() {
       return
     }
 
+    const date = timelineContextMenu.createDate
     const startMinute = timelineContextMenu.createStartMinute
     setTimelineContextMenu(null)
-    onCreateTimelineEntryAtMinute(startMinute)
+    onCreateTimelineEntryAtMinute(date, startMinute)
   }
 
-  const onOpenTimelineEmptyContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+  const onOpenTimelineEmptyContextMenu = (
+    event: ReactMouseEvent<HTMLDivElement>,
+    surface: TimelineSurface = 'day',
+  ) => {
     event.preventDefault()
 
-    if (isBusy || isTimelineLoading || isTimelineDeleteBusy || timelineDragState?.isDragging) {
+    if (
+      isBusy
+      || isTimelineDeleteBusy
+      || timelineDragState?.isDragging
+      || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
+    ) {
       return
     }
 
@@ -2722,24 +3011,44 @@ function App() {
       return
     }
 
-    const grid = timelineGridRef.current
+    const grid = surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
     if (!grid) {
       return
     }
 
-    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
-    const { startMinute } = resolveManualTimelineCreateWindow(pointerMinute, timelineWindow)
+    const pointerSlot = surface === 'week'
+      ? resolveWeekTimelinePointerSlot(
+        event.clientX,
+        event.clientY,
+        grid,
+        weekTimelineDays,
+        timelineWindow,
+      )
+      : {
+        date: selectedDateRef.current,
+        minute: clientYToTimelineMinute(event.clientY, grid, timelineWindow),
+      }
+    const { startMinute } = resolveManualTimelineCreateWindow(pointerSlot.minute, timelineWindow)
     const position = clampTimelineContextMenuPosition(event.clientX, event.clientY, 'empty')
     setTimelineContextMenu({
       kind: 'empty',
+      createDate: pointerSlot.date,
       createStartMinute: startMinute,
       x: position.x,
       y: position.y,
     })
   }
 
-  const onDoubleClickTimelineEmptySpace = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (isBusy || isTimelineLoading || isTimelineDeleteBusy || timelineDragState?.isDragging) {
+  const onDoubleClickTimelineEmptySpace = (
+    event: ReactMouseEvent<HTMLDivElement>,
+    surface: TimelineSurface = 'day',
+  ) => {
+    if (
+      isBusy
+      || isTimelineDeleteBusy
+      || timelineDragState?.isDragging
+      || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
+    ) {
       return
     }
 
@@ -2747,14 +3056,25 @@ function App() {
       return
     }
 
-    const grid = timelineGridRef.current
+    const grid = surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
     if (!grid) {
       return
     }
 
     event.preventDefault()
-    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
-    onCreateTimelineEntryAtMinute(pointerMinute)
+    const pointerSlot = surface === 'week'
+      ? resolveWeekTimelinePointerSlot(
+        event.clientX,
+        event.clientY,
+        grid,
+        weekTimelineDays,
+        timelineWindow,
+      )
+      : {
+        date: selectedDateRef.current,
+        minute: clientYToTimelineMinute(event.clientY, grid, timelineWindow),
+      }
+    onCreateTimelineEntryAtMinute(pointerSlot.date, pointerSlot.minute)
   }
 
   const onSaveEntryDraft = (event: FormEvent<HTMLFormElement>) => {
@@ -2788,6 +3108,7 @@ function App() {
       const previousEntryDate = selectedEntry?.date ?? selectedDate
       const previousMonthKey = monthKeyFromDate(previousEntryDate)
       const nextMonthKey = monthKeyFromDate(entryDraft.date)
+      const refreshDate = entryDraft.date
 
       await timelineUpdateEntry({
         id: entryDraft.id,
@@ -2800,14 +3121,19 @@ function App() {
         description: entryDraft.description,
       })
 
-      await loadTimeline(selectedDate)
-      await loadWeeklySummary(selectedDate)
+      updateSelectedDate(refreshDate, { clearSelection: false })
+      await Promise.all([
+        loadTimeline(refreshDate),
+        loadWeekTimeline(refreshDate),
+        loadWeeklySummary(refreshDate),
+      ])
       invalidateMonthSummaries([previousMonthKey, nextMonthKey])
       const nextDraftEndState = buildEntryDraftEndState(endMinute)
       setEntryDraft((previous) =>
         previous && previous.id === entryDraft.id
           ? {
               ...previous,
+              date: refreshDate,
               startTime: minuteToTimeInput(startMinute),
               endTime: nextDraftEndState.endTime,
               preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
@@ -2824,20 +3150,26 @@ function App() {
     }
 
     void (async () => {
-      const existingEntry = timelineEntries.find((entry) => entry.id === id) ?? null
-      const entryDate = existingEntry?.date ?? selectedDate
+      const existingEntry = loadedTimelineEntries.find((entry) => entry.id === id) ?? null
+      const entryDate = existingEntry?.date ?? selectedDateRef.current
       const monthKey = monthKeyFromDate(entryDate)
-      const previousScrollTop = timelineGridRef.current?.scrollTop ?? 0
+      const activeGrid = activeView === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
+      const previousScrollTop = activeGrid?.scrollTop ?? 0
 
       try {
         setIsTimelineDeleteBusy(true)
+        setErrorMessage(null)
+        setSuccessMessage(null)
         setTimelineContextMenu(null)
         await timelineDeleteEntry(id)
-        await loadTimeline(selectedDate)
-        await loadWeeklySummary(selectedDate)
+        await Promise.all([
+          loadTimeline(selectedDateRef.current),
+          loadWeekTimeline(selectedDateRef.current),
+          loadWeeklySummary(selectedDateRef.current),
+        ])
 
         window.requestAnimationFrame(() => {
-          const grid = timelineGridRef.current
+          const grid = activeView === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
           if (!grid) {
             return
           }
@@ -2847,19 +3179,9 @@ function App() {
         })
 
         invalidateMonthSummaries([monthKey])
-        timelineToastIdRef.current += 1
-        setTimelineToast({
-          id: timelineToastIdRef.current,
-          kind: 'success',
-          message: 'Timeline entry deleted.',
-        })
+        setSuccessMessage('Timeline entry deleted.')
       } catch (error) {
-        timelineToastIdRef.current += 1
-        setTimelineToast({
-          id: timelineToastIdRef.current,
-          kind: 'error',
-          message: extractErrorMessage(error),
-        })
+        setErrorMessage(formatActionErrorMessage(error))
       } finally {
         setIsTimelineDeleteBusy(false)
       }
@@ -3277,6 +3599,210 @@ function App() {
     })
   }
 
+  const weekTimelineRangeLabel = useMemo(() => {
+    const startDate = weekTimelineDays[0]?.date ?? selectedDate
+    const endDate = weekTimelineDays[6]?.date ?? selectedDate
+    return formatTimelineWeekRange(startDate, endDate)
+  }, [selectedDate, weekTimelineDays])
+
+  const onSelectView = (view: View) => {
+    if (view === 'week' && activeView !== 'week') {
+      setSelectedEntryId(null)
+      setEntryDraft(null)
+      setTimelineContextMenu(null)
+      setTimelineDragStateWithRef(() => null)
+    }
+
+    setActiveView(view)
+  }
+
+  const timelineEditorPanel = (
+    <aside className="timeline-editor">
+      <h3>Edit Entry</h3>
+      {entryDraft ? (
+        <form className="stack" onSubmit={onSaveEntryDraft}>
+          <label>
+            Date
+            <input
+              type="date"
+              value={entryDraft.date}
+              onChange={(event) =>
+                setEntryDraft((previous) =>
+                  previous
+                    ? {
+                        ...previous,
+                        date: event.target.value,
+                      }
+                    : previous,
+                )
+              }
+            />
+          </label>
+          <label>
+            Engagement
+            <select
+              value={entryDraft.engagementId}
+              onChange={(event) =>
+                setEntryDraft((previous) =>
+                  previous
+                    ? {
+                        ...previous,
+                        engagementId: event.target.value,
+                        activityId: '',
+                      }
+                    : previous,
+                )
+              }
+            >
+              <option value="">Uncategorized</option>
+              {engagements.map((engagement) => (
+                <option key={engagement.id} value={engagement.id}>
+                  {formatEntityDisplayLabel(engagement.name, engagement.code)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Activity
+            <select
+              value={entryDraft.activityId}
+              onChange={(event) =>
+                setEntryDraft((previous) =>
+                  previous
+                    ? {
+                        ...previous,
+                        activityId: event.target.value,
+                      }
+                    : previous,
+                )
+              }
+            >
+              <option value="">Uncategorized</option>
+              {availableActivities.map((activity) => (
+                <option key={activity.id} value={activity.id}>
+                  {formatEntityDisplayLabel(activity.name, activity.code)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Start
+            <input
+              type="time"
+              step={60}
+              value={entryDraft.startTime}
+              onChange={(event) =>
+                setEntryDraft((previous) =>
+                  previous
+                    ? {
+                        ...previous,
+                        startTime: event.target.value,
+                      }
+                    : previous,
+                )
+              }
+            />
+          </label>
+          <label>
+            End
+            <input
+              type="time"
+              step={60}
+              value={entryDraft.endTime}
+              onChange={(event) =>
+                setEntryDraft((previous) =>
+                  previous
+                    ? {
+                        ...previous,
+                        endTime: event.target.value,
+                        preserveEndOfDay: false,
+                      }
+                    : previous,
+                )
+              }
+            />
+          </label>
+          <label>
+            Description
+            <textarea
+              rows={4}
+              value={entryDraft.description}
+              onChange={(event) =>
+                setEntryDraft((previous) =>
+                  previous
+                    ? {
+                        ...previous,
+                        description: event.target.value,
+                      }
+                    : previous,
+                )
+              }
+            />
+          </label>
+          <div className="timeline-entry-actions">
+            <button type="submit" disabled={isBusy}>
+              Save Entry
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => onDeleteTimelineEntry(entryDraft.id)}
+              disabled={isBusy || isTimelineDeleteBusy}
+            >
+              Delete Entry
+            </button>
+          </div>
+        </form>
+      ) : (
+        <p>Select a timeline block to edit engagement, activity, and timing.</p>
+      )}
+
+      {selectedEntry ? (
+        <div className="entry-metadata">
+          <p>
+            Confidence: {(selectedEntry.confidence * 100).toFixed(0)}%
+          </p>
+          <p>Source: {selectedEntry.source}</p>
+          {selectedEntry.source !== 'manual' ? (
+            <p>User Submission: {selectedEntry.userSubmissionText || 'Unavailable'}</p>
+          ) : null}
+          <p>Description: {selectedEntry.description}</p>
+          {selectedEntry.modelUsedLabel ? (
+            <p>Model Used: {selectedEntry.modelUsedLabel}</p>
+          ) : null}
+          {selectedEntry.source === 'voice' && selectedEntry.transcriptionModelUsedLabel ? (
+            <p>Transcription Model: {selectedEntry.transcriptionModelUsedLabel}</p>
+          ) : null}
+          {selectedEntry.durationDefaulted ? (
+            <p>
+              Duration: Defaulted to {selectedEntry.durationMinutes} minutes (not specified in
+              message).
+            </p>
+          ) : null}
+          {selectedEntry.fallbackSummary ? (
+            <p>Fallback: {selectedEntry.fallbackSummary}</p>
+          ) : null}
+          {selectedEntryHasMultiEventSource ? (
+            <p>
+              Capture provenance: Event {selectedEntry.sourceMessageEntryIndex ?? '?'} of{' '}
+              {selectedEntry.sourceMessageEntryCount} from one message.
+            </p>
+          ) : null}
+          {selectedEntryHasMultiEventSource || selectedEntry.warningFlags.length > 0 ? (
+            <div className="warning-row">
+              {selectedEntryHasMultiEventSource ? (
+                <span className="warning-badge provenance">Multi-Event Source</span>
+              ) : null}
+              {selectedEntry.warningFlags.map((warningType) => (
+                <WarningBadge key={`${selectedEntry.id}-${warningType}`} type={warningType} />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </aside>
+  )
+
   if (!tauriRuntime) {
     return (
       <div className="runtime-shell">
@@ -3420,7 +3946,7 @@ function App() {
               visibleMonth={visibleMonth}
               todayDate={todayDate}
               daysWithEntries={visibleMonthDaysWithEntries}
-              highlightedDates={summaryWeekHighlightedDates}
+              highlightedDates={miniCalendarHighlightedDates}
               isLoading={monthSummaryLoadingMonth === visibleMonth}
               errorMessage={visibleMonthSummaryError}
               onVisibleMonthChange={setVisibleMonth}
@@ -3438,7 +3964,7 @@ function App() {
                 role="tab"
                 aria-selected={activeView === view.id}
                 className={activeView === view.id ? 'active' : ''}
-                onClick={() => setActiveView(view.id)}
+                onClick={() => onSelectView(view.id)}
               >
                 {view.label}
               </button>
@@ -3474,7 +4000,7 @@ function App() {
             ) : null}
           </div>
 
-          <div className={`app-content ${activeView === 'timeline' ? 'timeline-active' : 'wide-active'}`}>
+          <div className={`app-content ${activeView === 'timeline' || activeView === 'week' ? 'timeline-active' : 'wide-active'}`}>
 
         {activeView === 'timeline' ? (
           <section className="panel timeline-panel">
@@ -3677,190 +4203,258 @@ function App() {
                 </div>
               </div>
 
-              <aside className="timeline-editor">
-                <h3>Edit Entry</h3>
-                {entryDraft ? (
-                  <form className="stack" onSubmit={onSaveEntryDraft}>
-                    <label>
-                      Date
-                      <input
-                        type="date"
-                        value={entryDraft.date}
-                        onChange={(event) =>
-                          setEntryDraft((previous) =>
-                            previous
-                              ? {
-                                  ...previous,
-                                  date: event.target.value,
-                                }
-                              : previous,
-                          )
-                        }
-                      />
-                    </label>
-                    <label>
-                      Engagement
-                      <select
-                        value={entryDraft.engagementId}
-                        onChange={(event) =>
-                          setEntryDraft((previous) =>
-                            previous
-                              ? {
-                                  ...previous,
-                                  engagementId: event.target.value,
-                                  activityId: '',
-                                }
-                              : previous,
-                          )
-                        }
-                      >
-                        <option value="">Uncategorized</option>
-                        {engagements.map((engagement) => (
-                          <option key={engagement.id} value={engagement.id}>
-                            {formatEntityDisplayLabel(engagement.name, engagement.code)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Activity
-                      <select
-                        value={entryDraft.activityId}
-                        onChange={(event) =>
-                          setEntryDraft((previous) =>
-                            previous
-                              ? {
-                                  ...previous,
-                                  activityId: event.target.value,
-                                }
-                              : previous,
-                          )
-                        }
-                      >
-                        <option value="">Uncategorized</option>
-                        {availableActivities.map((activity) => (
-                          <option key={activity.id} value={activity.id}>
-                            {formatEntityDisplayLabel(activity.name, activity.code)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Start
-                      <input
-                        type="time"
-                        step={60}
-                        value={entryDraft.startTime}
-                        onChange={(event) =>
-                          setEntryDraft((previous) =>
-                            previous
-                              ? {
-                                  ...previous,
-                                  startTime: event.target.value,
-                                }
-                              : previous,
-                          )
-                        }
-                      />
-                    </label>
-                    <label>
-                      End
-                      <input
-                        type="time"
-                        step={60}
-                        value={entryDraft.endTime}
-                        onChange={(event) =>
-                          setEntryDraft((previous) =>
-                            previous
-                              ? {
-                                  ...previous,
-                                  endTime: event.target.value,
-                                  preserveEndOfDay: false,
-                                }
-                              : previous,
-                          )
-                        }
-                      />
-                    </label>
-                    <label>
-                      Description
-                      <textarea
-                        rows={4}
-                        value={entryDraft.description}
-                        onChange={(event) =>
-                          setEntryDraft((previous) =>
-                            previous
-                              ? {
-                                  ...previous,
-                                  description: event.target.value,
-                                }
-                              : previous,
-                          )
-                        }
-                      />
-                    </label>
-                    <div className="timeline-entry-actions">
-                      <button type="submit" disabled={isBusy}>
-                        Save Entry
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => onDeleteTimelineEntry(entryDraft.id)}
-                        disabled={isBusy || isTimelineDeleteBusy}
-                      >
-                        Delete Entry
-                      </button>
-                    </div>
-                  </form>
-                ) : (
-                  <p>Select a timeline block to edit engagement, activity, and timing.</p>
-                )}
+              {timelineEditorPanel}
+            </div>
+          </section>
+        ) : null}
 
-                {selectedEntry ? (
-                  <div className="entry-metadata">
-                    <p>
-                      Confidence: {(selectedEntry.confidence * 100).toFixed(0)}%
-                    </p>
-                    <p>Source: {selectedEntry.source}</p>
-                    {selectedEntry.source !== 'manual' ? (
-                      <p>User Submission: {selectedEntry.userSubmissionText || 'Unavailable'}</p>
-                    ) : null}
-                    <p>Description: {selectedEntry.description}</p>
-                    {selectedEntry.modelUsedLabel ? (
-                      <p>Model Used: {selectedEntry.modelUsedLabel}</p>
-                    ) : null}
-                    {selectedEntry.source === 'voice' && selectedEntry.transcriptionModelUsedLabel ? (
-                      <p>Transcription Model: {selectedEntry.transcriptionModelUsedLabel}</p>
-                    ) : null}
-                    {selectedEntry.durationDefaulted ? (
-                      <p>
-                        Duration: Defaulted to {selectedEntry.durationMinutes} minutes (not specified in
-                        message).
-                      </p>
-                    ) : null}
-                    {selectedEntry.fallbackSummary ? (
-                      <p>Fallback: {selectedEntry.fallbackSummary}</p>
-                    ) : null}
-                    {selectedEntryHasMultiEventSource ? (
-                      <p>
-                        Capture provenance: Event {selectedEntry.sourceMessageEntryIndex ?? '?'} of{' '}
-                        {selectedEntry.sourceMessageEntryCount} from one message.
-                      </p>
-                    ) : null}
-                    {selectedEntryHasMultiEventSource || selectedEntry.warningFlags.length > 0 ? (
-                      <div className="warning-row">
-                        {selectedEntryHasMultiEventSource ? (
-                          <span className="warning-badge provenance">Multi-Event Source</span>
-                        ) : null}
-                        {selectedEntry.warningFlags.map((warningType) => (
-                          <WarningBadge key={`${selectedEntry.id}-${warningType}`} type={warningType} />
-                        ))}
-                      </div>
-                    ) : null}
+        {activeView === 'week' ? (
+          <section className="panel timeline-panel week-panel">
+            <div className="timeline-toolbar">
+              <div>
+                <h2 className="timeline-date-heading">
+                  <strong>{weekTimelineRangeLabel}</strong>
+                </h2>
+                <p className="timeline-range">Sunday - Saturday</p>
+              </div>
+              <div className="timeline-controls">
+                <button
+                  type="button"
+                  className="timeline-arrow-button"
+                  aria-label="Previous week"
+                  onClick={() => onSetDate(shiftDate(selectedDate, -7))}
+                  disabled={isBusy || isWeekTimelineLoading}
+                >
+                  {'<'}
+                </button>
+                <button
+                  type="button"
+                  onClick={onJumpToThisWeek}
+                  disabled={isBusy || isWeekTimelineLoading}
+                >
+                  This Week
+                </button>
+                <button
+                  type="button"
+                  className="timeline-arrow-button"
+                  aria-label="Next week"
+                  onClick={() => onSetDate(shiftDate(selectedDate, 7))}
+                  disabled={isBusy || isWeekTimelineLoading}
+                >
+                  {'>'}
+                </button>
+              </div>
+            </div>
+
+            {weekTimelineError ? (
+              <p className="mini-calendar-error">{weekTimelineError}</p>
+            ) : null}
+
+            <div className={`timeline-layout week-timeline-layout ${selectedEntry ? 'has-editor' : 'full-width'}`}>
+              <div
+                className={`timeline-grid week-timeline-grid ${(timelineDragState?.isDragging && timelineDragState.surface === 'week') ? 'dragging' : ''}`}
+                role="list"
+                aria-label="Week timeline entries"
+                aria-busy={isWeekTimelineLoading}
+                ref={weekTimelineGridRef}
+              >
+                <div
+                  className="week-timeline-surface"
+                  style={{
+                    minWidth: `${WEEK_TIMELINE_GUTTER_LEFT + (WEEK_TIMELINE_DAY_WIDTH * weekTimelineDays.length)}px`,
+                    minHeight: `${timelineCanvasHeight + WEEK_TIMELINE_HEADER_HEIGHT}px`,
+                  }}
+                >
+                  <div className="week-timeline-header">
+                    <div className="week-timeline-header-spacer" aria-hidden="true" />
+                    {weekTimelineDays.map((day) => {
+                      const isSelectedDay = day.date === selectedDate
+                      const isToday = day.date === todayDate
+                      const headerClassName = [
+                        'week-timeline-day-header',
+                        isSelectedDay ? 'is-selected' : '',
+                        isToday ? 'is-today' : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')
+
+                      return (
+                        <div key={day.date} className={headerClassName}>
+                          {formatWeekTimelineDayLabel(day.date)}
+                        </div>
+                      )
+                    })}
                   </div>
-                ) : null}
-              </aside>
+
+                  <div
+                    className="week-timeline-body"
+                    style={{ minHeight: `${timelineCanvasHeight}px` }}
+                    onContextMenu={(event) => onOpenTimelineEmptyContextMenu(event, 'week')}
+                    onDoubleClick={(event) => onDoubleClickTimelineEmptySpace(event, 'week')}
+                  >
+                    {timelineHourMarks.map((minute) => (
+                      <div
+                        key={`week-hour-${minute}`}
+                        className="timeline-hour-mark week-timeline-hour-mark"
+                        style={{
+                          top:
+                            TIMELINE_CANVAS_TOP_PADDING
+                            + (minute - timelineWindow.startMinute) * PIXELS_PER_MINUTE,
+                        }}
+                      >
+                        <span>{minuteToLabel(minute)}</span>
+                      </div>
+                    ))}
+
+                    {weekTimelineDays.map((day, dayIndex) => (
+                      <div
+                        key={`week-column-${day.date}`}
+                        className={`week-timeline-day-column ${day.date === selectedDate ? 'is-selected' : ''}`}
+                        style={{
+                          left: `${WEEK_TIMELINE_GUTTER_LEFT + (dayIndex * WEEK_TIMELINE_DAY_WIDTH)}px`,
+                          width: `${WEEK_TIMELINE_DAY_WIDTH}px`,
+                          top: '0px',
+                          minHeight: `${timelineCanvasHeight}px`,
+                        }}
+                        aria-hidden="true"
+                      />
+                    ))}
+
+                    <div className="week-timeline-entry-layer">
+                      {draggedWeekEntryOriginPosition && timelineDragState?.surface === 'week'
+                        ? (() => {
+                          const ghostEntry = draggedWeekEntryOriginPosition.entry
+                          const ghostColor = resolveTimelineBlockColor(
+                            ghostEntry,
+                            activityColorById,
+                            engagementColorById,
+                          )
+                          const ghostLabel = buildTimelineBlockLabel(
+                            ghostEntry,
+                            draggedWeekEntryOriginPosition.widthPercent,
+                            draggedWeekEntryOriginPosition.height,
+                          )
+                          const ghostReviewLabel = getTimelineBlockReviewLabel(ghostEntry.warningFlags)
+                          const ghostAccentColor = deriveTimelineAccentColor(ghostColor)
+                          const ghostNeedsReview = ghostReviewLabel !== null
+
+                          return (
+                            <div
+                              className={`timeline-block drag-origin-ghost tier-${ghostLabel.tier} ${ghostNeedsReview ? 'needs-review' : ''}`}
+                              style={{
+                                top: draggedWeekEntryOriginPosition.top,
+                                height: draggedWeekEntryOriginPosition.height,
+                                left: draggedWeekEntryOriginPosition.left,
+                                width: draggedWeekEntryOriginPosition.width,
+                                '--timeline-block-color': ghostColor,
+                                '--timeline-block-accent': ghostAccentColor,
+                                backgroundColor: ghostColor,
+                                color: colorForBackground(ghostColor),
+                              } as CSSProperties}
+                              aria-hidden="true"
+                            >
+                              <TimelineBlockContent label={ghostLabel.label} />
+                            </div>
+                          )
+                        })()
+                        : null}
+                      {previewPositionedWeekTimelineEntries.map((positionedEntry) => {
+                        const { entry } = positionedEntry
+                        const blockColor = resolveTimelineBlockColor(
+                          entry,
+                          activityColorById,
+                          engagementColorById,
+                        )
+                        const blockLabel = buildTimelineBlockLabel(
+                          entry,
+                          positionedEntry.widthPercent,
+                          positionedEntry.height,
+                        )
+                        const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
+                        const needsReview = reviewLabel !== null
+                        const isDragPreview =
+                          timelineDragState?.isDragging
+                          && timelineDragState.entryId === entry.id
+                        const textColor = colorForBackground(blockColor)
+                        const blockAccentColor = deriveTimelineAccentColor(blockColor)
+
+                        if (isDragPreview) {
+                          return (
+                            <div
+                              key={entry.id}
+                              className={`timeline-block drag-preview tier-${blockLabel.tier}`}
+                              style={{
+                                top: positionedEntry.top,
+                                height: positionedEntry.height,
+                                left: positionedEntry.left,
+                                width: positionedEntry.width,
+                                '--timeline-block-color': blockColor,
+                                '--timeline-block-accent': blockAccentColor,
+                                borderColor: blockColor,
+                              } as CSSProperties}
+                              aria-hidden="true"
+                            >
+                              <TimelineBlockContent label={blockLabel.label} />
+                            </div>
+                          )
+                        }
+
+                        const blockClassName = [
+                          'timeline-block',
+                          `tier-${blockLabel.tier}`,
+                          selectedEntryId === entry.id ? 'selected' : '',
+                          needsReview ? 'needs-review' : '',
+                        ]
+                          .filter((className) => className.length > 0)
+                          .join(' ')
+
+                        return (
+                          <button
+                            type="button"
+                            key={entry.id}
+                            className={blockClassName}
+                            style={{
+                              top: positionedEntry.top,
+                              height: positionedEntry.height,
+                              left: positionedEntry.left,
+                              width: positionedEntry.width,
+                              '--timeline-block-color': blockColor,
+                              '--timeline-block-accent': blockAccentColor,
+                              backgroundColor: blockColor,
+                              color: textColor,
+                            } as CSSProperties}
+                            onClick={() => onSelectWeekTimelineBlock(entry)}
+                            onPointerDown={(event) => onStartTimelineDrag(event, entry, 'week')}
+                            onContextMenu={(event) => {
+                              if (timelineDragState?.isDragging) {
+                                event.preventDefault()
+                                return
+                              }
+                              event.stopPropagation()
+                              onOpenTimelineContextMenu(event, entry, 'week')
+                            }}
+                            title={buildTimelineBlockTitle(
+                              blockLabel.fullLabel,
+                              entry.description,
+                              reviewLabel,
+                            )}
+                            aria-label={buildTimelineBlockAriaLabel(
+                              blockLabel.fullLabel,
+                              entry.description,
+                              reviewLabel,
+                            )}
+                            aria-haspopup="menu"
+                          >
+                            <TimelineBlockContent label={blockLabel.label} />
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {selectedEntry ? timelineEditorPanel : null}
             </div>
           </section>
         ) : null}
@@ -4743,22 +5337,6 @@ function App() {
         </div>,
         document.body,
       ) : null}
-      {timelineToast ? createPortal(
-        <div className="timeline-toast-stack" role="status" aria-live="polite">
-          <div key={timelineToast.id} className={`timeline-toast ${timelineToast.kind}`}>
-            <p>{timelineToast.message}</p>
-            <button
-              type="button"
-              className="timeline-toast-close"
-              onClick={() => setTimelineToast(null)}
-              aria-label="Dismiss notification"
-            >
-              x
-            </button>
-          </div>
-        </div>,
-        document.body,
-      ) : null}
       {summaryLayoutModal && summaryLayoutDraft ? createPortal(
         <div
           className="summary-layout-editor-backdrop"
@@ -5562,6 +6140,14 @@ function extractErrorMessage(error: unknown): string {
   return 'Unknown error'
 }
 
+function formatActionErrorMessage(error: unknown): string {
+  if (isAppCommandError(error)) {
+    return `${error.message} (command: ${error.command}, correlationId: ${error.correlationId})`
+  }
+
+  return extractErrorMessage(error)
+}
+
 function formatCodesMutationError(error: unknown): string {
   const rawMessage = extractErrorMessage(error).trim()
   const normalized = rawMessage.toLowerCase()
@@ -5630,6 +6216,46 @@ function formatMonthDay(date: string): string {
     month: '2-digit',
     day: '2-digit',
   }).format(value)
+}
+
+function buildWeekViewDays(anchorDate: string): TimelineWeekView['days'] {
+  const anchor = new Date(`${anchorDate}T00:00:00`)
+  const weekStart = new Date(anchor)
+  weekStart.setDate(anchor.getDate() - anchor.getDay())
+
+  return Array.from({ length: 7 }, (_, dayIndex) => {
+    const value = new Date(weekStart)
+    value.setDate(weekStart.getDate() + dayIndex)
+    return {
+      date: formatDate(value),
+    }
+  })
+}
+
+function formatTimelineWeekRange(startDate: string, endDate: string): string {
+  const startValue = new Date(`${startDate}T00:00:00`)
+  const endValue = new Date(`${endDate}T00:00:00`)
+  const startLabel = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+  }).format(startValue)
+  const endLabel = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(endValue)
+
+  return `${startLabel} - ${endLabel}`
+}
+
+function formatWeekTimelineDayLabel(date: string): string {
+  const value = new Date(`${date}T00:00:00`)
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    day: 'numeric',
+  })
+    .format(value)
+    .replace(',', '')
 }
 
 function formatTimelineHeaderDate(date: string): TimelineHeaderDate {
@@ -5754,12 +6380,43 @@ function applyDragPreviewToTimelineEntries(
     entry.id === dragState.entryId
       ? {
           ...entry,
+          date: dragState.previewDate,
           startMinute: dragState.previewStartMinute,
           endMinute: dragState.previewEndMinute,
           durationMinutes: previewDuration,
         }
       : entry,
   )
+}
+
+function replaceTimelineEntry(
+  entries: TimelineEntry[],
+  nextEntry: TimelineEntry,
+): TimelineEntry[] {
+  const nextEntries = entries.map((entry) => entry.id === nextEntry.id ? nextEntry : entry)
+
+  return nextEntries.sort((left, right) => {
+    if (left.date !== right.date) {
+      return left.date.localeCompare(right.date)
+    }
+
+    if (left.startMinute !== right.startMinute) {
+      return left.startMinute - right.startMinute
+    }
+
+    if (left.endMinute !== right.endMinute) {
+      return left.endMinute - right.endMinute
+    }
+
+    return left.id.localeCompare(right.id)
+  })
+}
+
+function filterTimelineEntriesForDate(
+  entries: TimelineEntry[],
+  date: string,
+): TimelineEntry[] {
+  return entries.filter((entry) => entry.date === date)
 }
 
 function snapMinute(value: number, increment: number): number {
@@ -5798,6 +6455,36 @@ function clientYToTimelineMinute(
   const pixelsPerMinute = PIXELS_PER_MINUTE > 0 ? PIXELS_PER_MINUTE : 1
 
   return timelineWindow.startMinute + (relativeY / pixelsPerMinute)
+}
+
+function resolveWeekTimelinePointerSlot(
+  clientX: number,
+  clientY: number,
+  grid: HTMLDivElement,
+  days: TimelineWeekView['days'],
+  timelineWindow: TimelineWindow,
+): {
+  date: string
+  dayIndex: number
+  minute: number
+} {
+  const gridRect = grid.getBoundingClientRect()
+  const relativeX = clientX - gridRect.left + grid.scrollLeft - WEEK_TIMELINE_GUTTER_LEFT
+  const unclampedDayIndex = Math.floor(relativeX / WEEK_TIMELINE_DAY_WIDTH)
+  const dayIndex = Math.min(Math.max(unclampedDayIndex, 0), Math.max(days.length - 1, 0))
+  const relativeY =
+    clientY
+    - gridRect.top
+    + grid.scrollTop
+    - WEEK_TIMELINE_HEADER_HEIGHT
+    - TIMELINE_CANVAS_TOP_PADDING
+  const minute = timelineWindow.startMinute + (relativeY / PIXELS_PER_MINUTE)
+
+  return {
+    date: days[dayIndex]?.date ?? days[0]?.date ?? formatDate(new Date()),
+    dayIndex,
+    minute,
+  }
 }
 
 function positionTimelineEntries(
@@ -5977,6 +6664,47 @@ function positionTimelineEntries(
       })
     }
   }
+
+  return positionedEntries
+}
+
+function positionWeekTimelineEntries(
+  entries: TimelineEntry[],
+  days: TimelineWeekView['days'],
+  timelineWindow: TimelineWindow,
+  options?: PositionTimelineEntriesOptions,
+  dragState?: TimelineDragState | null,
+): PositionedWeekTimelineEntry[] {
+  const positionedEntries: PositionedWeekTimelineEntry[] = []
+
+  days.forEach((day, dayIndex) => {
+    const dayEntries = entries.filter((entry) => entry.date === day.date)
+    const dayPositions = positionTimelineEntries(
+      dayEntries,
+      timelineWindow,
+      {
+        ...options,
+        ...(dragState?.isDragging && dragState.previewDate === day.date
+          ? {
+            lockedEntryId: dragState.entryId,
+            lockedLaneIndex: dragState.lockedLaneIndex,
+          }
+          : {}),
+      },
+    )
+
+    dayPositions.forEach((positionedEntry) => {
+      positionedEntries.push({
+        ...positionedEntry,
+        dayIndex,
+        left:
+          WEEK_TIMELINE_GUTTER_LEFT
+          + (dayIndex * WEEK_TIMELINE_DAY_WIDTH)
+          + ((positionedEntry.leftPercent / 100) * WEEK_TIMELINE_DAY_WIDTH),
+        width: (positionedEntry.widthPercent / 100) * WEEK_TIMELINE_DAY_WIDTH,
+      })
+    })
+  })
 
   return positionedEntries
 }

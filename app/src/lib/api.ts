@@ -25,6 +25,7 @@ import type {
   TimelineDaySummary,
   TimelineCreateInput,
   TimelineEntry,
+  TimelineWeekView,
   TimelineWeeklySummary,
   TimelineMonthSummaryInput,
   TimelineUpdateInput,
@@ -238,6 +239,10 @@ export function voiceRequestMicrophonePermission(): Promise<MicrophonePermission
 
 export function timelineListForDate(input: DateInput): Promise<TimelineEntry[]> {
   return invokeCommand<TimelineEntry[]>('timeline_list_for_date', { input })
+}
+
+export function timelineListForWeekView(input: DateInput): Promise<TimelineWeekView> {
+  return invokeCommand<TimelineWeekView>('timeline_list_for_week_view', { input })
 }
 
 export function timelineMonthSummary(

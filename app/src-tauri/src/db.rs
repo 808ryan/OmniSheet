@@ -3,7 +3,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Params};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
@@ -930,44 +930,18 @@ pub fn recompute_overlap_warnings(conn: &Connection, date: &str) -> AppResult<Ve
     Ok(warnings)
 }
 
-pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<TimelineEntry>> {
-    let mut statement = conn.prepare(
-        r#"
-      SELECT
-        te.id,
-        te.date,
-        te.start_minute,
-        te.end_minute,
-        te.duration_minutes,
-        te.description,
-        COALESCE(te.user_submission_text, rm.raw_text, '') AS user_submission_text,
-        te.source,
-        te.confidence,
-        te.engagement_id,
-        te.activity_id,
-        e.code,
-        e.name,
-        a.code,
-        a.name,
-        te.used_activity_fallback,
-        te.used_temporal_fallback,
-        te.duration_defaulted,
-        te.fallback_summary,
-        te.source_message_entry_index,
-        te.source_message_entry_count,
-        rm.open_ai_model,
-        rm.transcription_model
-      FROM timesheet_entries te
-      LEFT JOIN engagements e ON e.id = te.engagement_id
-      LEFT JOIN activities a ON a.id = te.activity_id
-      LEFT JOIN raw_messages rm ON rm.id = te.raw_message_id
-      WHERE te.date = ?1
-      ORDER BY te.start_minute
-    "#,
-    )?;
+fn collect_timeline_entries<P>(
+    conn: &Connection,
+    query: &str,
+    params: P,
+) -> AppResult<Vec<TimelineEntry>>
+where
+    P: Params,
+{
+    let mut statement = conn.prepare(query)?;
 
     let mut entries = statement
-        .query_map(params![date], |row| {
+        .query_map(params, |row| {
             let model_used = row
                 .get::<_, Option<String>>(21)?
                 .and_then(|value| OpenAiModelId::from_api_name(&value));
@@ -1012,6 +986,88 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
     }
 
     Ok(entries)
+}
+
+pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<TimelineEntry>> {
+    collect_timeline_entries(
+        conn,
+        r#"
+      SELECT
+        te.id,
+        te.date,
+        te.start_minute,
+        te.end_minute,
+        te.duration_minutes,
+        te.description,
+        COALESCE(te.user_submission_text, rm.raw_text, '') AS user_submission_text,
+        te.source,
+        te.confidence,
+        te.engagement_id,
+        te.activity_id,
+        e.code,
+        e.name,
+        a.code,
+        a.name,
+        te.used_activity_fallback,
+        te.used_temporal_fallback,
+        te.duration_defaulted,
+        te.fallback_summary,
+        te.source_message_entry_index,
+        te.source_message_entry_count,
+        rm.open_ai_model,
+        rm.transcription_model
+      FROM timesheet_entries te
+      LEFT JOIN engagements e ON e.id = te.engagement_id
+      LEFT JOIN activities a ON a.id = te.activity_id
+      LEFT JOIN raw_messages rm ON rm.id = te.raw_message_id
+      WHERE te.date = ?1
+      ORDER BY te.start_minute, te.end_minute, te.id
+    "#,
+        params![date],
+    )
+}
+
+pub fn list_timeline_entries_for_date_range(
+    conn: &Connection,
+    start_date: &str,
+    end_date_exclusive: &str,
+) -> AppResult<Vec<TimelineEntry>> {
+    collect_timeline_entries(
+        conn,
+        r#"
+      SELECT
+        te.id,
+        te.date,
+        te.start_minute,
+        te.end_minute,
+        te.duration_minutes,
+        te.description,
+        COALESCE(te.user_submission_text, rm.raw_text, '') AS user_submission_text,
+        te.source,
+        te.confidence,
+        te.engagement_id,
+        te.activity_id,
+        e.code,
+        e.name,
+        a.code,
+        a.name,
+        te.used_activity_fallback,
+        te.used_temporal_fallback,
+        te.duration_defaulted,
+        te.fallback_summary,
+        te.source_message_entry_index,
+        te.source_message_entry_count,
+        rm.open_ai_model,
+        rm.transcription_model
+      FROM timesheet_entries te
+      LEFT JOIN engagements e ON e.id = te.engagement_id
+      LEFT JOIN activities a ON a.id = te.activity_id
+      LEFT JOIN raw_messages rm ON rm.id = te.raw_message_id
+      WHERE te.date >= ?1 AND te.date < ?2
+      ORDER BY te.date, te.start_minute, te.end_minute, te.id
+    "#,
+        params![start_date, end_date_exclusive],
+    )
 }
 
 pub fn list_timeline_day_summaries_for_month(
@@ -1641,8 +1697,8 @@ mod tests {
     use super::{
         current_unix_timestamp, get_app_setting, insert_manual_timeline_entry, insert_raw_message,
         insert_timesheet_entry, list_engagements, list_timeline_entries,
-        list_timeline_weekly_summary, run_migrations, upsert_activity, upsert_app_setting,
-        upsert_engagement,
+        list_timeline_entries_for_date_range, list_timeline_weekly_summary, run_migrations,
+        upsert_activity, upsert_app_setting, upsert_engagement,
     };
     use crate::models::{
         ActivityUpsertInput, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
@@ -1980,6 +2036,36 @@ mod tests {
         assert_eq!(saved_entry.confidence, 1.0);
         assert_eq!(saved_entry.source_message_entry_index, None);
         assert_eq!(saved_entry.source_message_entry_count, None);
+    }
+
+    #[test]
+    fn timeline_entries_for_range_include_week_entries_in_date_order() {
+        let connection = test_connection();
+
+        insert_manual_timeline_entry(&connection, "2026-03-30", 540, 570, 30, "Monday task")
+            .expect("first entry should save");
+        insert_manual_timeline_entry(&connection, "2026-03-29", 600, 630, 30, "Sunday task")
+            .expect("second entry should save");
+        insert_manual_timeline_entry(&connection, "2026-04-01", 480, 510, 30, "Wednesday task")
+            .expect("third entry should save");
+
+        let entries =
+            list_timeline_entries_for_date_range(&connection, "2026-03-29", "2026-04-05")
+                .expect("range entries should load");
+
+        let ordered_descriptions = entries
+            .iter()
+            .map(|entry| (entry.date.as_str(), entry.description.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered_descriptions,
+            vec![
+                ("2026-03-29", "Sunday task"),
+                ("2026-03-30", "Monday task"),
+                ("2026-04-01", "Wednesday task"),
+            ]
+        );
     }
 
     #[test]
