@@ -427,6 +427,21 @@ pub struct TimelineWeeklySummaryNote {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TimelineWeekView {
+    pub week_start_date: String,
+    pub week_end_date: String,
+    pub days: Vec<TimelineWeekViewDay>,
+    pub entries: Vec<TimelineEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineWeekViewDay {
+    pub date: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SummaryExportResult {
     pub file_path: String,
     pub file_name: String,

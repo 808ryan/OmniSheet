@@ -58,6 +58,7 @@ pub fn run() {
             commands::activity_upsert,
             commands::activity_delete,
             commands::timeline_list_for_date,
+            commands::timeline_list_for_week_view,
             commands::timeline_month_summary,
             commands::timeline_weekly_summary,
             commands::summary_export_weekly_excel,
