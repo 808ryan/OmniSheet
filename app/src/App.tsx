@@ -943,6 +943,10 @@ function App() {
     () => applyDragPreviewToTimelineEntries(timelineEntries, timelineDragState),
     [timelineDragState, timelineEntries],
   )
+  const timelineDayTotalMinutes = useMemo(
+    () => sumTimelineEntryDurations(timelineEntriesForLayout),
+    [timelineEntriesForLayout],
+  )
   const previewPositionedTimelineEntries = useMemo(
     () => positionTimelineEntries(
       timelineEntriesForLayout,
@@ -984,6 +988,10 @@ function App() {
   const weekTimelineEntriesForLayout = useMemo(
     () => applyDragPreviewToTimelineEntries(weekTimelineEntries, timelineDragState),
     [timelineDragState, weekTimelineEntries],
+  )
+  const weekTimelineDayTotalMinutes = useMemo(
+    () => buildTimelineDayTotals(weekTimelineEntriesForLayout, weekTimelineDays),
+    [weekTimelineDays, weekTimelineEntriesForLayout],
   )
   const baselinePositionedWeekTimelineEntries = useMemo(
     () => positionWeekTimelineEntries(
@@ -4011,6 +4019,10 @@ function App() {
                 </h2>
                 <p className="timeline-range">
                   {timelineHeaderDate.weekday}
+                  <span className="timeline-range-separator" aria-hidden="true">•</span>
+                  <span className="timeline-range-total">
+                    {formatTimelineHoursCompact(timelineDayTotalMinutes)} total
+                  </span>
                 </p>
               </div>
               <div className="timeline-controls">
@@ -4280,7 +4292,12 @@ function App() {
 
                       return (
                         <div key={day.date} className={headerClassName}>
-                          {formatWeekTimelineDayLabel(day.date)}
+                          <span className="week-timeline-day-label">
+                            {formatWeekTimelineDayLabel(day.date)}
+                          </span>
+                          <span className="week-timeline-day-total">
+                            {formatTimelineHoursCompact(weekTimelineDayTotalMinutes.get(day.date) ?? 0)}
+                          </span>
                         </div>
                       )
                     })}
@@ -6206,6 +6223,14 @@ function formatMinutesAsHours(minutes: number): string {
   return (minutes / 60).toFixed(2)
 }
 
+function formatTimelineHoursCompact(minutes: number): string {
+  const formattedHours = (minutes / 60)
+    .toFixed(2)
+    .replace(/(?:\.0+|(\.\d*?)0+)$/, '$1')
+
+  return `${formattedHours}h`
+}
+
 function formatMonthDay(date: string): string {
   const [yearToken, monthToken, dayToken] = date.split('-')
   const year = Number(yearToken)
@@ -6387,6 +6412,23 @@ function applyDragPreviewToTimelineEntries(
         }
       : entry,
   )
+}
+
+function sumTimelineEntryDurations(entries: TimelineEntry[]): number {
+  return entries.reduce((total, entry) => total + entry.durationMinutes, 0)
+}
+
+function buildTimelineDayTotals(
+  entries: TimelineEntry[],
+  days: TimelineWeekView['days'],
+): Map<string, number> {
+  const totalsByDate = new Map(days.map((day) => [day.date, 0]))
+
+  for (const entry of entries) {
+    totalsByDate.set(entry.date, (totalsByDate.get(entry.date) ?? 0) + entry.durationMinutes)
+  }
+
+  return totalsByDate
 }
 
 function replaceTimelineEntry(
