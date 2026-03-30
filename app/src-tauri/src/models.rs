@@ -450,6 +450,13 @@ pub struct SummaryExportResult {
     pub auto_open_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryExportWeeklyExcelInput {
+    pub date: String,
+    pub layout_preset: SummaryLayoutPreset,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SummaryLayoutFieldKey {

@@ -263,6 +263,11 @@ export interface SummaryLayoutPreset {
   columns: SummaryLayoutColumn[]
 }
 
+export interface SummaryExportWeeklyExcelInput {
+  date: string
+  layoutPreset: SummaryLayoutPreset
+}
+
 export interface SummaryLayoutState {
   version: number
   selectedPresetId: string
