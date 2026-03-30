@@ -18,6 +18,7 @@ import type {
   OpenAiModelId,
   SettingsStatus,
   SummaryExportResult,
+  SummaryExportWeeklyExcelInput,
   SummaryLayoutState,
   TranscribeAudioInput,
   TranscribeAudioResult,
@@ -255,7 +256,7 @@ export function timelineWeeklySummary(input: DateInput): Promise<TimelineWeeklyS
   return invokeCommand<TimelineWeeklySummary>('timeline_weekly_summary', { input })
 }
 
-export function summaryExportWeeklyExcel(input: DateInput): Promise<SummaryExportResult> {
+export function summaryExportWeeklyExcel(input: SummaryExportWeeklyExcelInput): Promise<SummaryExportResult> {
   return invokeCommand<SummaryExportResult>('summary_export_weekly_excel', { input })
 }
 

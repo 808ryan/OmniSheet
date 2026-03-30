@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -16,14 +16,15 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::macos_permissions;
 use crate::models::{
-    ActivityUpsertInput, ApiKeyInput, CaptureSourceId, CodeContext, ContextActivity,
+    Activity, ActivityUpsertInput, ApiKeyInput, CaptureSourceId, CodeContext, ContextActivity,
     ContextEngagement, DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput,
     DiagnosticsRecordInput, Engagement, EngagementUpsertInput, IdInput, IdResult, InterpretResult,
     InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
     MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId, SettingsSetOpenAiModelInput,
     SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
-    SummaryExportResult, SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset,
-    SummaryLayoutState, TimelineCreateInput, TimelineDaySummary, TimelineEntry,
+    SummaryExportResult, SummaryExportWeeklyExcelInput, SummaryLayoutColumn,
+    SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput,
+    TimelineDaySummary, TimelineEntry,
     TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
     TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput,
     TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
@@ -539,208 +540,477 @@ fn choose_export_file_path(downloads_dir: &Path, base_name: &str) -> PathBuf {
     }
 }
 
-fn write_weekly_hours_sheet(
-    workbook: &mut Workbook,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryExportSheetColumnKind {
+    Field(SummaryLayoutFieldKey),
+    DayHours(usize),
+    DayNotes(usize),
+    FreeText,
+    RowTotal,
+}
+
+#[derive(Debug, Clone)]
+struct SummaryExportSheetColumn {
+    header: String,
+    kind: SummaryExportSheetColumnKind,
+    width: u16,
+    wrap_text: bool,
+}
+
+fn normalize_summary_layout_preset_for_export(
+    preset: SummaryLayoutPreset,
+) -> Result<SummaryLayoutPreset, String> {
+    let normalized_state = normalize_summary_layout_state(SummaryLayoutState {
+        version: SUMMARY_LAYOUT_STATE_VERSION,
+        selected_preset_id: preset.id.clone(),
+        presets: vec![preset],
+    })?;
+
+    normalized_state
+        .presets
+        .into_iter()
+        .next()
+        .ok_or_else(|| "At least one summary layout preset is required.".to_string())
+}
+
+fn summary_layout_field_label(field_key: SummaryLayoutFieldKey) -> &'static str {
+    match field_key {
+        SummaryLayoutFieldKey::EngagementCode => "Engagement Code",
+        SummaryLayoutFieldKey::EngagementName => "Engagement Name",
+        SummaryLayoutFieldKey::ClientName => "Client Name",
+        SummaryLayoutFieldKey::EngagementTags => "Engagement Tags",
+        SummaryLayoutFieldKey::EngagementUsage => "Engagement Usage",
+        SummaryLayoutFieldKey::ActivityCode => "Activity Code",
+        SummaryLayoutFieldKey::ActivityName => "Activity Name",
+        SummaryLayoutFieldKey::ActivityTags => "Activity Tags",
+        SummaryLayoutFieldKey::ActivityUsage => "Activity Usage",
+    }
+}
+
+fn summary_layout_field_width(field_key: SummaryLayoutFieldKey) -> u16 {
+    match field_key {
+        SummaryLayoutFieldKey::EngagementCode => 16,
+        SummaryLayoutFieldKey::ActivityCode => 14,
+        SummaryLayoutFieldKey::ActivityName => 24,
+        SummaryLayoutFieldKey::EngagementName => 24,
+        SummaryLayoutFieldKey::ClientName => 20,
+        SummaryLayoutFieldKey::EngagementTags => 22,
+        SummaryLayoutFieldKey::EngagementUsage => 28,
+        SummaryLayoutFieldKey::ActivityTags => 22,
+        SummaryLayoutFieldKey::ActivityUsage => 28,
+    }
+}
+
+fn summary_layout_field_wraps(field_key: SummaryLayoutFieldKey) -> bool {
+    matches!(
+        field_key,
+        SummaryLayoutFieldKey::EngagementTags
+            | SummaryLayoutFieldKey::EngagementUsage
+            | SummaryLayoutFieldKey::ActivityTags
+            | SummaryLayoutFieldKey::ActivityUsage
+    )
+}
+
+fn summary_day_date<'a>(summary: &'a TimelineWeeklySummary, day_index: usize) -> &'a str {
+    summary
+        .days
+        .get(day_index)
+        .map(|day| day.date.as_str())
+        .unwrap_or(summary.week_start_date.as_str())
+}
+
+fn summary_day_notes_header(summary: &TimelineWeeklySummary, day_index: usize) -> String {
+    format!(
+        "{} Notes",
+        summary_day_header(day_index, summary_day_date(summary, day_index))
+    )
+}
+
+fn summary_day_hours_header(summary: &TimelineWeeklySummary, day_index: usize) -> String {
+    format!(
+        "{} Hours",
+        summary_day_header(day_index, summary_day_date(summary, day_index))
+    )
+}
+
+fn build_summary_export_hours_sheet_columns(
     summary: &TimelineWeeklySummary,
+    preset: &SummaryLayoutPreset,
+) -> Vec<SummaryExportSheetColumn> {
+    let mut columns = Vec::new();
+
+    for column in &preset.columns {
+        match column {
+            SummaryLayoutColumn::Field { field_key, .. } => columns.push(SummaryExportSheetColumn {
+                header: summary_layout_field_label(*field_key).to_string(),
+                kind: SummaryExportSheetColumnKind::Field(*field_key),
+                width: summary_layout_field_width(*field_key),
+                wrap_text: summary_layout_field_wraps(*field_key),
+            }),
+            SummaryLayoutColumn::Day { day_index, .. } => {
+                let resolved_day_index = *day_index as usize;
+                columns.push(SummaryExportSheetColumn {
+                    header: summary_day_header(
+                        resolved_day_index,
+                        summary_day_date(summary, resolved_day_index),
+                    ),
+                    kind: SummaryExportSheetColumnKind::DayHours(resolved_day_index),
+                    width: 12,
+                    wrap_text: false,
+                });
+            }
+            SummaryLayoutColumn::FreeText { label, .. } => columns.push(SummaryExportSheetColumn {
+                header: label.clone(),
+                kind: SummaryExportSheetColumnKind::FreeText,
+                width: 18,
+                wrap_text: true,
+            }),
+        }
+    }
+
+    columns.push(SummaryExportSheetColumn {
+        header: "Row Total".to_string(),
+        kind: SummaryExportSheetColumnKind::RowTotal,
+        width: 12,
+        wrap_text: false,
+    });
+
+    columns
+}
+
+fn build_summary_export_hours_and_notes_sheet_columns(
+    summary: &TimelineWeeklySummary,
+    preset: &SummaryLayoutPreset,
+) -> Vec<SummaryExportSheetColumn> {
+    let mut columns = Vec::new();
+    let mut column_index = 0usize;
+
+    while column_index < preset.columns.len() {
+        match &preset.columns[column_index] {
+            SummaryLayoutColumn::Field { field_key, .. } => {
+                columns.push(SummaryExportSheetColumn {
+                    header: summary_layout_field_label(*field_key).to_string(),
+                    kind: SummaryExportSheetColumnKind::Field(*field_key),
+                    width: summary_layout_field_width(*field_key),
+                    wrap_text: summary_layout_field_wraps(*field_key),
+                });
+            }
+            SummaryLayoutColumn::Day { day_index, .. } => {
+                let resolved_day_index = *day_index as usize;
+                columns.push(SummaryExportSheetColumn {
+                    header: summary_day_hours_header(summary, resolved_day_index),
+                    kind: SummaryExportSheetColumnKind::DayHours(resolved_day_index),
+                    width: 12,
+                    wrap_text: false,
+                });
+
+                if matches!(
+                    preset.columns.get(column_index + 1),
+                    Some(SummaryLayoutColumn::FreeText { .. })
+                ) {
+                    columns.push(SummaryExportSheetColumn {
+                        header: summary_day_notes_header(summary, resolved_day_index),
+                        kind: SummaryExportSheetColumnKind::DayNotes(resolved_day_index),
+                        width: 42,
+                        wrap_text: true,
+                    });
+                    column_index += 1;
+                } else {
+                    columns.push(SummaryExportSheetColumn {
+                        header: summary_day_notes_header(summary, resolved_day_index),
+                        kind: SummaryExportSheetColumnKind::DayNotes(resolved_day_index),
+                        width: 42,
+                        wrap_text: true,
+                    });
+                }
+            }
+            SummaryLayoutColumn::FreeText { label, .. } => {
+                columns.push(SummaryExportSheetColumn {
+                    header: label.clone(),
+                    kind: SummaryExportSheetColumnKind::FreeText,
+                    width: 18,
+                    wrap_text: true,
+                });
+            }
+        }
+
+        column_index += 1;
+    }
+
+    columns.push(SummaryExportSheetColumn {
+        header: "Row Total".to_string(),
+        kind: SummaryExportSheetColumnKind::RowTotal,
+        width: 12,
+        wrap_text: false,
+    });
+
+    columns
+}
+
+fn normalize_export_display_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(|candidate| candidate.trim())
+        .filter(|candidate| !candidate.is_empty())
+        .map(|candidate| candidate.to_string())
+}
+
+fn format_summary_code_value_for_export(code: Option<&str>, is_uncategorized: bool) -> String {
+    if is_uncategorized {
+        return "UNCAT".to_string();
+    }
+
+    normalize_export_display_text(code).unwrap_or_default()
+}
+
+fn resolve_summary_export_field_value(
+    field_key: SummaryLayoutFieldKey,
+    row: &crate::models::TimelineWeeklySummaryRow,
+    engagement_by_id: &HashMap<String, Engagement>,
+    activity_by_id: &HashMap<String, Activity>,
+) -> String {
+    let engagement = row
+        .engagement_id
+        .as_ref()
+        .and_then(|engagement_id| engagement_by_id.get(engagement_id));
+    let activity = row
+        .activity_id
+        .as_ref()
+        .and_then(|activity_id| activity_by_id.get(activity_id));
+
+    match field_key {
+        SummaryLayoutFieldKey::EngagementCode => {
+            format_summary_code_value_for_export(row.engagement_code.as_deref(), row.is_uncategorized)
+        }
+        SummaryLayoutFieldKey::EngagementName => row.engagement_name.clone(),
+        SummaryLayoutFieldKey::ClientName => {
+            normalize_export_display_text(Some(row.client_name.as_str()))
+                .unwrap_or_else(|| "-".to_string())
+        }
+        SummaryLayoutFieldKey::EngagementTags => engagement
+            .filter(|engagement| !engagement.tags.is_empty())
+            .map(|engagement| engagement.tags.join(", "))
+            .unwrap_or_else(|| "-".to_string()),
+        SummaryLayoutFieldKey::EngagementUsage => normalize_export_display_text(
+            engagement.and_then(|engagement| engagement.describe_when_to_use.as_deref()),
+        )
+        .unwrap_or_else(|| "-".to_string()),
+        SummaryLayoutFieldKey::ActivityCode => {
+            format_summary_code_value_for_export(row.activity_code.as_deref(), row.is_uncategorized)
+        }
+        SummaryLayoutFieldKey::ActivityName => row.activity_name.clone(),
+        SummaryLayoutFieldKey::ActivityTags => activity
+            .filter(|activity| !activity.tags.is_empty())
+            .map(|activity| activity.tags.join(", "))
+            .unwrap_or_else(|| "-".to_string()),
+        SummaryLayoutFieldKey::ActivityUsage => normalize_export_display_text(
+            activity.and_then(|activity| activity.describe_when_to_use.as_deref()),
+        )
+        .unwrap_or_else(|| "-".to_string()),
+    }
+}
+
+fn build_export_metadata_maps(
+    engagements: &[Engagement],
+) -> (HashMap<String, Engagement>, HashMap<String, Activity>) {
+    let mut engagement_by_id = HashMap::new();
+    let mut activity_by_id = HashMap::new();
+
+    for engagement in engagements {
+        for activity in &engagement.activities {
+            activity_by_id.insert(activity.id.clone(), activity.clone());
+        }
+
+        engagement_by_id.insert(engagement.id.clone(), engagement.clone());
+    }
+
+    (engagement_by_id, activity_by_id)
+}
+
+fn summary_export_footer_label_column_index(
+    columns: &[SummaryExportSheetColumn],
+) -> Option<usize> {
+    columns.iter().position(|column| {
+        !matches!(
+            column.kind,
+            SummaryExportSheetColumnKind::DayHours(_)
+                | SummaryExportSheetColumnKind::DayNotes(_)
+                | SummaryExportSheetColumnKind::RowTotal
+        )
+    })
+}
+
+fn write_layout_driven_summary_sheet(
+    workbook: &mut Workbook,
+    sheet_name: &str,
+    summary: &TimelineWeeklySummary,
+    columns: &[SummaryExportSheetColumn],
+    engagement_by_id: &HashMap<String, Engagement>,
+    activity_by_id: &HashMap<String, Activity>,
 ) -> Result<(), XlsxError> {
     let worksheet = workbook.add_worksheet();
-    worksheet.set_name("Weekly Hours")?;
+    worksheet.set_name(sheet_name)?;
     worksheet.set_freeze_panes(1, 0)?;
 
     let header_format = Format::new().set_bold();
     let hours_format = Format::new().set_num_format("0.00");
+    let wrapped_text_format = Format::new().set_text_wrap();
+    let plain_text_format = Format::new();
+    let footer_label_column_index = summary_export_footer_label_column_index(columns);
 
-    let mut col: u16 = 0;
-    let static_headers = [
-        "Engagement Code",
-        "Activity Code",
-        "Activity Name",
-        "Engagement Name",
-        "Client Name",
-    ];
-    for header in static_headers {
-        worksheet.write_with_format(0, col, header, &header_format)?;
-        col += 1;
+    for (column_index, column) in columns.iter().enumerate() {
+        let excel_column = column_index as u16;
+        worksheet.write_with_format(0, excel_column, column.header.as_str(), &header_format)?;
+        worksheet.set_column_width(excel_column, column.width)?;
     }
-
-    for (day_index, day) in summary.days.iter().enumerate() {
-        worksheet.write_with_format(
-            0,
-            col,
-            summary_day_header(day_index, &day.date),
-            &header_format,
-        )?;
-        col += 1;
-    }
-
-    worksheet.write_with_format(0, col, "Row Total", &header_format)?;
-
-    worksheet.set_column_width(0, 16)?;
-    worksheet.set_column_width(1, 14)?;
-    worksheet.set_column_width(2, 24)?;
-    worksheet.set_column_width(3, 24)?;
-    worksheet.set_column_width(4, 20)?;
-    for day_offset in 0..summary.days.len() {
-        worksheet.set_column_width(5 + day_offset as u16, 12)?;
-    }
-    worksheet.set_column_width(5 + summary.days.len() as u16, 12)?;
 
     let mut row_index: u32 = 1;
     for row in &summary.rows {
-        worksheet.write(row_index, 0, row.engagement_code.as_deref().unwrap_or(""))?;
-        worksheet.write(row_index, 1, row.activity_code.as_deref().unwrap_or(""))?;
-        worksheet.write(row_index, 2, row.activity_name.as_str())?;
-        worksheet.write(row_index, 3, row.engagement_name.as_str())?;
-        let client_name = if row.client_name.trim().is_empty() {
-            "-"
-        } else {
-            row.client_name.as_str()
-        };
-        worksheet.write(row_index, 4, client_name)?;
-
-        for (day_index, cell) in row.cells.iter().enumerate() {
-            worksheet.write_with_format(
-                row_index,
-                5 + day_index as u16,
-                format_minutes_as_hours(cell.total_minutes),
-                &hours_format,
-            )?;
+        for (column_index, column) in columns.iter().enumerate() {
+            let excel_column = column_index as u16;
+            match column.kind {
+                SummaryExportSheetColumnKind::Field(field_key) => {
+                    let value = resolve_summary_export_field_value(
+                        field_key,
+                        row,
+                        engagement_by_id,
+                        activity_by_id,
+                    );
+                    if column.wrap_text {
+                        worksheet.write_with_format(
+                            row_index,
+                            excel_column,
+                            value.as_str(),
+                            &wrapped_text_format,
+                        )?;
+                    } else {
+                        worksheet.write(row_index, excel_column, value.as_str())?;
+                    }
+                }
+                SummaryExportSheetColumnKind::DayHours(day_index) => {
+                    let total_minutes = row
+                        .cells
+                        .get(day_index)
+                        .map(|cell| cell.total_minutes)
+                        .unwrap_or(0);
+                    worksheet.write_with_format(
+                        row_index,
+                        excel_column,
+                        format_minutes_as_hours(total_minutes),
+                        &hours_format,
+                    )?;
+                }
+                SummaryExportSheetColumnKind::DayNotes(day_index) => {
+                    let notes = row
+                        .cells
+                        .get(day_index)
+                        .map(|cell| format_summary_notes_for_export(&cell.notes))
+                        .unwrap_or_default();
+                    worksheet.write_with_format(
+                        row_index,
+                        excel_column,
+                        notes.as_str(),
+                        &wrapped_text_format,
+                    )?;
+                }
+                SummaryExportSheetColumnKind::FreeText => {
+                    let format = if column.wrap_text {
+                        &wrapped_text_format
+                    } else {
+                        &plain_text_format
+                    };
+                    worksheet.write_with_format(row_index, excel_column, "", format)?;
+                }
+                SummaryExportSheetColumnKind::RowTotal => {
+                    worksheet.write_with_format(
+                        row_index,
+                        excel_column,
+                        format_minutes_as_hours(row.row_total_minutes),
+                        &hours_format,
+                    )?;
+                }
+            }
         }
-
-        worksheet.write_with_format(
-            row_index,
-            5 + summary.days.len() as u16,
-            format_minutes_as_hours(row.row_total_minutes),
-            &hours_format,
-        )?;
 
         row_index += 1;
     }
 
-    worksheet.write_with_format(row_index, 0, "Day Totals", &header_format)?;
-    for (day_index, total_minutes) in summary.day_total_minutes.iter().enumerate() {
-        worksheet.write_with_format(
-            row_index,
-            5 + day_index as u16,
-            format_minutes_as_hours(*total_minutes),
-            &hours_format,
-        )?;
+    for (column_index, column) in columns.iter().enumerate() {
+        let excel_column = column_index as u16;
+        match column.kind {
+            SummaryExportSheetColumnKind::Field(_) | SummaryExportSheetColumnKind::FreeText => {
+                if footer_label_column_index == Some(column_index) {
+                    worksheet.write_with_format(
+                        row_index,
+                        excel_column,
+                        "Day Totals",
+                        &header_format,
+                    )?;
+                } else if column.wrap_text {
+                    worksheet.write_with_format(row_index, excel_column, "", &wrapped_text_format)?;
+                } else {
+                    worksheet.write_with_format(row_index, excel_column, "", &plain_text_format)?;
+                }
+            }
+            SummaryExportSheetColumnKind::DayHours(day_index) => {
+                let total_minutes = summary.day_total_minutes.get(day_index).copied().unwrap_or(0);
+                worksheet.write_with_format(
+                    row_index,
+                    excel_column,
+                    format_minutes_as_hours(total_minutes),
+                    &hours_format,
+                )?;
+            }
+            SummaryExportSheetColumnKind::DayNotes(_) => {
+                worksheet.write_with_format(row_index, excel_column, "", &wrapped_text_format)?;
+            }
+            SummaryExportSheetColumnKind::RowTotal => {
+                worksheet.write_with_format(
+                    row_index,
+                    excel_column,
+                    format_minutes_as_hours(summary.week_total_minutes),
+                    &hours_format,
+                )?;
+            }
+        }
     }
-    worksheet.write_with_format(
-        row_index,
-        5 + summary.days.len() as u16,
-        format_minutes_as_hours(summary.week_total_minutes),
-        &hours_format,
-    )?;
 
     Ok(())
+}
+
+fn write_weekly_hours_sheet(
+    workbook: &mut Workbook,
+    summary: &TimelineWeeklySummary,
+    preset: &SummaryLayoutPreset,
+    engagement_by_id: &HashMap<String, Engagement>,
+    activity_by_id: &HashMap<String, Activity>,
+) -> Result<(), XlsxError> {
+    let columns = build_summary_export_hours_sheet_columns(summary, preset);
+    write_layout_driven_summary_sheet(
+        workbook,
+        "Weekly Hours",
+        summary,
+        &columns,
+        engagement_by_id,
+        activity_by_id,
+    )
 }
 
 fn write_weekly_hours_and_notes_sheet(
     workbook: &mut Workbook,
     summary: &TimelineWeeklySummary,
+    preset: &SummaryLayoutPreset,
+    engagement_by_id: &HashMap<String, Engagement>,
+    activity_by_id: &HashMap<String, Activity>,
 ) -> Result<(), XlsxError> {
-    let worksheet = workbook.add_worksheet();
-    worksheet.set_name("Weekly Hours + Notes")?;
-    worksheet.set_freeze_panes(1, 0)?;
-
-    let header_format = Format::new().set_bold();
-    let hours_format = Format::new().set_num_format("0.00");
-    let notes_format = Format::new().set_text_wrap();
-
-    let mut col: u16 = 0;
-    let static_headers = [
-        "Engagement Code",
-        "Activity Code",
-        "Activity Name",
-        "Engagement Name",
-        "Client Name",
-    ];
-    for header in static_headers {
-        worksheet.write_with_format(0, col, header, &header_format)?;
-        col += 1;
-    }
-
-    for (day_index, day) in summary.days.iter().enumerate() {
-        let header = summary_day_header(day_index, &day.date);
-        worksheet.write_with_format(0, col, format!("{header} Hours"), &header_format)?;
-        col += 1;
-        worksheet.write_with_format(0, col, format!("{header} Notes"), &header_format)?;
-        col += 1;
-    }
-
-    worksheet.write_with_format(0, col, "Row Total", &header_format)?;
-
-    worksheet.set_column_width(0, 16)?;
-    worksheet.set_column_width(1, 14)?;
-    worksheet.set_column_width(2, 24)?;
-    worksheet.set_column_width(3, 24)?;
-    worksheet.set_column_width(4, 20)?;
-    for day_index in 0..summary.days.len() {
-        let base_col = 5 + (day_index as u16 * 2);
-        worksheet.set_column_width(base_col, 12)?;
-        worksheet.set_column_width(base_col + 1, 42)?;
-    }
-    worksheet.set_column_width(5 + (summary.days.len() as u16 * 2), 12)?;
-
-    let mut row_index: u32 = 1;
-    for row in &summary.rows {
-        worksheet.write(row_index, 0, row.engagement_code.as_deref().unwrap_or(""))?;
-        worksheet.write(row_index, 1, row.activity_code.as_deref().unwrap_or(""))?;
-        worksheet.write(row_index, 2, row.activity_name.as_str())?;
-        worksheet.write(row_index, 3, row.engagement_name.as_str())?;
-        let client_name = if row.client_name.trim().is_empty() {
-            "-"
-        } else {
-            row.client_name.as_str()
-        };
-        worksheet.write(row_index, 4, client_name)?;
-
-        for (day_index, cell) in row.cells.iter().enumerate() {
-            let hours_col = 5 + (day_index as u16 * 2);
-            let notes_col = hours_col + 1;
-            worksheet.write_with_format(
-                row_index,
-                hours_col,
-                format_minutes_as_hours(cell.total_minutes),
-                &hours_format,
-            )?;
-            worksheet.write_with_format(
-                row_index,
-                notes_col,
-                format_summary_notes_for_export(&cell.notes),
-                &notes_format,
-            )?;
-        }
-
-        worksheet.write_with_format(
-            row_index,
-            5 + (summary.days.len() as u16 * 2),
-            format_minutes_as_hours(row.row_total_minutes),
-            &hours_format,
-        )?;
-
-        row_index += 1;
-    }
-
-    worksheet.write_with_format(row_index, 0, "Day Totals", &header_format)?;
-    for (day_index, total_minutes) in summary.day_total_minutes.iter().enumerate() {
-        let day_hours_col = 5 + (day_index as u16 * 2);
-        worksheet.write_with_format(
-            row_index,
-            day_hours_col,
-            format_minutes_as_hours(*total_minutes),
-            &hours_format,
-        )?;
-    }
-    worksheet.write_with_format(
-        row_index,
-        5 + (summary.days.len() as u16 * 2),
-        format_minutes_as_hours(summary.week_total_minutes),
-        &hours_format,
-    )?;
-
-    Ok(())
+    let columns = build_summary_export_hours_and_notes_sheet_columns(summary, preset);
+    write_layout_driven_summary_sheet(
+        workbook,
+        "Weekly Hours + Notes",
+        summary,
+        &columns,
+        engagement_by_id,
+        activity_by_id,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1895,14 +2165,18 @@ pub fn timeline_list_for_week_view(
 pub fn summary_export_weekly_excel(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    input: DateInput,
+    input: SummaryExportWeeklyExcelInput,
 ) -> Result<SummaryExportResult, String> {
+    let layout_preset = normalize_summary_layout_preset_for_export(input.layout_preset)?;
     let (start_date, end_date_exclusive) = timeline_week_bounds(&input.date)?;
-    let summary = {
+    let (summary, engagements) = {
         let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-        db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
-            .map_err(|error| error.to_string())?
+        let summary = db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
+            .map_err(|error| error.to_string())?;
+        let engagements = db::list_engagements(&connection).map_err(|error| error.to_string())?;
+        (summary, engagements)
     };
+    let (engagement_by_id, activity_by_id) = build_export_metadata_maps(&engagements);
 
     let week_end_date = summary.week_end_date.clone();
     let downloads_dir = resolve_downloads_dir(&app)?;
@@ -1913,9 +2187,21 @@ pub fn summary_export_weekly_excel(
     let file_path = choose_export_file_path(&downloads_dir, &base_name);
 
     let mut workbook = Workbook::new();
-    write_weekly_hours_sheet(&mut workbook, &summary)
+    write_weekly_hours_sheet(
+        &mut workbook,
+        &summary,
+        &layout_preset,
+        &engagement_by_id,
+        &activity_by_id,
+    )
         .map_err(|error| format!("failed to build Weekly Hours sheet: {error}"))?;
-    write_weekly_hours_and_notes_sheet(&mut workbook, &summary)
+    write_weekly_hours_and_notes_sheet(
+        &mut workbook,
+        &summary,
+        &layout_preset,
+        &engagement_by_id,
+        &activity_by_id,
+    )
         .map_err(|error| format!("failed to build Weekly Hours + Notes sheet: {error}"))?;
     workbook
         .save(&file_path)
@@ -4217,23 +4503,27 @@ mod tests {
     use chrono::{Local, NaiveDate};
 
     use crate::models::{
-        CodeContext, ContextActivity, ContextEngagement, KeySource, LlmEntry, NormalizedEntry,
-        OpenAiModelId, StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey,
-        SummaryLayoutPreset, SummaryLayoutState, TranscriptionModelId,
+        Activity, CodeContext, ContextActivity, ContextEngagement, Engagement, KeySource,
+        LlmEntry, NormalizedEntry, OpenAiModelId, StatusLevel, SummaryLayoutColumn,
+        SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState, TimelineWeeklySummary,
+        TimelineWeeklySummaryCell, TimelineWeeklySummaryDay, TimelineWeeklySummaryNote,
+        TimelineWeeklySummaryRow, TranscriptionModelId,
     };
     use crate::openai::LlmAttemptTelemetry;
 
     use super::{
         apply_activity_fallback_if_needed, apply_global_activity_fallback_if_needed,
-        dedupe_prepared_entries, derive_key_status_level, llm_attempt_event_status,
-        message_has_explicit_clock_time_cue, message_has_implicit_recent_duration_cue,
-        message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
-        normalize_snapped_update_window, reconcile_context_refs, resolve_requested_openai_model,
-        resolve_saved_openai_model_value, resolve_saved_transcription_model_value,
-        round_to_nearest_15, timeline_week_bounds, timeline_week_view_bounds,
-        validate_manual_update_window, default_summary_layout_state,
-        normalize_summary_layout_state, PreparedEntry, TemporalCueType, TemporalReference,
-        MINUTES_IN_DAY,
+        build_export_metadata_maps, build_summary_export_hours_and_notes_sheet_columns,
+        dedupe_prepared_entries, default_summary_layout_state, derive_key_status_level,
+        llm_attempt_event_status, message_has_explicit_clock_time_cue,
+        message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
+        normalize_confidence, normalize_llm_entry, normalize_snapped_update_window,
+        normalize_summary_layout_preset_for_export, normalize_summary_layout_state,
+        reconcile_context_refs, resolve_requested_openai_model, resolve_saved_openai_model_value,
+        resolve_saved_transcription_model_value, resolve_summary_export_field_value,
+        round_to_nearest_15, summary_day_notes_header, timeline_week_bounds,
+        timeline_week_view_bounds, validate_manual_update_window, PreparedEntry,
+        SummaryExportSheetColumnKind, TemporalCueType, TemporalReference, MINUTES_IN_DAY,
     };
 
     #[test]
@@ -4444,6 +4734,253 @@ mod tests {
             }
             _ => panic!("expected free-text column"),
         }
+    }
+
+    fn test_weekly_summary() -> TimelineWeeklySummary {
+        TimelineWeeklySummary {
+            week_start_date: "2026-03-28".to_string(),
+            week_end_date: "2026-04-03".to_string(),
+            days: vec![
+                TimelineWeeklySummaryDay {
+                    date: "2026-03-28".to_string(),
+                },
+                TimelineWeeklySummaryDay {
+                    date: "2026-03-29".to_string(),
+                },
+                TimelineWeeklySummaryDay {
+                    date: "2026-03-30".to_string(),
+                },
+                TimelineWeeklySummaryDay {
+                    date: "2026-03-31".to_string(),
+                },
+                TimelineWeeklySummaryDay {
+                    date: "2026-04-01".to_string(),
+                },
+                TimelineWeeklySummaryDay {
+                    date: "2026-04-02".to_string(),
+                },
+                TimelineWeeklySummaryDay {
+                    date: "2026-04-03".to_string(),
+                },
+            ],
+            rows: vec![TimelineWeeklySummaryRow {
+                engagement_id: Some("eng-1".to_string()),
+                activity_id: Some("act-1".to_string()),
+                engagement_code: Some("ENG-1".to_string()),
+                activity_code: Some("ACT-1".to_string()),
+                activity_name: "Testing".to_string(),
+                engagement_name: "Client Work".to_string(),
+                client_name: "Acme".to_string(),
+                is_uncategorized: false,
+                cells: vec![
+                    TimelineWeeklySummaryCell {
+                        total_minutes: 120,
+                        notes: vec![TimelineWeeklySummaryNote {
+                            start_minute: 480,
+                            end_minute: 600,
+                            duration_minutes: 120,
+                            description: "Control testing".to_string(),
+                        }],
+                    },
+                    TimelineWeeklySummaryCell {
+                        total_minutes: 60,
+                        notes: vec![],
+                    },
+                    TimelineWeeklySummaryCell {
+                        total_minutes: 0,
+                        notes: vec![],
+                    },
+                    TimelineWeeklySummaryCell {
+                        total_minutes: 0,
+                        notes: vec![],
+                    },
+                    TimelineWeeklySummaryCell {
+                        total_minutes: 0,
+                        notes: vec![],
+                    },
+                    TimelineWeeklySummaryCell {
+                        total_minutes: 0,
+                        notes: vec![],
+                    },
+                    TimelineWeeklySummaryCell {
+                        total_minutes: 0,
+                        notes: vec![],
+                    },
+                ],
+                row_total_minutes: 180,
+            }],
+            day_total_minutes: vec![120, 60, 0, 0, 0, 0, 0],
+            week_total_minutes: 180,
+        }
+    }
+
+    fn test_engagements() -> Vec<Engagement> {
+        vec![Engagement {
+            id: "eng-1".to_string(),
+            code: Some("ENG-1".to_string()),
+            name: "Client Work".to_string(),
+            client: Some("Acme".to_string()),
+            color_hex: None,
+            tags: vec!["SOX".to_string(), "FAIT".to_string()],
+            describe_when_to_use: Some("Use for client delivery work.".to_string()),
+            is_active: true,
+            created_at: 0,
+            updated_at: 0,
+            activities: vec![Activity {
+                id: "act-1".to_string(),
+                engagement_id: "eng-1".to_string(),
+                code: Some("ACT-1".to_string()),
+                name: "Testing".to_string(),
+                color_hex: None,
+                tags: vec!["controls".to_string()],
+                describe_when_to_use: Some("Use for testing controls.".to_string()),
+                is_active: true,
+                created_at: 0,
+                updated_at: 0,
+            }],
+        }]
+    }
+
+    #[test]
+    fn summary_export_layout_preset_normalizes_before_export() {
+        let normalized = normalize_summary_layout_preset_for_export(SummaryLayoutPreset {
+            id: " preset-a ".to_string(),
+            name: " Export Layout ".to_string(),
+            columns: vec![
+                SummaryLayoutColumn::Field {
+                    id: " field-activity ".to_string(),
+                    field_key: SummaryLayoutFieldKey::ActivityName,
+                },
+                SummaryLayoutColumn::FreeText {
+                    id: " free-text ".to_string(),
+                    label: " Notes Slot ".to_string(),
+                },
+            ],
+        })
+        .expect("preset should normalize");
+
+        assert_eq!(normalized.id, "preset-a");
+        assert_eq!(normalized.name, "Export Layout");
+        match &normalized.columns[1] {
+            SummaryLayoutColumn::FreeText { id, label } => {
+                assert_eq!(id, "free-text");
+                assert_eq!(label, "Notes Slot");
+            }
+            _ => panic!("expected free-text column"),
+        }
+    }
+
+    #[test]
+    fn hours_and_notes_export_reuses_only_adjacent_free_text_columns() {
+        let summary = test_weekly_summary();
+        let preset = SummaryLayoutPreset {
+            id: "preset-export".to_string(),
+            name: "Export".to_string(),
+            columns: vec![
+                SummaryLayoutColumn::Field {
+                    id: "field-engagement-code".to_string(),
+                    field_key: SummaryLayoutFieldKey::EngagementCode,
+                },
+                SummaryLayoutColumn::Day {
+                    id: "day-0".to_string(),
+                    day_index: 0,
+                },
+                SummaryLayoutColumn::FreeText {
+                    id: "free-text-adjacent".to_string(),
+                    label: "Custom Notes".to_string(),
+                },
+                SummaryLayoutColumn::Day {
+                    id: "day-1".to_string(),
+                    day_index: 1,
+                },
+                SummaryLayoutColumn::Field {
+                    id: "field-client-name".to_string(),
+                    field_key: SummaryLayoutFieldKey::ClientName,
+                },
+                SummaryLayoutColumn::FreeText {
+                    id: "free-text-later".to_string(),
+                    label: "Later Blank".to_string(),
+                },
+            ],
+        };
+
+        let columns = build_summary_export_hours_and_notes_sheet_columns(&summary, &preset);
+        assert_eq!(columns.len(), 8);
+        assert!(matches!(
+            columns[0].kind,
+            SummaryExportSheetColumnKind::Field(SummaryLayoutFieldKey::EngagementCode)
+        ));
+        assert!(matches!(columns[1].kind, SummaryExportSheetColumnKind::DayHours(0)));
+        assert!(matches!(columns[2].kind, SummaryExportSheetColumnKind::DayNotes(0)));
+        assert_eq!(columns[2].header, summary_day_notes_header(&summary, 0));
+        assert!(matches!(columns[3].kind, SummaryExportSheetColumnKind::DayHours(1)));
+        assert!(matches!(columns[4].kind, SummaryExportSheetColumnKind::DayNotes(1)));
+        assert!(matches!(
+            columns[5].kind,
+            SummaryExportSheetColumnKind::Field(SummaryLayoutFieldKey::ClientName)
+        ));
+        assert!(matches!(columns[6].kind, SummaryExportSheetColumnKind::FreeText));
+        assert_eq!(columns[6].header, "Later Blank");
+        assert!(matches!(columns[7].kind, SummaryExportSheetColumnKind::RowTotal));
+    }
+
+    #[test]
+    fn summary_export_field_value_matches_summary_table_rules() {
+        let engagements = test_engagements();
+        let (engagement_by_id, activity_by_id) = build_export_metadata_maps(&engagements);
+        let summary = test_weekly_summary();
+        let row = &summary.rows[0];
+
+        assert_eq!(
+            resolve_summary_export_field_value(
+                SummaryLayoutFieldKey::EngagementTags,
+                row,
+                &engagement_by_id,
+                &activity_by_id,
+            ),
+            "SOX, FAIT"
+        );
+        assert_eq!(
+            resolve_summary_export_field_value(
+                SummaryLayoutFieldKey::ActivityUsage,
+                row,
+                &engagement_by_id,
+                &activity_by_id,
+            ),
+            "Use for testing controls."
+        );
+
+        let uncategorized_row = TimelineWeeklySummaryRow {
+            engagement_id: None,
+            activity_id: None,
+            engagement_code: None,
+            activity_code: None,
+            activity_name: "Uncategorized".to_string(),
+            engagement_name: "Uncategorized".to_string(),
+            client_name: "".to_string(),
+            is_uncategorized: true,
+            cells: vec![],
+            row_total_minutes: 0,
+        };
+
+        assert_eq!(
+            resolve_summary_export_field_value(
+                SummaryLayoutFieldKey::EngagementCode,
+                &uncategorized_row,
+                &engagement_by_id,
+                &activity_by_id,
+            ),
+            "UNCAT"
+        );
+        assert_eq!(
+            resolve_summary_export_field_value(
+                SummaryLayoutFieldKey::ClientName,
+                &uncategorized_row,
+                &engagement_by_id,
+                &activity_by_id,
+            ),
+            "-"
+        );
     }
 
     #[test]

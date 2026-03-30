@@ -3276,10 +3276,18 @@ function App() {
       return
     }
 
+    if (!selectedSummaryLayoutPreset) {
+      setErrorMessage('No summary layout preset is selected.')
+      return
+    }
+
     void runAction(async () => {
       setIsSummaryExporting(true)
       try {
-        const result = await summaryExportWeeklyExcel({ date: selectedDate })
+        const result = await summaryExportWeeklyExcel({
+          date: selectedDate,
+          layoutPreset: selectedSummaryLayoutPreset,
+        })
         if (!result.autoOpenAttempted || result.autoOpenSucceeded) {
           setSuccessMessage(`Weekly summary exported and opened: ${result.filePath}`)
           return
@@ -5160,7 +5168,14 @@ function App() {
                 <button
                   type="button"
                   onClick={onExportSummaryWeek}
-                  disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting || !weeklySummary}
+                  disabled={
+                    isBusy
+                    || isWeeklySummaryLoading
+                    || isSummaryExporting
+                    || isSummaryLayoutSaving
+                    || !weeklySummary
+                    || !selectedSummaryLayoutPreset
+                  }
                 >
                   {isSummaryExporting ? 'Exporting...' : 'Export'}
                 </button>
