@@ -43,9 +43,10 @@ const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
 const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
 const APP_SETTING_TRANSCRIPTION_MODEL: &str = "openai_transcription_model";
 const APP_SETTING_SUMMARY_LAYOUT_STATE: &str = "summary_layout_state";
-const SUMMARY_LAYOUT_STATE_VERSION: i64 = 1;
+const SUMMARY_LAYOUT_STATE_VERSION: i64 = 2;
 const SUMMARY_LAYOUT_MAX_NAME_LENGTH: usize = 40;
 const DEFAULT_SUMMARY_LAYOUT_PRESET_ID: &str = "preset-standard";
+const DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID: &str = "row-total";
 const SUMMARY_DAY_NAMES: [&str; 7] = [
     "Saturday",
     "Sunday",
@@ -58,6 +59,12 @@ const SUMMARY_DAY_NAMES: [&str; 7] = [
 
 fn state_lock_error() -> String {
     "application state lock poisoned".to_string()
+}
+
+fn default_summary_layout_row_total_column() -> SummaryLayoutColumn {
+    SummaryLayoutColumn::RowTotal {
+        id: DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID.to_string(),
+    }
 }
 
 fn duration_ms(started_at: Instant) -> i64 {
@@ -189,6 +196,7 @@ fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
             id: "day-6".to_string(),
             day_index: 6,
         },
+        default_summary_layout_row_total_column(),
     ]
 }
 
@@ -201,6 +209,25 @@ fn default_summary_layout_state() -> SummaryLayoutState {
             name: "Standard".to_string(),
             columns: default_summary_layout_columns(),
         }],
+    }
+}
+
+fn next_summary_layout_row_total_column_id(existing_ids: &HashSet<String>) -> String {
+    if !existing_ids.contains(DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID) {
+        return DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID.to_string();
+    }
+
+    let mut suffix = 1usize;
+    loop {
+        let candidate = format!(
+            "{}-{suffix}",
+            DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID
+        );
+        if !existing_ids.contains(&candidate) {
+            return candidate;
+        }
+
+        suffix += 1;
     }
 }
 
@@ -244,13 +271,10 @@ fn normalize_summary_layout_state(
             return Err("Summary layout preset names must be unique.".to_string());
         }
 
-        if preset.columns.is_empty() {
-            return Err("Each summary layout preset must include at least one column.".to_string());
-        }
-
         let mut column_ids = HashSet::new();
         let mut field_keys = HashSet::new();
         let mut day_indexes = HashSet::new();
+        let mut row_total_count = 0usize;
 
         for column in &mut preset.columns {
             match column {
@@ -305,7 +329,44 @@ fn normalize_summary_layout_state(
                         );
                     }
                 }
+                SummaryLayoutColumn::RowTotal { id } => {
+                    *id = id.trim().to_string();
+                    if id.is_empty() {
+                        return Err(
+                            "Summary layout Row Total column IDs cannot be empty.".to_string(),
+                        );
+                    }
+                    if !column_ids.insert(id.clone()) {
+                        return Err("Summary layout column IDs must be unique.".to_string());
+                    }
+                    row_total_count += 1;
+                    if row_total_count > 1 {
+                        return Err(
+                            "A summary layout preset cannot include Row Total more than once."
+                                .to_string(),
+                        );
+                    }
+                }
             }
+        }
+
+        if row_total_count == 0 {
+            let row_total_id = next_summary_layout_row_total_column_id(&column_ids);
+            column_ids.insert(row_total_id.clone());
+            preset
+                .columns
+                .push(SummaryLayoutColumn::RowTotal { id: row_total_id });
+        }
+
+        let has_non_row_total_column = preset
+            .columns
+            .iter()
+            .any(|column| !matches!(column, SummaryLayoutColumn::RowTotal { .. }));
+        if !has_non_row_total_column {
+            return Err(
+                "Each summary layout preset must include at least one column besides Row Total."
+                    .to_string(),
+            );
         }
     }
 
@@ -665,15 +726,14 @@ fn build_summary_export_hours_sheet_columns(
                 width: 18,
                 wrap_text: true,
             }),
+            SummaryLayoutColumn::RowTotal { .. } => columns.push(SummaryExportSheetColumn {
+                header: "Row Total".to_string(),
+                kind: SummaryExportSheetColumnKind::RowTotal,
+                width: 12,
+                wrap_text: false,
+            }),
         }
     }
-
-    columns.push(SummaryExportSheetColumn {
-        header: "Row Total".to_string(),
-        kind: SummaryExportSheetColumnKind::RowTotal,
-        width: 12,
-        wrap_text: false,
-    });
 
     columns
 }
@@ -732,17 +792,18 @@ fn build_summary_export_hours_and_notes_sheet_columns(
                     wrap_text: true,
                 });
             }
+            SummaryLayoutColumn::RowTotal { .. } => {
+                columns.push(SummaryExportSheetColumn {
+                    header: "Row Total".to_string(),
+                    kind: SummaryExportSheetColumnKind::RowTotal,
+                    width: 12,
+                    wrap_text: false,
+                });
+            }
         }
 
         column_index += 1;
     }
-
-    columns.push(SummaryExportSheetColumn {
-        header: "Row Total".to_string(),
-        kind: SummaryExportSheetColumnKind::RowTotal,
-        width: 12,
-        wrap_text: false,
-    });
 
     columns
 }
@@ -4514,16 +4575,17 @@ mod tests {
     use super::{
         apply_activity_fallback_if_needed, apply_global_activity_fallback_if_needed,
         build_export_metadata_maps, build_summary_export_hours_and_notes_sheet_columns,
-        dedupe_prepared_entries, default_summary_layout_state, derive_key_status_level,
-        llm_attempt_event_status, message_has_explicit_clock_time_cue,
-        message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
-        normalize_confidence, normalize_llm_entry, normalize_snapped_update_window,
-        normalize_summary_layout_preset_for_export, normalize_summary_layout_state,
-        reconcile_context_refs, resolve_requested_openai_model, resolve_saved_openai_model_value,
-        resolve_saved_transcription_model_value, resolve_summary_export_field_value,
-        round_to_nearest_15, summary_day_notes_header, timeline_week_bounds,
-        timeline_week_view_bounds, validate_manual_update_window, PreparedEntry,
-        SummaryExportSheetColumnKind, TemporalCueType, TemporalReference, MINUTES_IN_DAY,
+        build_summary_export_hours_sheet_columns, dedupe_prepared_entries,
+        default_summary_layout_state, derive_key_status_level, llm_attempt_event_status,
+        message_has_explicit_clock_time_cue, message_has_implicit_recent_duration_cue,
+        message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
+        normalize_snapped_update_window, normalize_summary_layout_preset_for_export,
+        normalize_summary_layout_state, reconcile_context_refs, resolve_requested_openai_model,
+        resolve_saved_openai_model_value, resolve_saved_transcription_model_value,
+        resolve_summary_export_field_value, round_to_nearest_15, summary_day_notes_header,
+        timeline_week_bounds, timeline_week_view_bounds, validate_manual_update_window,
+        PreparedEntry, SummaryExportSheetColumnKind, TemporalCueType, TemporalReference,
+        MINUTES_IN_DAY,
     };
 
     #[test]
@@ -4663,10 +4725,15 @@ mod tests {
     #[test]
     fn default_summary_layout_state_seeds_standard_preset() {
         let state = default_summary_layout_state();
+        assert_eq!(state.version, 2);
         assert_eq!(state.presets.len(), 1);
         assert_eq!(state.presets[0].name, "Standard");
         assert_eq!(state.selected_preset_id, state.presets[0].id);
-        assert_eq!(state.presets[0].columns.len(), 12);
+        assert_eq!(state.presets[0].columns.len(), 13);
+        assert!(matches!(
+            state.presets[0].columns.last(),
+            Some(SummaryLayoutColumn::RowTotal { .. })
+        ));
     }
 
     #[test]
@@ -4724,7 +4791,7 @@ mod tests {
         })
         .expect("state should normalize");
 
-        assert_eq!(normalized.version, 1);
+        assert_eq!(normalized.version, 2);
         assert_eq!(normalized.selected_preset_id, "preset-a");
         assert_eq!(normalized.presets[0].name, "Working Layout");
         match &normalized.presets[0].columns[2] {
@@ -4734,6 +4801,84 @@ mod tests {
             }
             _ => panic!("expected free-text column"),
         }
+        assert!(matches!(
+            normalized.presets[0].columns[3],
+            SummaryLayoutColumn::RowTotal { .. }
+        ));
+    }
+
+    #[test]
+    fn summary_layout_state_appends_row_total_to_legacy_presets() {
+        let normalized = normalize_summary_layout_state(SummaryLayoutState {
+            version: 1,
+            selected_preset_id: "preset-a".to_string(),
+            presets: vec![SummaryLayoutPreset {
+                id: "preset-a".to_string(),
+                name: "Legacy Layout".to_string(),
+                columns: vec![SummaryLayoutColumn::Field {
+                    id: "field-client-name".to_string(),
+                    field_key: SummaryLayoutFieldKey::ClientName,
+                }],
+            }],
+        })
+        .expect("legacy presets should normalize");
+
+        assert_eq!(normalized.presets[0].columns.len(), 2);
+        assert!(matches!(
+            normalized.presets[0].columns[1],
+            SummaryLayoutColumn::RowTotal { .. }
+        ));
+    }
+
+    #[test]
+    fn summary_layout_state_rejects_duplicate_row_total_columns() {
+        let error = normalize_summary_layout_state(SummaryLayoutState {
+            version: 2,
+            selected_preset_id: "preset-a".to_string(),
+            presets: vec![SummaryLayoutPreset {
+                id: "preset-a".to_string(),
+                name: "Broken Layout".to_string(),
+                columns: vec![
+                    SummaryLayoutColumn::Field {
+                        id: "field-client-name".to_string(),
+                        field_key: SummaryLayoutFieldKey::ClientName,
+                    },
+                    SummaryLayoutColumn::RowTotal {
+                        id: "row-total".to_string(),
+                    },
+                    SummaryLayoutColumn::RowTotal {
+                        id: "row-total-2".to_string(),
+                    },
+                ],
+            }],
+        })
+        .expect_err("duplicate row total should fail");
+
+        assert_eq!(
+            error,
+            "A summary layout preset cannot include Row Total more than once."
+        );
+    }
+
+    #[test]
+    fn summary_layout_state_requires_a_non_total_column() {
+        let error = normalize_summary_layout_state(SummaryLayoutState {
+            version: 2,
+            selected_preset_id: "preset-a".to_string(),
+            presets: vec![SummaryLayoutPreset {
+                id: "preset-a".to_string(),
+                name: "Totals Only".to_string(),
+                columns: vec![SummaryLayoutColumn::RowTotal {
+                    id: "row-total".to_string(),
+                }],
+            }],
+        })
+        .expect_err("totals-only layout should fail");
+
+        assert_eq!(
+            error,
+            "Each summary layout preset must include at least one column besides Row Total."
+        );
     }
 
     fn test_weekly_summary() -> TimelineWeeklySummary {
@@ -4868,6 +5013,83 @@ mod tests {
             }
             _ => panic!("expected free-text column"),
         }
+        assert!(matches!(
+            normalized.columns[2],
+            SummaryLayoutColumn::RowTotal { .. }
+        ));
+    }
+
+    #[test]
+    fn hours_export_uses_row_total_position_from_preset() {
+        let summary = test_weekly_summary();
+        let cases = [
+            (
+                "first",
+                vec![
+                    SummaryLayoutColumn::RowTotal {
+                        id: "row-total".to_string(),
+                    },
+                    SummaryLayoutColumn::Field {
+                        id: "field-engagement-code".to_string(),
+                        field_key: SummaryLayoutFieldKey::EngagementCode,
+                    },
+                    SummaryLayoutColumn::Day {
+                        id: "day-0".to_string(),
+                        day_index: 0,
+                    },
+                ],
+                0usize,
+            ),
+            (
+                "middle",
+                vec![
+                    SummaryLayoutColumn::Field {
+                        id: "field-engagement-code".to_string(),
+                        field_key: SummaryLayoutFieldKey::EngagementCode,
+                    },
+                    SummaryLayoutColumn::RowTotal {
+                        id: "row-total".to_string(),
+                    },
+                    SummaryLayoutColumn::Day {
+                        id: "day-0".to_string(),
+                        day_index: 0,
+                    },
+                ],
+                1usize,
+            ),
+            (
+                "last",
+                vec![
+                    SummaryLayoutColumn::Field {
+                        id: "field-engagement-code".to_string(),
+                        field_key: SummaryLayoutFieldKey::EngagementCode,
+                    },
+                    SummaryLayoutColumn::Day {
+                        id: "day-0".to_string(),
+                        day_index: 0,
+                    },
+                    SummaryLayoutColumn::RowTotal {
+                        id: "row-total".to_string(),
+                    },
+                ],
+                2usize,
+            ),
+        ];
+
+        for (label, preset_columns, row_total_index) in cases {
+            let preset = SummaryLayoutPreset {
+                id: format!("preset-{label}"),
+                name: format!("Layout {label}"),
+                columns: preset_columns,
+            };
+
+            let columns = build_summary_export_hours_sheet_columns(&summary, &preset);
+            assert_eq!(columns.len(), 3, "{label} preset should keep three export columns");
+            assert!(
+                matches!(columns[row_total_index].kind, SummaryExportSheetColumnKind::RowTotal),
+                "{label} preset should keep Row Total at the requested position"
+            );
+        }
     }
 
     #[test]
@@ -4900,6 +5122,9 @@ mod tests {
                 SummaryLayoutColumn::FreeText {
                     id: "free-text-later".to_string(),
                     label: "Later Blank".to_string(),
+                },
+                SummaryLayoutColumn::RowTotal {
+                    id: "row-total".to_string(),
                 },
             ],
         };

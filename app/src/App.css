@@ -2049,7 +2049,7 @@ button.danger {
   box-shadow: 0 16px 28px rgba(31, 122, 255, 0.12);
 }
 
-.summary-layout-editor-column-fixed {
+.summary-layout-editor-column-required {
   background: linear-gradient(180deg, rgba(241, 246, 255, 0.96), rgba(255, 255, 255, 0.96));
 }
 
@@ -2058,10 +2058,6 @@ button.danger {
   justify-content: space-between;
   align-items: center;
   padding: 0.55rem 0.55rem 0.35rem;
-}
-
-.summary-layout-editor-column-controls-fixed {
-  justify-content: flex-end;
 }
 
 .summary-layout-editor-remove,
@@ -2152,7 +2148,7 @@ button.danger {
   font-style: italic;
 }
 
-.summary-layout-editor-fixed-pill {
+.summary-layout-editor-required-pill {
   border-radius: 999px;
   padding: 0.18rem 0.48rem;
   background: rgba(31, 122, 255, 0.12);

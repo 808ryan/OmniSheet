@@ -319,7 +319,7 @@ interface SummaryLayoutDragState {
 }
 
 interface SummaryLayoutViewColumn {
-  kind: 'field' | 'day' | 'freeText'
+  kind: 'field' | 'day' | 'freeText' | 'rowTotal'
   id: string
   header: string
   width: string
@@ -804,7 +804,7 @@ function App() {
     [selectedSummaryLayoutPreset],
   )
   const summaryFooterLabelIndex = useMemo(
-    () => summaryViewColumns.findIndex((column) => column.kind !== 'day'),
+    () => summaryViewColumns.findIndex((column) => column.kind !== 'day' && column.kind !== 'rowTotal'),
     [summaryViewColumns],
   )
   const summaryLayoutPreviewRows = useMemo(
@@ -3391,8 +3391,13 @@ function App() {
         return previous
       }
 
-      if (previous.columns.length <= 1) {
-        setSummaryLayoutDraftError('A preset must keep at least one column before Row Total.')
+      const targetColumn = previous.columns.find((column) => column.id === columnId)
+      if (!targetColumn || targetColumn.kind === 'rowTotal') {
+        return previous
+      }
+
+      if (countSummaryLayoutNonTotalColumns(previous.columns) <= 1) {
+        setSummaryLayoutDraftError('A preset must keep at least one column besides Row Total.')
         return previous
       }
 
@@ -5254,13 +5259,12 @@ function App() {
                             : column.header}
                         </th>
                       ))}
-                      <th style={{ minWidth: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH }}>Row Total</th>
                     </tr>
                   </thead>
                   <tbody>
                     {weeklySummary.rows.length === 0 ? (
                       <tr>
-                        <td colSpan={summaryViewColumns.length + 1} className="summary-empty-row">
+                        <td colSpan={summaryViewColumns.length} className="summary-empty-row">
                           No time entries for this week.
                         </td>
                       </tr>
@@ -5283,9 +5287,6 @@ function App() {
                               )}
                             </td>
                           ))}
-                          <td className="summary-row-total" style={{ minWidth: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH }}>
-                            {formatMinutesAsHours(row.rowTotalMinutes)}
-                          </td>
                         </tr>
                       ))
                     )}
@@ -5301,24 +5302,14 @@ function App() {
                               summaryFooterLabelIndex >= 0
                               && columnIndex === summaryFooterLabelIndex
                               && column.kind !== 'day'
+                              && column.kind !== 'rowTotal'
                             )
                           ) ? 'summary-cell-wrap' : ''}
                           style={{ minWidth: column.width }}
                         >
-                          {column.kind === 'day' && column.dayIndex !== undefined
-                            ? formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
-                            : (
-                              summaryFooterLabelIndex >= 0
-                              && columnIndex === summaryFooterLabelIndex
-                              && column.kind !== 'day'
-                                ? 'Day Totals'
-                                : ''
-                            )}
+                          {renderSummaryFooterCell(column, columnIndex, summaryFooterLabelIndex, weeklySummary)}
                         </td>
                       ))}
-                      <td style={{ minWidth: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH }}>
-                        {formatMinutesAsHours(weeklySummary.weekTotalMinutes)}
-                      </td>
                     </tr>
                   </tfoot>
                 </table>
@@ -5384,11 +5375,11 @@ function App() {
             role="dialog"
             aria-modal="true"
             aria-label={summaryLayoutModal.mode === 'create' ? 'Create summary layout preset' : 'Edit summary layout preset'}
-          >
-            <div className="summary-layout-editor-header">
+            >
+              <div className="summary-layout-editor-header">
               <div>
                 <h3>{summaryLayoutModal.mode === 'create' ? 'New Layout Preset' : 'Edit Layout Preset'}</h3>
-                <p>Reorder, remove, or insert columns. Row Total always stays pinned on the right.</p>
+                <p>Reorder, remove, or insert columns. Row Total stays required, but you can move it.</p>
               </div>
               <button
                 type="button"
@@ -5446,7 +5437,7 @@ function App() {
                           ref={(node) => {
                             summaryLayoutColumnRefs.current[column.id] = node
                           }}
-                          className={`summary-layout-editor-column ${previewColumn.wraps ? 'wraps' : ''} ${isDragging ? 'dragging' : ''} ${isDisplaced ? 'displaced' : ''} ${isCommitReset ? 'commit-reset' : ''}`}
+                          className={`summary-layout-editor-column ${previewColumn.wraps ? 'wraps' : ''} ${previewColumn.kind === 'rowTotal' ? 'summary-layout-editor-column-required' : ''} ${isDragging ? 'dragging' : ''} ${isDisplaced ? 'displaced' : ''} ${isCommitReset ? 'commit-reset' : ''}`}
                           style={{
                             width: previewColumn.width,
                             transform: buildSummaryLayoutColumnTransform(activeTransformX, isDragging),
@@ -5454,14 +5445,18 @@ function App() {
                           }}
                         >
                           <div className="summary-layout-editor-column-controls">
-                            <button
-                              type="button"
-                              className="summary-layout-editor-remove"
-                              onClick={() => onRemoveSummaryLayoutColumn(column.id)}
-                              aria-label={`Remove ${previewColumn.header}`}
-                            >
-                              -
-                            </button>
+                            {previewColumn.kind === 'rowTotal' ? (
+                              <span className="summary-layout-editor-required-pill">Required</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="summary-layout-editor-remove"
+                                onClick={() => onRemoveSummaryLayoutColumn(column.id)}
+                                aria-label={`Remove ${previewColumn.header}`}
+                              >
+                                -
+                              </button>
+                            )}
                             <button
                               type="button"
                               className="summary-layout-editor-handle"
@@ -5519,20 +5514,6 @@ function App() {
                       </Fragment>
                     )
                   })}
-                  <div className="summary-layout-editor-column summary-layout-editor-column-fixed" style={{ width: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH }}>
-                    <div className="summary-layout-editor-column-controls summary-layout-editor-column-controls-fixed">
-                      <span className="summary-layout-editor-fixed-pill">Fixed</span>
-                    </div>
-                    <div className="summary-layout-editor-cell summary-layout-editor-header-cell">Row Total</div>
-                    {(summaryLayoutPreviewRows.length > 0 ? summaryLayoutPreviewRows : [null, null, null]).map((row, previewRowIndex) => (
-                      <div key={`row-total-preview-${previewRowIndex}`} className="summary-layout-editor-cell">
-                        {row ? formatMinutesAsHours(row.rowTotalMinutes) : <span className="summary-layout-editor-placeholder">Preview</span>}
-                      </div>
-                    ))}
-                    <div className="summary-layout-editor-cell summary-layout-editor-footer-cell">
-                      {weeklySummary ? formatMinutesAsHours(weeklySummary.weekTotalMinutes) : ''}
-                    </div>
-                  </div>
                 </div>
 
                 {summaryLayoutInsertionIndex !== null ? (
@@ -7050,6 +7031,16 @@ function buildSummaryViewColumn(column: SummaryLayoutColumn): SummaryLayoutViewC
     }
   }
 
+  if (column.kind === 'rowTotal') {
+    return {
+      kind: 'rowTotal',
+      id: column.id,
+      header: 'Row Total',
+      width: SUMMARY_LAYOUT_ROW_TOTAL_WIDTH,
+      wraps: false,
+    }
+  }
+
   return {
     kind: 'freeText',
     id: column.id,
@@ -7064,6 +7055,10 @@ function buildSummaryTableCellClassName(
   row: TimelineWeeklySummary['rows'][number],
 ): string {
   const classNames: string[] = []
+
+  if (column.kind === 'rowTotal') {
+    classNames.push('summary-row-total')
+  }
 
   if (
     column.kind === 'field'
@@ -7141,6 +7136,10 @@ function renderSummaryTableCell(
     )
   }
 
+  if (column.kind === 'rowTotal') {
+    return formatMinutesAsHours(row.rowTotalMinutes)
+  }
+
   if (column.kind === 'freeText') {
     return <span className="summary-free-text-cell" aria-hidden="true" />
   }
@@ -7162,6 +7161,10 @@ function renderSummaryPreviewCell(
   if (column.kind === 'day' && column.dayIndex !== undefined) {
     const cell = row.cells[column.dayIndex]
     return cell && cell.totalMinutes > 0 ? formatMinutesAsHours(cell.totalMinutes) : '-'
+  }
+
+  if (column.kind === 'rowTotal') {
+    return formatMinutesAsHours(row.rowTotalMinutes)
   }
 
   if (column.kind === 'freeText') {
@@ -7188,7 +7191,32 @@ function renderSummaryPreviewFooter(
     return formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
   }
 
+  if (column.kind === 'rowTotal') {
+    return formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+  }
+
   return ''
+}
+
+function renderSummaryFooterCell(
+  column: SummaryLayoutViewColumn,
+  columnIndex: number,
+  summaryFooterLabelIndex: number,
+  weeklySummary: TimelineWeeklySummary,
+) {
+  if (column.kind === 'day' && column.dayIndex !== undefined) {
+    return formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
+  }
+
+  if (column.kind === 'rowTotal') {
+    return formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+  }
+
+  return (
+    summaryFooterLabelIndex >= 0
+    && columnIndex === summaryFooterLabelIndex
+    && column.kind !== 'day'
+  ) ? 'Day Totals' : ''
 }
 
 function buildSummaryLayoutInsertOptions(preset: SummaryLayoutPreset): Array<{
@@ -7245,6 +7273,10 @@ function buildSummaryLayoutInsertOptions(preset: SummaryLayoutPreset): Array<{
       createColumn: () => createSummaryLayoutFreeTextColumn(),
     },
   ]
+}
+
+function countSummaryLayoutNonTotalColumns(columns: SummaryLayoutColumn[]): number {
+  return columns.filter((column) => column.kind !== 'rowTotal').length
 }
 
 function moveSummaryLayoutColumn(
