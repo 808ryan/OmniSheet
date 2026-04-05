@@ -485,6 +485,7 @@ pub enum SummaryLayoutColumn {
         day_index: u8,
     },
     FreeText { id: String, label: String },
+    RowTotal { id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -873,6 +874,17 @@ mod tests {
         match parsed {
             SummaryLayoutColumn::Day { day_index, .. } => assert_eq!(day_index, 1),
             _ => panic!("expected day column"),
+        }
+
+        let parsed_row_total: SummaryLayoutColumn = serde_json::from_value(serde_json::json!({
+            "kind": "rowTotal",
+            "id": "row-total"
+        }))
+        .expect("row total payload should deserialize");
+
+        match parsed_row_total {
+            SummaryLayoutColumn::RowTotal { id } => assert_eq!(id, "row-total"),
+            _ => panic!("expected row total column"),
         }
     }
 }

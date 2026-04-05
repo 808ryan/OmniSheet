@@ -13,8 +13,10 @@ export interface SummaryLayoutFieldOption {
   width: string
 }
 
+export const SUMMARY_LAYOUT_STATE_VERSION = 2
 export const SUMMARY_LAYOUT_MAX_NAME_LENGTH = 40
 export const DEFAULT_SUMMARY_LAYOUT_PRESET_ID = 'preset-standard'
+export const DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID = 'row-total'
 
 export const SUMMARY_LAYOUT_FIELD_OPTIONS: SummaryLayoutFieldOption[] = [
   {
@@ -84,7 +86,7 @@ export const SUMMARY_LAYOUT_FIELD_OPTIONS: SummaryLayoutFieldOption[] = [
 
 export function buildDefaultSummaryLayoutState(): SummaryLayoutState {
   return {
-    version: 1,
+    version: SUMMARY_LAYOUT_STATE_VERSION,
     selectedPresetId: DEFAULT_SUMMARY_LAYOUT_PRESET_ID,
     presets: [
       {
@@ -103,6 +105,7 @@ export function buildDefaultSummaryLayoutState(): SummaryLayoutState {
           { kind: 'day', id: 'day-4', dayIndex: 4 },
           { kind: 'day', id: 'day-5', dayIndex: 5 },
           { kind: 'day', id: 'day-6', dayIndex: 6 },
+          createSummaryLayoutRowTotalColumn(),
         ],
       },
     ],
@@ -145,6 +148,15 @@ export function createSummaryLayoutFreeTextColumn(label = 'Free Text'): SummaryL
     kind: 'freeText',
     id: generateSummaryLayoutId('free-text'),
     label,
+  }
+}
+
+export function createSummaryLayoutRowTotalColumn(
+  id = DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID,
+): SummaryLayoutColumn {
+  return {
+    kind: 'rowTotal',
+    id,
   }
 }
 

@@ -256,6 +256,10 @@ export type SummaryLayoutColumn =
     id: string
     label: string
   }
+  | {
+    kind: 'rowTotal'
+    id: string
+  }
 
 export interface SummaryLayoutPreset {
   id: string
