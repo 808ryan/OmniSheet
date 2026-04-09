@@ -123,6 +123,14 @@ interface VoiceDraftMetadata {
   transcriptionDurationMs: number
 }
 
+interface TimelineBlockPalette {
+  accent: string
+  fill: string
+  border: string
+  selectionRing: string
+  text: string
+}
+
 interface EngagementFormState {
   id?: string
   code: string
@@ -377,10 +385,10 @@ const TIMELINE_CANVAS_TOP_PADDING = 18
 const TIMELINE_CANVAS_BOTTOM_PADDING = 20
 const TIMELINE_OVERLAP_GAP_PERCENT = 1.2
 const TIMELINE_NEUTRAL_COLOR = '#6F7B89'
-const TIMELINE_ACCENT_BRIGHTNESS_THRESHOLD = 0.8
-const TIMELINE_ACCENT_DARKEN_FACTOR = 0.72
-const TIMELINE_ACCENT_SATURATION_BOOST = 1.18
-const TIMELINE_ACCENT_LIGHTEN_RATIO = 0.24
+const TIMELINE_BLOCK_FILL_ALPHA = 0.2
+const TIMELINE_BLOCK_BORDER_ALPHA = 0.34
+const TIMELINE_BLOCK_SELECTION_RING_ALPHA = 0.3
+const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
@@ -4110,7 +4118,7 @@ function App() {
                           draggedEntryOriginPosition.height,
                         )
                         const ghostReviewLabel = getTimelineBlockReviewLabel(ghostEntry.warningFlags)
-                        const ghostAccentColor = deriveTimelineAccentColor(ghostColor)
+                        const ghostPalette = buildTimelineBlockPalette(ghostColor)
                         const ghostNeedsReview = ghostReviewLabel !== null
 
                         return (
@@ -4121,10 +4129,7 @@ function App() {
                               height: draggedEntryOriginPosition.height,
                               left: `${draggedEntryOriginPosition.leftPercent}%`,
                               width: `${draggedEntryOriginPosition.widthPercent}%`,
-                              '--timeline-block-color': ghostColor,
-                              '--timeline-block-accent': ghostAccentColor,
-                              backgroundColor: ghostColor,
-                              color: colorForBackground(ghostColor),
+                              ...buildTimelineBlockCssVariables(ghostPalette),
                             } as CSSProperties}
                             aria-hidden="true"
                           >
@@ -4150,8 +4155,7 @@ function App() {
                       const isDragPreview =
                         timelineDragState?.isDragging
                         && timelineDragState.entryId === entry.id
-                      const textColor = colorForBackground(blockColor)
-                      const blockAccentColor = deriveTimelineAccentColor(blockColor)
+                      const blockPalette = buildTimelineBlockPalette(blockColor)
 
                       if (isDragPreview) {
                         return (
@@ -4163,9 +4167,7 @@ function App() {
                               height: positionedEntry.height,
                               left: `${positionedEntry.leftPercent}%`,
                               width: `${positionedEntry.widthPercent}%`,
-                              '--timeline-block-color': blockColor,
-                              '--timeline-block-accent': blockAccentColor,
-                              borderColor: blockColor,
+                              ...buildTimelineBlockCssVariables(blockPalette),
                             } as CSSProperties}
                             aria-hidden="true"
                           >
@@ -4193,10 +4195,7 @@ function App() {
                             height: positionedEntry.height,
                             left: `${positionedEntry.leftPercent}%`,
                             width: `${positionedEntry.widthPercent}%`,
-                            '--timeline-block-color': blockColor,
-                            '--timeline-block-accent': blockAccentColor,
-                            backgroundColor: blockColor,
-                            color: textColor,
+                            ...buildTimelineBlockCssVariables(blockPalette),
                           } as CSSProperties}
                           onClick={() => onSelectTimelineBlock(entry)}
                           onPointerDown={(event) => onStartTimelineDrag(event, entry)}
@@ -4365,7 +4364,7 @@ function App() {
                             draggedWeekEntryOriginPosition.height,
                           )
                           const ghostReviewLabel = getTimelineBlockReviewLabel(ghostEntry.warningFlags)
-                          const ghostAccentColor = deriveTimelineAccentColor(ghostColor)
+                          const ghostPalette = buildTimelineBlockPalette(ghostColor)
                           const ghostNeedsReview = ghostReviewLabel !== null
 
                           return (
@@ -4376,10 +4375,7 @@ function App() {
                                 height: draggedWeekEntryOriginPosition.height,
                                 left: draggedWeekEntryOriginPosition.left,
                                 width: draggedWeekEntryOriginPosition.width,
-                                '--timeline-block-color': ghostColor,
-                                '--timeline-block-accent': ghostAccentColor,
-                                backgroundColor: ghostColor,
-                                color: colorForBackground(ghostColor),
+                                ...buildTimelineBlockCssVariables(ghostPalette),
                               } as CSSProperties}
                               aria-hidden="true"
                             >
@@ -4405,8 +4401,7 @@ function App() {
                         const isDragPreview =
                           timelineDragState?.isDragging
                           && timelineDragState.entryId === entry.id
-                        const textColor = colorForBackground(blockColor)
-                        const blockAccentColor = deriveTimelineAccentColor(blockColor)
+                        const blockPalette = buildTimelineBlockPalette(blockColor)
 
                         if (isDragPreview) {
                           return (
@@ -4418,9 +4413,7 @@ function App() {
                                 height: positionedEntry.height,
                                 left: positionedEntry.left,
                                 width: positionedEntry.width,
-                                '--timeline-block-color': blockColor,
-                                '--timeline-block-accent': blockAccentColor,
-                                borderColor: blockColor,
+                                ...buildTimelineBlockCssVariables(blockPalette),
                               } as CSSProperties}
                               aria-hidden="true"
                             >
@@ -4448,10 +4441,7 @@ function App() {
                               height: positionedEntry.height,
                               left: positionedEntry.left,
                               width: positionedEntry.width,
-                              '--timeline-block-color': blockColor,
-                              '--timeline-block-accent': blockAccentColor,
-                              backgroundColor: blockColor,
-                              color: textColor,
+                              ...buildTimelineBlockCssVariables(blockPalette),
                             } as CSSProperties}
                             onClick={() => onSelectWeekTimelineBlock(entry)}
                             onPointerDown={(event) => onStartTimelineDrag(event, entry, 'week')}
@@ -6786,57 +6776,43 @@ function resolveTimelineBlockColor(
   return TIMELINE_NEUTRAL_COLOR
 }
 
-function colorForBackground(backgroundHex: string): string {
+function buildTimelineBlockPalette(backgroundHex: string): TimelineBlockPalette {
   const normalized = normalizeColorHexInput(backgroundHex) ?? TIMELINE_NEUTRAL_COLOR
-  const red = Number.parseInt(normalized.slice(1, 3), 16)
-  const green = Number.parseInt(normalized.slice(3, 5), 16)
-  const blue = Number.parseInt(normalized.slice(5, 7), 16)
-  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255
+  const { red, green, blue } = parseHexColorChannels(normalized)
 
-  return luminance > 0.62 ? '#0F172A' : '#F8FAFC'
-}
-
-function deriveTimelineAccentColor(backgroundHex: string): string {
-  const normalized = normalizeColorHexInput(backgroundHex) ?? TIMELINE_NEUTRAL_COLOR
-  const red = Number.parseInt(normalized.slice(1, 3), 16)
-  const green = Number.parseInt(normalized.slice(3, 5), 16)
-  const blue = Number.parseInt(normalized.slice(5, 7), 16)
-  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255
-  const average = (red + green + blue) / 3
-  const saturateChannel = (value: number) =>
-    clampColorChannel(average + ((value - average) * TIMELINE_ACCENT_SATURATION_BOOST))
-
-  const saturatedRed = saturateChannel(red)
-  const saturatedGreen = saturateChannel(green)
-  const saturatedBlue = saturateChannel(blue)
-
-  if (luminance >= TIMELINE_ACCENT_BRIGHTNESS_THRESHOLD) {
-    const darkenedRed = clampColorChannel(saturatedRed * TIMELINE_ACCENT_DARKEN_FACTOR)
-    const darkenedGreen = clampColorChannel(saturatedGreen * TIMELINE_ACCENT_DARKEN_FACTOR)
-    const darkenedBlue = clampColorChannel(saturatedBlue * TIMELINE_ACCENT_DARKEN_FACTOR)
-
-    return `#${colorChannelToHex(darkenedRed)}${colorChannelToHex(darkenedGreen)}${colorChannelToHex(darkenedBlue)}`
+  return {
+    accent: normalized,
+    fill: colorChannelsToRgba(red, green, blue, TIMELINE_BLOCK_FILL_ALPHA),
+    border: colorChannelsToRgba(red, green, blue, TIMELINE_BLOCK_BORDER_ALPHA),
+    selectionRing: colorChannelsToRgba(red, green, blue, TIMELINE_BLOCK_SELECTION_RING_ALPHA),
+    text: TIMELINE_BLOCK_TEXT_COLOR,
   }
-
-  const brightenedRed = clampColorChannel(
-    saturatedRed + ((255 - saturatedRed) * TIMELINE_ACCENT_LIGHTEN_RATIO),
-  )
-  const brightenedGreen = clampColorChannel(
-    saturatedGreen + ((255 - saturatedGreen) * TIMELINE_ACCENT_LIGHTEN_RATIO),
-  )
-  const brightenedBlue = clampColorChannel(
-    saturatedBlue + ((255 - saturatedBlue) * TIMELINE_ACCENT_LIGHTEN_RATIO),
-  )
-
-  return `#${colorChannelToHex(brightenedRed)}${colorChannelToHex(brightenedGreen)}${colorChannelToHex(brightenedBlue)}`
 }
 
-function clampColorChannel(value: number): number {
-  return Math.max(0, Math.min(255, Math.round(value)))
+function buildTimelineBlockCssVariables(palette: TimelineBlockPalette): CSSProperties {
+  return {
+    '--timeline-block-fill': palette.fill,
+    '--timeline-block-border': palette.border,
+    '--timeline-block-selection-ring': palette.selectionRing,
+    '--timeline-block-accent': palette.accent,
+    color: palette.text,
+  } as CSSProperties
 }
 
-function colorChannelToHex(value: number): string {
-  return value.toString(16).padStart(2, '0').toUpperCase()
+function parseHexColorChannels(colorHex: string): {
+  red: number
+  green: number
+  blue: number
+} {
+  return {
+    red: Number.parseInt(colorHex.slice(1, 3), 16),
+    green: Number.parseInt(colorHex.slice(3, 5), 16),
+    blue: Number.parseInt(colorHex.slice(5, 7), 16),
+  }
+}
+
+function colorChannelsToRgba(red: number, green: number, blue: number, alpha: number): string {
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`
 }
 
 function normalizeCodeTags(tags: string[]): string[] {
