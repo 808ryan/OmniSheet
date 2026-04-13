@@ -1096,6 +1096,50 @@ button.danger {
   overflow: auto;
 }
 
+.timeline-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.timeline-editor-header h3 {
+  margin: 0;
+}
+
+.timeline-editor-close {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  flex: none;
+  align-self: flex-start;
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--ink-soft);
+  box-shadow: var(--glass-inset);
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.timeline-editor-close:hover:not(:disabled) {
+  background: rgba(31, 122, 255, 0.08);
+  border-color: rgba(31, 122, 255, 0.28);
+  color: var(--ink);
+}
+
+.timeline-editor-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.timeline-editor-close:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
 .timeline-editor .stack,
 .timeline-editor label {
   min-width: 0;

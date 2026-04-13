@@ -1823,6 +1823,13 @@ function App() {
     [],
   )
 
+  const clearTimelineSelection = useCallback(() => {
+    setSelectedEntryId(null)
+    setEntryDraft(null)
+    setTimelineContextMenu(null)
+    setTimelineDragStateWithRef(() => null)
+  }, [setTimelineDragStateWithRef])
+
   const updateSelectedDate = useCallback((
     nextDate: string,
     options?: {
@@ -1842,11 +1849,8 @@ function App() {
       return
     }
 
-    setSelectedEntryId(null)
-    setEntryDraft(null)
-    setTimelineContextMenu(null)
-    setTimelineDragStateWithRef(() => null)
-  }, [setTimelineDragStateWithRef])
+    clearTimelineSelection()
+  }, [clearTimelineSelection])
 
   const commitTimelineDragDrop = useCallback(
     (dragState: TimelineDragState) => {
@@ -3636,10 +3640,7 @@ function App() {
 
   const onSelectView = (view: View) => {
     if (view === 'week' && activeView !== 'week') {
-      setSelectedEntryId(null)
-      setEntryDraft(null)
-      setTimelineContextMenu(null)
-      setTimelineDragStateWithRef(() => null)
+      clearTimelineSelection()
     }
 
     setActiveView(view)
@@ -3647,7 +3648,21 @@ function App() {
 
   const timelineEditorPanel = (
     <aside className="timeline-editor">
-      <h3>Edit Entry</h3>
+      <div className="timeline-editor-header">
+        <h3>Edit Entry</h3>
+        {entryDraft ? (
+          <button
+            type="button"
+            className="timeline-editor-close"
+            aria-label="Close edit entry"
+            title="Close edit entry"
+            onClick={clearTimelineSelection}
+            disabled={isBusy || isTimelineDeleteBusy}
+          >
+            <span aria-hidden="true">×</span>
+          </button>
+        ) : null}
+      </div>
       {entryDraft ? (
         <form className="stack" onSubmit={onSaveEntryDraft}>
           <label>
