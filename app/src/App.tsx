@@ -298,6 +298,12 @@ interface PositionedWeekTimelineEntry extends PositionedTimelineEntry {
   width: number
 }
 
+interface WeekTimelineLayoutMetrics {
+  headerHeight: number
+  gutterLeft: number
+  dayWidth: number
+}
+
 interface SummaryNotesModalState {
   rowIndex: number
   dayIndex: number
@@ -395,6 +401,9 @@ const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
 const WEEK_TIMELINE_HEADER_HEIGHT = 64
 const WEEK_TIMELINE_GUTTER_LEFT = 68
 const WEEK_TIMELINE_DAY_WIDTH = 176
+const COMPACT_WEEK_TIMELINE_GUTTER_LEFT = 58
+const COMPACT_WEEK_TIMELINE_DAY_WIDTH = 154
+const WEEK_TIMELINE_COMPACT_MEDIA_QUERY = '(max-width: 720px)'
 const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
   startMinute: 0,
   endMinute: MINUTES_IN_DAY,
@@ -677,6 +686,13 @@ function App() {
   const summaryLayoutDragCaptureTargetRef = useRef<HTMLButtonElement | null>(null)
   const summaryLayoutDropCommitFrameRef = useRef<number | null>(null)
   const summaryNotesModalRef = useRef<HTMLDivElement | null>(null)
+  const [isCompactWeekTimeline, setIsCompactWeekTimeline] = useState(
+    () => (
+      typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia(WEEK_TIMELINE_COMPACT_MEDIA_QUERY).matches
+    ),
+  )
   const commitSummaryLayoutDragState = useCallback((next: SummaryLayoutDragState | null) => {
     summaryLayoutDragStateRef.current = next
     setSummaryLayoutDragState(next)
@@ -712,6 +728,10 @@ function App() {
     clearSummaryLayoutDropAnimation()
     summaryLayoutColumnRefs.current = {}
   }, [clearSummaryLayoutDropAnimation, commitSummaryLayoutDragState, releaseSummaryLayoutPointerCapture])
+  const weekTimelineLayoutMetrics = useMemo(
+    () => buildWeekTimelineLayoutMetrics(isCompactWeekTimeline),
+    [isCompactWeekTimeline],
+  )
 
   const loadedTimelineEntries = useMemo(() => {
     const byId = new Map<string, TimelineEntry>()
@@ -1006,11 +1026,13 @@ function App() {
       weekTimelineEntries,
       weekTimelineDays,
       timelineWindow,
+      weekTimelineLayoutMetrics,
       timelinePositioningPreferences,
       timelineDragState,
     ),
     [
       timelineDragState,
+      weekTimelineLayoutMetrics,
       timelinePositioningPreferences,
       timelineWindow,
       weekTimelineDays,
@@ -1022,11 +1044,13 @@ function App() {
       weekTimelineEntriesForLayout,
       weekTimelineDays,
       timelineWindow,
+      weekTimelineLayoutMetrics,
       timelinePositioningPreferences,
       timelineDragState,
     ),
     [
       timelineDragState,
+      weekTimelineLayoutMetrics,
       timelinePositioningPreferences,
       timelineWindow,
       weekTimelineDays,
@@ -1361,6 +1385,27 @@ function App() {
     tauriRuntime,
     todayDate,
   ])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return
+    }
+
+    const mediaQuery = window.matchMedia(WEEK_TIMELINE_COMPACT_MEDIA_QUERY)
+    const handleChange = (event: MediaQueryListEvent) => {
+      setIsCompactWeekTimeline(event.matches)
+    }
+
+    setIsCompactWeekTimeline(mediaQuery.matches)
+
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', handleChange)
+      return () => mediaQuery.removeEventListener('change', handleChange)
+    }
+
+    mediaQuery.addListener(handleChange)
+    return () => mediaQuery.removeListener(handleChange)
+  }, [])
 
   useEffect(() => {
     if (!tauriRuntime || !hasInitializedRef.current) {
@@ -2538,6 +2583,7 @@ function App() {
           grid,
           weekTimelineDays,
           timelineWindow,
+          weekTimelineLayoutMetrics,
         )
         : {
           date: current.originalDate,
@@ -2616,6 +2662,7 @@ function App() {
     setTimelineDragStateWithRef,
     timelineWindow,
     weekTimelineDays,
+    weekTimelineLayoutMetrics,
   ])
 
   useEffect(() => {
@@ -2889,6 +2936,7 @@ function App() {
         grid,
         weekTimelineDays,
         timelineWindow,
+        weekTimelineLayoutMetrics,
       ).minute
       : clientYToTimelineMinute(event.clientY, grid, timelineWindow)
     const pointerOffsetMinutes = Math.min(
@@ -2952,6 +3000,7 @@ function App() {
             grid,
             weekTimelineDays,
             timelineWindow,
+            weekTimelineLayoutMetrics,
           ).minute
           : entry.startMinute
       )
@@ -3043,6 +3092,7 @@ function App() {
         grid,
         weekTimelineDays,
         timelineWindow,
+        weekTimelineLayoutMetrics,
       )
       : {
         date: selectedDateRef.current,
@@ -3089,6 +3139,7 @@ function App() {
         grid,
         weekTimelineDays,
         timelineWindow,
+        weekTimelineLayoutMetrics,
       )
       : {
         date: selectedDateRef.current,
@@ -4292,6 +4343,11 @@ function App() {
             <div className={`timeline-layout week-timeline-layout ${selectedEntry ? 'has-editor' : 'full-width'}`}>
               <div
                 className={`timeline-grid week-timeline-grid ${(timelineDragState?.isDragging && timelineDragState.surface === 'week') ? 'dragging' : ''}`}
+                style={{
+                  '--week-timeline-gutter-left': `${weekTimelineLayoutMetrics.gutterLeft}px`,
+                  '--week-timeline-day-width': `${weekTimelineLayoutMetrics.dayWidth}px`,
+                  '--week-timeline-header-height': `${weekTimelineLayoutMetrics.headerHeight}px`,
+                } as CSSProperties}
                 role="list"
                 aria-label="Week timeline entries"
                 aria-busy={isWeekTimelineLoading}
@@ -4300,8 +4356,8 @@ function App() {
                 <div
                   className="week-timeline-surface"
                   style={{
-                    minWidth: `${WEEK_TIMELINE_GUTTER_LEFT + (WEEK_TIMELINE_DAY_WIDTH * weekTimelineDays.length)}px`,
-                    minHeight: `${timelineCanvasHeight + WEEK_TIMELINE_HEADER_HEIGHT}px`,
+                    minWidth: `${weekTimelineLayoutMetrics.gutterLeft + (weekTimelineLayoutMetrics.dayWidth * weekTimelineDays.length)}px`,
+                    minHeight: `${timelineCanvasHeight + weekTimelineLayoutMetrics.headerHeight}px`,
                   }}
                 >
                   <div className="week-timeline-header">
@@ -4350,13 +4406,31 @@ function App() {
                       </div>
                     ))}
 
+                    <div className="week-timeline-frozen-gutter-layer" aria-hidden="true">
+                      <div className="week-timeline-frozen-gutter">
+                        {timelineHourMarks.map((minute) => (
+                          <div
+                            key={`week-gutter-hour-${minute}`}
+                            className="week-timeline-frozen-hour-mark"
+                            style={{
+                              top:
+                                TIMELINE_CANVAS_TOP_PADDING
+                                + (minute - timelineWindow.startMinute) * PIXELS_PER_MINUTE,
+                            }}
+                          >
+                            <span>{minuteToLabel(minute)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
                     {weekTimelineDays.map((day, dayIndex) => (
                       <div
                         key={`week-column-${day.date}`}
                         className={`week-timeline-day-column ${day.date === selectedDate ? 'is-selected' : ''}`}
                         style={{
-                          left: `${WEEK_TIMELINE_GUTTER_LEFT + (dayIndex * WEEK_TIMELINE_DAY_WIDTH)}px`,
-                          width: `${WEEK_TIMELINE_DAY_WIDTH}px`,
+                          left: `${weekTimelineLayoutMetrics.gutterLeft + (dayIndex * weekTimelineLayoutMetrics.dayWidth)}px`,
+                          width: `${weekTimelineLayoutMetrics.dayWidth}px`,
                           top: '0px',
                           minHeight: `${timelineCanvasHeight}px`,
                         }}
@@ -6500,26 +6574,35 @@ function clientYToTimelineMinute(
   return timelineWindow.startMinute + (relativeY / pixelsPerMinute)
 }
 
+function buildWeekTimelineLayoutMetrics(isCompact: boolean): WeekTimelineLayoutMetrics {
+  return {
+    headerHeight: WEEK_TIMELINE_HEADER_HEIGHT,
+    gutterLeft: isCompact ? COMPACT_WEEK_TIMELINE_GUTTER_LEFT : WEEK_TIMELINE_GUTTER_LEFT,
+    dayWidth: isCompact ? COMPACT_WEEK_TIMELINE_DAY_WIDTH : WEEK_TIMELINE_DAY_WIDTH,
+  }
+}
+
 function resolveWeekTimelinePointerSlot(
   clientX: number,
   clientY: number,
   grid: HTMLDivElement,
   days: TimelineWeekView['days'],
   timelineWindow: TimelineWindow,
+  layoutMetrics: WeekTimelineLayoutMetrics,
 ): {
   date: string
   dayIndex: number
   minute: number
 } {
   const gridRect = grid.getBoundingClientRect()
-  const relativeX = clientX - gridRect.left + grid.scrollLeft - WEEK_TIMELINE_GUTTER_LEFT
-  const unclampedDayIndex = Math.floor(relativeX / WEEK_TIMELINE_DAY_WIDTH)
+  const relativeX = clientX - gridRect.left + grid.scrollLeft - layoutMetrics.gutterLeft
+  const unclampedDayIndex = Math.floor(relativeX / layoutMetrics.dayWidth)
   const dayIndex = Math.min(Math.max(unclampedDayIndex, 0), Math.max(days.length - 1, 0))
   const relativeY =
     clientY
     - gridRect.top
     + grid.scrollTop
-    - WEEK_TIMELINE_HEADER_HEIGHT
+    - layoutMetrics.headerHeight
     - TIMELINE_CANVAS_TOP_PADDING
   const minute = timelineWindow.startMinute + (relativeY / PIXELS_PER_MINUTE)
 
@@ -6715,6 +6798,7 @@ function positionWeekTimelineEntries(
   entries: TimelineEntry[],
   days: TimelineWeekView['days'],
   timelineWindow: TimelineWindow,
+  layoutMetrics: WeekTimelineLayoutMetrics,
   options?: PositionTimelineEntriesOptions,
   dragState?: TimelineDragState | null,
 ): PositionedWeekTimelineEntry[] {
@@ -6741,10 +6825,10 @@ function positionWeekTimelineEntries(
         ...positionedEntry,
         dayIndex,
         left:
-          WEEK_TIMELINE_GUTTER_LEFT
-          + (dayIndex * WEEK_TIMELINE_DAY_WIDTH)
-          + ((positionedEntry.leftPercent / 100) * WEEK_TIMELINE_DAY_WIDTH),
-        width: (positionedEntry.widthPercent / 100) * WEEK_TIMELINE_DAY_WIDTH,
+          layoutMetrics.gutterLeft
+          + (dayIndex * layoutMetrics.dayWidth)
+          + ((positionedEntry.leftPercent / 100) * layoutMetrics.dayWidth),
+        width: (positionedEntry.widthPercent / 100) * layoutMetrics.dayWidth,
       })
     })
   })
