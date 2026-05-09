@@ -685,6 +685,15 @@ mod tests {
     }
 
     #[test]
+    fn prompt_includes_bare_duration_worklog_guidance() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("Bare duration worklog cues"));
+        assert!(prompt.contains("\"30 minutes to SAP ITGCs\""));
+        assert!(prompt.contains("do not interpret them as start now and end later"));
+        assert!(prompt.contains("Do not return startTime \"14:40\" and endTime \"15:10\""));
+    }
+
+    #[test]
     fn prompt_makes_activity_null_a_last_resort_when_engagement_is_known() {
         let prompt = build_system_prompt();
         assert!(prompt.contains("choose the best available activityRef"));
