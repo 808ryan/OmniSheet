@@ -631,6 +631,8 @@ pub struct LlmEntry {
     pub end_time: Option<String>,
     pub duration_minutes: Option<i64>,
     pub description: Option<String>,
+    pub sequence_relation: Option<String>,
+    pub duration_source: Option<String>,
     pub activity_reason: Option<String>,
     pub alternative_activities: Option<Vec<LlmAlternativeActivity>>,
     pub confidence: Option<f64>,
