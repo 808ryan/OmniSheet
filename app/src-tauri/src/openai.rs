@@ -37,6 +37,8 @@ Return strict JSON with this shape:
       "endTime": "HH:MM" | null,
       "durationMinutes": number | null,
       "description": string,
+      "sequenceRelation": "startsAfterPrevious" | "independent" | null,
+      "durationSource": "explicit" | "defaulted" | "inferred" | null,
       "activityReason": string | null,
       "alternativeActivities": [
         {
@@ -62,11 +64,16 @@ Temporal inference rules (priority order):
    - Infer endTime from clientLocalTime.
    - Infer startTime as endTime - durationMinutes.
    - Set durationMinutes consistently.
-4) Relative anchor cues (for example: "since lunch", "since 1pm"):
+4) Bare duration worklog cues without explicit clock times (for example: "15 minutes to non-sap", "30 minutes on pcc review", "spent 15 minutes on non-sap"):
+   - Treat these as already completed or recent work by default; do not interpret them as start now and end later.
+   - When the phrasing indicates recent/current work, infer endTime from clientLocalTime.
+   - Infer startTime as endTime - durationMinutes.
+   - If the phrasing is clearly future/planned (for example: "tomorrow 15 minutes on non-sap", "going to spend 15 minutes on non-sap"), do not anchor to clientLocalTime without a stronger time cue.
+5) Relative anchor cues (for example: "since lunch", "since 1pm"):
    - Infer a reasonable start from the anchor.
    - Infer endTime from clientLocalTime.
    - Set durationMinutes consistently.
-5) Only when no usable temporal intent exists:
+6) Only when no usable temporal intent exists:
    - Set startTime/endTime/durationMinutes to null.
 
 Additional rules:
@@ -74,6 +81,9 @@ Additional rules:
 - Return one entry per distinct work event.
 - Preserve the order that events appear in the message.
 - Do not split a single event into multiple entries unless intent or time window clearly changes.
+- For sequential connectors such as "then", "after that", "afterwards", "next", or "following that", set sequenceRelation = "startsAfterPrevious" on the later entry unless the later entry has its own explicit clock time.
+- Do not invent time gaps after "then" or "after that"; the later entry should start when the prior entry ends unless an explicit later time is stated.
+- Set durationSource = "explicit" only when the user stated the duration for that entry; set "defaulted" for a missing duration default, and "inferred" for a model-estimated duration.
 - Infer date from capture context and inferred time window.
 - Never default missing times to 00:00.
 - If uncertain, set lower confidence.
@@ -100,6 +110,21 @@ Examples:
   Expected temporal intent: startTime "18:00", endTime "18:30", durationMinutes 30.
 - Message: "finished a 30-minute meeting at 6pm"
   Expected temporal intent: startTime "17:30", endTime "18:00", durationMinutes 30.
+- Message: "15 minutes to non-sap FDT-DB-02 with Nick"
+  clientLocalTime: "18:18"
+  Expected temporal intent: when the phrasing indicates recent/current work, infer startTime "18:03", endTime "18:18", durationMinutes 15.
+- Message: "30 minutes to SAP ITGCs"
+  clientLocalTime: "14:40"
+  Expected temporal intent: startTime "14:10", endTime "14:40", durationMinutes 30. Do not return startTime "14:40" and endTime "15:10".
+- Message: "tomorrow 15 minutes on non-sap"
+  Expected temporal intent: startTime null, endTime null, durationMinutes 15.
+- Message: "About to spend 30 minutes with PT on FF ITGCs. After that, an hour on Non-SAP ITGCs."
+  clientLocalTime: "15:27"
+  Expected temporal intent: first entry startTime "15:27", endTime "15:57", durationMinutes 30, durationSource "explicit"; second entry startTime "15:57", endTime "16:57", durationMinutes 60, sequenceRelation "startsAfterPrevious", durationSource "explicit".
+- Message: "At 1pm today, I worked on FF ITGCs. Then I worked on PCC report 1."
+  Expected temporal intent: first entry startTime "13:00", endTime "13:30", durationMinutes 30; second entry sequenceRelation "startsAfterPrevious", startTime "13:30", endTime "14:00", durationMinutes 30, durationSource "defaulted".
+- Message: "At 1pm I worked on FF ITGCs. Then at 3pm I worked on PCC report 1."
+  Expected temporal intent: preserve the explicit 15:00 second start; do not force the second entry to start immediately after the first.
 - Message: "worked on controls testing"
   Expected temporal intent: startTime null, endTime null, durationMinutes null.
 "#
@@ -376,18 +401,16 @@ mod tests {
     #[test]
     fn prompt_includes_morning_duration_example() {
         let prompt = build_system_prompt();
+        assert!(prompt.contains("\"in the morning i spent 30 minutes on a PCC related meeting\""));
         assert!(prompt.contains(
-            "\"in the morning i spent 30 minutes on a PCC related meeting\""
+            "Expected temporal intent: startTime \"09:30\", endTime \"10:00\", durationMinutes 30."
         ));
-        assert!(prompt.contains("Expected temporal intent: startTime \"09:30\", endTime \"10:00\", durationMinutes 30."));
     }
 
     #[test]
     fn prompt_disambiguates_single_time_duration_anchor_defaults() {
         let prompt = build_system_prompt();
-        assert!(prompt.contains(
-            "message includes exactly one explicit clock time plus duration"
-        ));
+        assert!(prompt.contains("message includes exactly one explicit clock time plus duration"));
         assert!(prompt.contains("treat that explicit time as startTime"));
         assert!(prompt.contains("clear end-anchor wording"));
         assert!(prompt.contains("\"going to spend 30 minutes at 6pm for pcc\""));
@@ -398,6 +421,15 @@ mod tests {
         assert!(prompt.contains(
             "Expected temporal intent: startTime \"17:30\", endTime \"18:00\", durationMinutes 30."
         ));
+    }
+
+    #[test]
+    fn prompt_includes_bare_duration_worklog_guidance() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("Bare duration worklog cues"));
+        assert!(prompt.contains("\"30 minutes to SAP ITGCs\""));
+        assert!(prompt.contains("do not interpret them as start now and end later"));
+        assert!(prompt.contains("Do not return startTime \"14:40\" and endTime \"15:10\""));
     }
 
     #[test]
@@ -430,6 +462,11 @@ mod tests {
         assert!(prompt.contains("distinct work events"));
         assert!(prompt.contains("one entry per distinct work event"));
         assert!(prompt.contains("Preserve the order"));
+        assert!(prompt.contains("\"sequenceRelation\""));
+        assert!(prompt.contains("\"durationSource\""));
+        assert!(prompt.contains("Do not invent time gaps after \"then\" or \"after that\""));
+        assert!(prompt.contains("About to spend 30 minutes with PT on FF ITGCs"));
+        assert!(prompt.contains("Then at 3pm"));
     }
 
     #[test]
