@@ -22,6 +22,8 @@ use crate::openai;
 use crate::state::AppState;
 
 const MINUTES_IN_DAY: i64 = 24 * 60;
+const TIME_INCREMENT_MINUTES: i64 = 15;
+const DEFAULT_FALLBACK_DURATION_MINUTES: i64 = 30;
 const ACTIVITY_FALLBACK_CONFIDENCE_CAP: f64 = 0.60;
 const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
@@ -159,6 +161,7 @@ struct TemporalReference {
 enum TemporalCueType {
     ExplicitClock,
     RelativeDuration,
+    ImplicitRecentDuration,
     None,
 }
 
@@ -166,6 +169,7 @@ fn temporal_cue_type_label(value: TemporalCueType) -> &'static str {
     match value {
         TemporalCueType::ExplicitClock => "explicit_clock",
         TemporalCueType::RelativeDuration => "relative_duration",
+        TemporalCueType::ImplicitRecentDuration => "implicit_recent_duration",
         TemporalCueType::None => "none",
     }
 }
@@ -183,6 +187,8 @@ struct NormalizedEntryResult {
     llm_activity_code: Option<String>,
     llm_activity_reason: Option<String>,
     llm_alternative_activities: Option<Vec<LlmAlternativeActivity>>,
+    llm_sequence_relation: Option<String>,
+    llm_duration_source: Option<String>,
     temporal_cue_type: TemporalCueType,
     temporal_source: &'static str,
 }
@@ -194,6 +200,27 @@ struct PreparedEntry {
     used_temporal_fallback: bool,
     duration_defaulted: bool,
     fallback_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SequencingEntryContext {
+    raw_duration: Option<i64>,
+    llm_sequence_relation: Option<String>,
+    llm_duration_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SequencingAdjustment {
+    applied: bool,
+    reason: Option<&'static str>,
+    original_start_minute: Option<i64>,
+    original_end_minute: Option<i64>,
+    adjusted_start_minute: Option<i64>,
+    adjusted_end_minute: Option<i64>,
+    duration_minutes: Option<i64>,
+    sequence_relation: Option<String>,
+    duration_source: Option<String>,
+    segment_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -268,6 +295,291 @@ fn dedupe_prepared_entries(entries: Vec<PreparedEntry>) -> Vec<PreparedEntry> {
     }
 
     deduped
+}
+
+fn apply_multi_event_sequence_adjustments(
+    entries: &mut [PreparedEntry],
+    contexts: &[SequencingEntryContext],
+    raw_text: &str,
+) -> Vec<SequencingAdjustment> {
+    let mut adjustments = vec![SequencingAdjustment::default(); entries.len()];
+    if entries.len() < 2 {
+        return adjustments;
+    }
+
+    let sequence_segments = split_message_into_sequence_segments(raw_text);
+    let can_map_segments_to_entries = sequence_segments.len() == entries.len();
+
+    for index in 1..entries.len() {
+        let context = contexts.get(index).cloned().unwrap_or_default();
+        let segment = can_map_segments_to_entries
+            .then(|| sequence_segments.get(index).cloned())
+            .flatten();
+        let sequence_relation =
+            normalize_sequence_relation(context.llm_sequence_relation.as_deref());
+        let has_sequence_cue = sequence_relation.as_deref() == Some("starts_after_previous")
+            || segment
+                .as_deref()
+                .is_some_and(segment_starts_with_sequence_connector);
+
+        if !has_sequence_cue {
+            continue;
+        }
+
+        if segment
+            .as_deref()
+            .is_some_and(message_has_explicit_clock_time_cue)
+        {
+            adjustments[index] = SequencingAdjustment {
+                reason: Some("independent_explicit_time"),
+                sequence_relation,
+                duration_source: normalize_duration_source(context.llm_duration_source.as_deref()),
+                segment_text: segment,
+                ..SequencingAdjustment::default()
+            };
+            continue;
+        }
+
+        let previous_end = entries[index - 1].entry.end_minute;
+        if previous_end >= MINUTES_IN_DAY {
+            adjustments[index] = SequencingAdjustment {
+                reason: Some("previous_entry_ends_at_day_end"),
+                sequence_relation,
+                duration_source: normalize_duration_source(context.llm_duration_source.as_deref()),
+                segment_text: segment,
+                ..SequencingAdjustment::default()
+            };
+            continue;
+        }
+
+        let segment_duration = segment.as_deref().and_then(normalized_duration_from_text);
+        let normalized_duration_source =
+            normalize_duration_source(context.llm_duration_source.as_deref());
+        let (duration_minutes, duration_source) = if let Some(duration) = segment_duration {
+            (duration, Some("explicit".to_string()))
+        } else if normalized_duration_source.as_deref() == Some("explicit")
+            && context.raw_duration.is_some_and(|value| value > 0)
+        {
+            (
+                normalize_duration(
+                    context
+                        .raw_duration
+                        .unwrap_or(DEFAULT_FALLBACK_DURATION_MINUTES),
+                ),
+                normalized_duration_source,
+            )
+        } else {
+            (
+                DEFAULT_FALLBACK_DURATION_MINUTES,
+                Some("defaulted".to_string()),
+            )
+        };
+
+        let original_start = entries[index].entry.start_minute;
+        let original_end = entries[index].entry.end_minute;
+        let (adjusted_start, adjusted_end, adjusted_duration) =
+            normalize_update_window(previous_end, previous_end + duration_minutes);
+
+        entries[index].entry.start_minute = adjusted_start;
+        entries[index].entry.end_minute = adjusted_end;
+        entries[index].entry.duration_minutes = adjusted_duration;
+        entries[index].duration_defaulted = duration_source.as_deref() == Some("defaulted");
+        entries[index].used_temporal_fallback = false;
+        entries[index].fallback_summary =
+            build_fallback_summary(false, entries[index].used_activity_fallback);
+
+        adjustments[index] = SequencingAdjustment {
+            applied: true,
+            reason: Some("starts_after_previous"),
+            original_start_minute: Some(original_start),
+            original_end_minute: Some(original_end),
+            adjusted_start_minute: Some(adjusted_start),
+            adjusted_end_minute: Some(adjusted_end),
+            duration_minutes: Some(adjusted_duration),
+            sequence_relation,
+            duration_source,
+            segment_text: segment,
+        };
+    }
+
+    adjustments
+}
+
+fn normalize_sequence_relation(value: Option<&str>) -> Option<String> {
+    let value = normalize_metadata_token(value?);
+    match value.as_str() {
+        "startsafterprevious"
+        | "starts_after_previous"
+        | "afterprevious"
+        | "followingprevious"
+        | "followsprevious" => Some("starts_after_previous".to_string()),
+        "independent" | "explicit" | "independenttime" | "independent_time" => {
+            Some("independent".to_string())
+        }
+        _ => None,
+    }
+}
+
+fn normalize_duration_source(value: Option<&str>) -> Option<String> {
+    let value = normalize_metadata_token(value?);
+    match value.as_str() {
+        "explicit" | "userexplicit" | "user_explicit" => Some("explicit".to_string()),
+        "defaulted" | "default" => Some("defaulted".to_string()),
+        "inferred" | "estimated" => Some("inferred".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_metadata_token(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect::<String>()
+}
+
+fn split_message_into_sequence_segments(raw_text: &str) -> Vec<String> {
+    let connector_spans = sequence_connector_spans(raw_text);
+    if connector_spans.is_empty() {
+        return vec![raw_text.trim().to_string()]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect();
+    }
+
+    let mut segments = Vec::new();
+    let mut segment_start = 0usize;
+    for (connector_start, _) in connector_spans {
+        if connector_start > segment_start {
+            let segment = raw_text[segment_start..connector_start].trim();
+            if !segment.is_empty() {
+                segments.push(segment.to_string());
+            }
+        }
+        segment_start = connector_start;
+    }
+
+    let final_segment = raw_text[segment_start..].trim();
+    if !final_segment.is_empty() {
+        segments.push(final_segment.to_string());
+    }
+
+    segments
+}
+
+fn sequence_connector_spans(raw_text: &str) -> Vec<(usize, usize)> {
+    let lower = raw_text.to_ascii_lowercase();
+    let connector_patterns = ["following that", "after that", "afterwards", "then", "next"];
+    let mut spans = Vec::<(usize, usize)>::new();
+
+    for pattern in connector_patterns {
+        for (start, _) in lower.match_indices(pattern) {
+            let end = start + pattern.len();
+            if has_word_boundary(&lower, start, end) {
+                spans.push((start, end));
+            }
+        }
+    }
+
+    spans.sort_by_key(|(start, end)| (*start, *end));
+    let mut deduped = Vec::<(usize, usize)>::new();
+    let mut last_end = 0usize;
+    for span in spans {
+        if span.0 >= last_end {
+            last_end = span.1;
+            deduped.push(span);
+        }
+    }
+
+    deduped
+}
+
+fn has_word_boundary(value: &str, start: usize, end: usize) -> bool {
+    let previous_is_word = value[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|character| character.is_ascii_alphanumeric());
+    let next_is_word = value[end..]
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphanumeric());
+
+    !previous_is_word && !next_is_word
+}
+
+fn segment_starts_with_sequence_connector(segment: &str) -> bool {
+    let trimmed = segment.trim_start_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '.' | ',' | ';' | ':' | '-')
+    });
+    sequence_connector_spans(trimmed)
+        .first()
+        .is_some_and(|(start, _)| *start == 0)
+}
+
+fn normalized_duration_from_text(raw_text: &str) -> Option<i64> {
+    let normalized = raw_text
+        .to_lowercase()
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() {
+                value
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+
+    for index in 0..tokens.len().saturating_sub(1) {
+        let value = tokens[index];
+        let unit = tokens[index + 1];
+        if !is_duration_value(value) || !is_duration_unit(unit) {
+            continue;
+        }
+
+        let Some(amount) = duration_value_to_minutes(value, unit) else {
+            continue;
+        };
+
+        return Some(normalize_duration(amount));
+    }
+
+    None
+}
+
+fn duration_value_to_minutes(value: &str, unit: &str) -> Option<i64> {
+    let amount = match value {
+        "a" | "an" | "one" => 1,
+        "two" => 2,
+        "three" => 3,
+        "four" => 4,
+        "five" => 5,
+        "six" => 6,
+        "seven" => 7,
+        "eight" => 8,
+        "nine" => 9,
+        "ten" => 10,
+        "half" => return unit_is_hour(unit).then_some(30),
+        "quarter" => return unit_is_hour(unit).then_some(15),
+        _ => value.parse::<i64>().ok()?,
+    };
+
+    if unit_is_hour(unit) {
+        Some(amount * 60)
+    } else if unit_is_minute(unit) {
+        Some(amount)
+    } else {
+        None
+    }
+}
+
+fn unit_is_hour(value: &str) -> bool {
+    matches!(value, "h" | "hr" | "hrs" | "hour" | "hours")
+}
+
+fn unit_is_minute(value: &str) -> bool {
+    matches!(value, "m" | "min" | "mins" | "minute" | "minutes")
 }
 
 fn keyring_entry() -> AppResult<Entry> {
@@ -1051,10 +1363,12 @@ pub async fn interpret_text_message(
 
     let mut prepared_entries = Vec::<PreparedEntry>::new();
     let mut normalization_notes = Vec::<String>::new();
+    let mut entry_normalization_notes = Vec::<Vec<String>>::new();
     let mut normalization_details = Vec::<Value>::new();
-    let mut fallback_count = 0;
+    let mut sequencing_contexts = Vec::<SequencingEntryContext>::new();
 
     for mut result in normalization_results {
+        let mut entry_notes = Vec::<String>::new();
         let activity_fallback = apply_activity_fallback_if_needed(
             &mut result.entry,
             input.raw_text.trim(),
@@ -1062,15 +1376,11 @@ pub async fn interpret_text_message(
         );
 
         if let Some(note) = result.note {
-            normalization_notes.push(note);
+            entry_notes.push(note);
         }
 
         if let Some(note) = activity_fallback.note.clone() {
-            normalization_notes.push(note);
-        }
-
-        if result.used_temporal_fallback {
-            fallback_count += 1;
+            entry_notes.push(note);
         }
 
         let used_activity_fallback = activity_fallback.applied;
@@ -1089,6 +1399,15 @@ pub async fn interpret_text_message(
           "savedDate": result.entry.date,
           "savedStartMinute": result.entry.start_minute,
           "savedEndMinute": result.entry.end_minute,
+          "sequencingApplied": false,
+          "sequencingReason": null,
+          "sequencingOriginalStartMinute": null,
+          "sequencingOriginalEndMinute": null,
+          "sequencingAdjustedStartMinute": null,
+          "sequencingAdjustedEndMinute": null,
+          "sequencingDurationMinutes": null,
+          "llmSequenceRelation": result.llm_sequence_relation,
+          "llmDurationSource": result.llm_duration_source,
           "llmChosenActivityCode": result.llm_activity_code,
           "llmActivityReason": result.llm_activity_reason,
           "llmAlternativeActivities": result.llm_alternative_activities,
@@ -1106,6 +1425,12 @@ pub async fn interpret_text_message(
           "fallbackSummary": fallback_summary.clone(),
         }));
 
+        sequencing_contexts.push(SequencingEntryContext {
+            raw_duration: result.raw_duration,
+            llm_sequence_relation: result.llm_sequence_relation,
+            llm_duration_source: result.llm_duration_source,
+        });
+        entry_normalization_notes.push(entry_notes);
         prepared_entries.push(PreparedEntry {
             entry: result.entry,
             used_activity_fallback,
@@ -1127,10 +1452,11 @@ pub async fn interpret_text_message(
             duration_defaulted: false,
             fallback_summary: fallback_summary.clone(),
         });
-        fallback_count += 1;
         let note = format!(
             "No LLM entries returned. Defaulted to {} - {} based on capture time.",
-            minute_to_hhmm((temporal_reference.rounded_end_minute - 30).max(0)),
+            minute_to_hhmm(
+                (temporal_reference.rounded_end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0),
+            ),
             minute_to_hhmm(temporal_reference.rounded_end_minute)
         );
         normalization_notes.push(note.clone());
@@ -1141,8 +1467,15 @@ pub async fn interpret_text_message(
           "temporalSource": "fallback",
           "durationDefaulted": false,
           "savedDate": temporal_reference.local_date.format("%Y-%m-%d").to_string(),
-          "savedStartMinute": (temporal_reference.rounded_end_minute - 30).max(0),
+          "savedStartMinute": (temporal_reference.rounded_end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0),
           "savedEndMinute": temporal_reference.rounded_end_minute,
+          "sequencingApplied": false,
+          "sequencingReason": null,
+          "sequencingOriginalStartMinute": null,
+          "sequencingOriginalEndMinute": null,
+          "sequencingAdjustedStartMinute": null,
+          "sequencingAdjustedEndMinute": null,
+          "sequencingDurationMinutes": null,
           "llmChosenActivityCode": null,
           "llmActivityReason": null,
           "llmAlternativeActivities": null,
@@ -1152,6 +1485,103 @@ pub async fn interpret_text_message(
           "note": note,
         }));
     }
+
+    let sequencing_adjustments = apply_multi_event_sequence_adjustments(
+        &mut prepared_entries,
+        &sequencing_contexts,
+        input.raw_text.trim(),
+    );
+
+    for (index, adjustment) in sequencing_adjustments.iter().enumerate() {
+        if let Some(details) = normalization_details
+            .get_mut(index)
+            .and_then(Value::as_object_mut)
+        {
+            let prepared = &prepared_entries[index];
+            details.insert(
+                "usedTemporalFallback".to_string(),
+                json!(prepared.used_temporal_fallback),
+            );
+            details.insert(
+                "durationDefaulted".to_string(),
+                json!(prepared.duration_defaulted),
+            );
+            details.insert(
+                "savedStartMinute".to_string(),
+                json!(prepared.entry.start_minute),
+            );
+            details.insert(
+                "savedEndMinute".to_string(),
+                json!(prepared.entry.end_minute),
+            );
+            details.insert(
+                "fallbackSummary".to_string(),
+                json!(prepared.fallback_summary.clone()),
+            );
+            details.insert("sequencingApplied".to_string(), json!(adjustment.applied));
+            details.insert("sequencingReason".to_string(), json!(adjustment.reason));
+            details.insert(
+                "sequencingOriginalStartMinute".to_string(),
+                json!(adjustment.original_start_minute),
+            );
+            details.insert(
+                "sequencingOriginalEndMinute".to_string(),
+                json!(adjustment.original_end_minute),
+            );
+            details.insert(
+                "sequencingAdjustedStartMinute".to_string(),
+                json!(adjustment.adjusted_start_minute),
+            );
+            details.insert(
+                "sequencingAdjustedEndMinute".to_string(),
+                json!(adjustment.adjusted_end_minute),
+            );
+            details.insert(
+                "sequencingDurationMinutes".to_string(),
+                json!(adjustment.duration_minutes),
+            );
+            details.insert(
+                "sequencingSequenceRelation".to_string(),
+                json!(adjustment.sequence_relation.clone()),
+            );
+            details.insert(
+                "sequencingDurationSource".to_string(),
+                json!(adjustment.duration_source.clone()),
+            );
+            details.insert(
+                "sequencingSegmentText".to_string(),
+                json!(adjustment.segment_text.clone()),
+            );
+        }
+    }
+
+    for (index, notes) in entry_normalization_notes.into_iter().enumerate() {
+        let sequencing_applied = sequencing_adjustments
+            .get(index)
+            .is_some_and(|adjustment| adjustment.applied);
+        for note in notes {
+            if sequencing_applied && note.starts_with("Temporal fallback applied") {
+                continue;
+            }
+            normalization_notes.push(note);
+        }
+        if let Some(adjustment) = sequencing_adjustments
+            .get(index)
+            .filter(|adjustment| adjustment.applied)
+        {
+            normalization_notes.push(format!(
+                "Sequencing applied: entry {} saved {} - {} after previous entry.",
+                index + 1,
+                minute_to_hhmm(adjustment.adjusted_start_minute.unwrap_or(0)),
+                minute_to_hhmm(adjustment.adjusted_end_minute.unwrap_or(0)),
+            ));
+        }
+    }
+
+    let fallback_count = prepared_entries
+        .iter()
+        .filter(|entry| entry.used_temporal_fallback)
+        .count();
 
     let mut prepared_entries = dedupe_prepared_entries(prepared_entries);
     let unique_entry_count = prepared_entries.len() as i64;
@@ -1479,8 +1909,8 @@ fn build_temporal_reference(
         parse_date(input.client_local_date.trim()).unwrap_or_else(|| parsed_timestamp.date_naive());
     let local_time =
         parse_time(input.client_local_time.trim()).unwrap_or_else(|| parsed_timestamp.time());
-    let rounded_end_minute =
-        round_to_nearest_30(minutes_from_time(local_time) as i64).clamp(30, MINUTES_IN_DAY);
+    let rounded_end_minute = round_to_nearest_15(minutes_from_time(local_time) as i64)
+        .clamp(TIME_INCREMENT_MINUTES, MINUTES_IN_DAY);
 
     TemporalReference {
         local_date,
@@ -1491,7 +1921,7 @@ fn build_temporal_reference(
 fn fallback_entry(reference: &TemporalReference, raw_text: &str) -> NormalizedEntry {
     let date = reference.local_date.format("%Y-%m-%d").to_string();
     let end_minute = reference.rounded_end_minute;
-    let start_minute = (end_minute - 30).max(0);
+    let start_minute = (end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0);
 
     NormalizedEntry {
         date,
@@ -1560,16 +1990,26 @@ fn normalize_llm_entry(
     });
     let llm_alternative_activities = llm_alternative_activities
         .and_then(|activities| (!activities.is_empty()).then_some(activities));
+    let llm_sequence_relation = entry
+        .sequence_relation
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let llm_duration_source = entry
+        .duration_source
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     let parsed_start = raw_start.as_deref().and_then(parse_time_to_minutes);
     let parsed_end = raw_end.as_deref().and_then(parse_time_to_minutes);
 
-    let fallback_start = (reference.rounded_end_minute - 30).max(0);
+    let fallback_start = (reference.rounded_end_minute - DEFAULT_FALLBACK_DURATION_MINUTES).max(0);
     let fallback_end = reference.rounded_end_minute;
     let normalized_duration = raw_duration
         .filter(|value| *value > 0)
         .map(normalize_duration)
-        .unwrap_or(30);
+        .unwrap_or(DEFAULT_FALLBACK_DURATION_MINUTES);
 
     let has_invalid_duration = matches!(raw_duration, Some(value) if value <= 0);
     let duration_defaulted =
@@ -1579,6 +2019,11 @@ fn normalize_llm_entry(
         (Some(0), Some(0), Some(value)) if value <= 0
     );
     let has_no_times = parsed_start.is_none() && parsed_end.is_none();
+
+    let should_anchor_duration_to_capture = temporal_cue_type
+        == TemporalCueType::ImplicitRecentDuration
+        && raw_duration.unwrap_or(0) > 0
+        && !has_no_times;
 
     let (start_minute, end_minute, fallback_reason, temporal_source) = if has_invalid_duration {
         (
@@ -1593,6 +2038,13 @@ fn normalize_llm_entry(
             fallback_end,
             Some("invalid_midnight_default".to_string()),
             "fallback",
+        )
+    } else if should_anchor_duration_to_capture {
+        (
+            reference.rounded_end_minute - normalized_duration,
+            reference.rounded_end_minute,
+            None,
+            "derived_from_capture_duration_override",
         )
     } else {
         match (parsed_start, parsed_end) {
@@ -1610,20 +2062,28 @@ fn normalize_llm_entry(
                 "llm_end_minus_duration",
             ),
             (None, None) => {
-                if temporal_cue_type == TemporalCueType::RelativeDuration
-                    && raw_duration.unwrap_or(0) > 0
+                if matches!(
+                    temporal_cue_type,
+                    TemporalCueType::RelativeDuration | TemporalCueType::ImplicitRecentDuration
+                ) && raw_duration.unwrap_or(0) > 0
                 {
                     (
                         reference.rounded_end_minute - normalized_duration,
                         reference.rounded_end_minute,
                         None,
-                        "derived_from_duration",
+                        if temporal_cue_type == TemporalCueType::ImplicitRecentDuration {
+                            "derived_from_bare_duration"
+                        } else {
+                            "derived_from_duration"
+                        },
                     )
                 } else {
                     let reason = if temporal_cue_type == TemporalCueType::ExplicitClock {
                         "unable_to_parse_explicit_time"
                     } else if temporal_cue_type == TemporalCueType::RelativeDuration {
                         "unable_to_derive_relative_duration"
+                    } else if temporal_cue_type == TemporalCueType::ImplicitRecentDuration {
+                        "unable_to_derive_recent_duration"
                     } else if has_no_times {
                         "no_temporal_data"
                     } else {
@@ -1681,6 +2141,8 @@ fn normalize_llm_entry(
         llm_activity_code,
         llm_activity_reason,
         llm_alternative_activities,
+        llm_sequence_relation,
+        llm_duration_source,
         temporal_cue_type,
         temporal_source,
     }
@@ -1917,6 +2379,8 @@ fn detect_temporal_cue_type(raw_text: &str) -> TemporalCueType {
         TemporalCueType::ExplicitClock
     } else if message_has_relative_duration_cue(raw_text) {
         TemporalCueType::RelativeDuration
+    } else if message_has_implicit_recent_duration_cue(raw_text) {
+        TemporalCueType::ImplicitRecentDuration
     } else {
         TemporalCueType::None
     }
@@ -2051,6 +2515,158 @@ fn message_has_relative_duration_cue(raw_text: &str) -> bool {
     false
 }
 
+fn message_has_implicit_recent_duration_cue(raw_text: &str) -> bool {
+    if message_has_explicit_clock_time_cue(raw_text)
+        || message_has_future_planned_cue(raw_text)
+        || message_has_contextual_day_or_date_cue(raw_text)
+    {
+        return false;
+    }
+
+    let normalized = raw_text
+        .to_lowercase()
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || value == ':' {
+                value
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 2 {
+        return false;
+    }
+
+    if is_duration_value(tokens[0]) && is_duration_unit(tokens[1]) {
+        return true;
+    }
+
+    for index in 0..tokens.len().saturating_sub(2) {
+        if matches!(
+            tokens[index],
+            "spent" | "spend" | "doing" | "working" | "reviewing"
+        ) && is_duration_value(tokens[index + 1])
+            && is_duration_unit(tokens[index + 2])
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn message_has_contextual_day_or_date_cue(raw_text: &str) -> bool {
+    let normalized = raw_text
+        .to_lowercase()
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || value == ':' {
+                value
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    for (index, token) in tokens.iter().enumerate() {
+        if is_contextual_day_or_date_token(token) {
+            return true;
+        }
+
+        if matches!(*token, "this" | "last" | "next")
+            && tokens
+                .get(index + 1)
+                .is_some_and(|candidate| is_contextual_day_or_date_token(candidate))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_contextual_day_or_date_token(value: &str) -> bool {
+    matches!(
+        value,
+        "today"
+            | "yesterday"
+            | "tonight"
+            | "morning"
+            | "afternoon"
+            | "evening"
+            | "night"
+            | "overnight"
+            | "monday"
+            | "tuesday"
+            | "wednesday"
+            | "thursday"
+            | "friday"
+            | "saturday"
+            | "sunday"
+            | "week"
+            | "month"
+    )
+}
+
+fn message_has_future_planned_cue(raw_text: &str) -> bool {
+    let normalized = raw_text
+        .to_lowercase()
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || value == ':' {
+                value
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    for (index, token) in tokens.iter().enumerate() {
+        if matches!(*token, "tomorrow" | "later" | "will" | "gonna") {
+            return true;
+        }
+
+        if *token == "going"
+            && tokens
+                .get(index + 1)
+                .is_some_and(|candidate| *candidate == "to")
+        {
+            return true;
+        }
+
+        if *token == "about"
+            && tokens
+                .get(index + 1)
+                .is_some_and(|candidate| *candidate == "to")
+        {
+            return true;
+        }
+
+        if *token == "plan"
+            && tokens
+                .get(index + 1)
+                .is_some_and(|candidate| *candidate == "to")
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn is_duration_value(value: &str) -> bool {
     value.chars().all(|character| character.is_ascii_digit())
         || matches!(
@@ -2109,8 +2725,8 @@ fn minutes_from_time(value: NaiveTime) -> u32 {
     value.hour() * 60 + value.minute()
 }
 
-fn round_to_nearest_30(value: i64) -> i64 {
-    ((value as f64 / 30.0).round() as i64) * 30
+fn round_to_nearest_15(value: i64) -> i64 {
+    ((value as f64 / TIME_INCREMENT_MINUTES as f64).round() as i64) * TIME_INCREMENT_MINUTES
 }
 
 fn minute_to_hhmm(value: i64) -> String {
@@ -2126,8 +2742,8 @@ fn minute_to_hhmm(value: i64) -> String {
 }
 
 fn normalize_duration(duration: i64) -> i64 {
-    let rounded = round_to_nearest_30(duration.max(30));
-    rounded.clamp(30, MINUTES_IN_DAY)
+    let rounded = round_to_nearest_15(duration.max(TIME_INCREMENT_MINUTES));
+    rounded.clamp(TIME_INCREMENT_MINUTES, MINUTES_IN_DAY)
 }
 
 fn normalize_confidence(raw_value: Option<f64>) -> f64 {
@@ -2147,18 +2763,20 @@ fn normalize_confidence(raw_value: Option<f64>) -> f64 {
 }
 
 fn normalize_update_window(start_minute: i64, end_minute: i64) -> (i64, i64, i64) {
-    let mut normalized_start = round_to_nearest_30(start_minute).clamp(0, MINUTES_IN_DAY);
-    let mut normalized_end = round_to_nearest_30(end_minute).clamp(0, MINUTES_IN_DAY);
+    let mut normalized_start = round_to_nearest_15(start_minute).clamp(0, MINUTES_IN_DAY);
+    let mut normalized_end = round_to_nearest_15(end_minute).clamp(0, MINUTES_IN_DAY);
 
     if normalized_end <= normalized_start {
-        normalized_end = (normalized_start + 30).min(MINUTES_IN_DAY);
+        normalized_end = (normalized_start + TIME_INCREMENT_MINUTES).min(MINUTES_IN_DAY);
     }
 
-    if normalized_end == MINUTES_IN_DAY && normalized_end - normalized_start < 30 {
-        normalized_start = (MINUTES_IN_DAY - 30).max(0);
+    if normalized_end == MINUTES_IN_DAY
+        && normalized_end - normalized_start < TIME_INCREMENT_MINUTES
+    {
+        normalized_start = (MINUTES_IN_DAY - TIME_INCREMENT_MINUTES).max(0);
     }
 
-    let duration_minutes = (normalized_end - normalized_start).max(30);
+    let duration_minutes = (normalized_end - normalized_start).max(TIME_INCREMENT_MINUTES);
     (normalized_start, normalized_end, duration_minutes)
 }
 
@@ -2188,19 +2806,45 @@ mod tests {
     use crate::openai::LlmAttemptTelemetry;
 
     use super::{
-        apply_activity_fallback_if_needed, dedupe_prepared_entries, derive_key_status_level,
-        llm_attempt_event_status, message_has_explicit_clock_time_cue,
-        message_has_relative_duration_cue, normalize_confidence, normalize_llm_entry,
-        normalize_update_window, round_to_nearest_30, timeline_week_bounds, PreparedEntry,
-        TemporalCueType, TemporalReference,
+        apply_activity_fallback_if_needed, apply_multi_event_sequence_adjustments,
+        dedupe_prepared_entries, derive_key_status_level, llm_attempt_event_status,
+        message_has_contextual_day_or_date_cue, message_has_explicit_clock_time_cue,
+        message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
+        normalize_confidence, normalize_llm_entry, normalize_update_window, round_to_nearest_15,
+        timeline_week_bounds, PreparedEntry, SequencingEntryContext, TemporalCueType,
+        TemporalReference,
     };
 
+    fn prepared_entry_for_test(
+        start_minute: i64,
+        end_minute: i64,
+        duration_minutes: i64,
+    ) -> PreparedEntry {
+        PreparedEntry {
+            entry: NormalizedEntry {
+                date: "2026-05-09".to_string(),
+                start_minute,
+                end_minute,
+                duration_minutes,
+                description: "Test entry".to_string(),
+                user_submission_text: "Test submission".to_string(),
+                confidence: 0.9,
+                engagement_code: Some("E-123".to_string()),
+                activity_code: Some("ACT-01".to_string()),
+            },
+            used_activity_fallback: false,
+            used_temporal_fallback: false,
+            duration_defaulted: false,
+            fallback_summary: None,
+        }
+    }
+
     #[test]
-    fn rounds_to_nearest_half_hour() {
-        assert_eq!(round_to_nearest_30(14), 0);
-        assert_eq!(round_to_nearest_30(15), 30);
-        assert_eq!(round_to_nearest_30(44), 30);
-        assert_eq!(round_to_nearest_30(45), 60);
+    fn rounds_to_nearest_quarter_hour() {
+        assert_eq!(round_to_nearest_15(7), 0);
+        assert_eq!(round_to_nearest_15(8), 15);
+        assert_eq!(round_to_nearest_15(22), 15);
+        assert_eq!(round_to_nearest_15(23), 30);
     }
 
     #[test]
@@ -2211,19 +2855,19 @@ mod tests {
     }
 
     #[test]
-    fn update_window_enforces_minimum_half_hour() {
+    fn update_window_enforces_minimum_quarter_hour() {
         let (start, end, duration) = normalize_update_window(150, 150);
         assert_eq!(start, 150);
-        assert_eq!(end, 180);
-        assert_eq!(duration, 30);
+        assert_eq!(end, 165);
+        assert_eq!(duration, 15);
     }
 
     #[test]
     fn update_window_clamps_to_day_end() {
         let (start, end, duration) = normalize_update_window(1439, 1600);
-        assert_eq!(start, 1410);
+        assert_eq!(start, 1425);
         assert_eq!(end, 1440);
-        assert_eq!(duration, 30);
+        assert_eq!(duration, 15);
     }
 
     #[test]
@@ -2300,6 +2944,8 @@ mod tests {
             end_time: Some("00:00".to_string()),
             duration_minutes: Some(0),
             description: Some("Reviewed OS-01".to_string()),
+            sequence_relation: None,
+            duration_source: None,
             activity_reason: None,
             alternative_activities: None,
             confidence: Some(0.7),
@@ -2328,6 +2974,8 @@ mod tests {
             end_time: None,
             duration_minutes: None,
             description: Some("FAIT TR sync".to_string()),
+            sequence_relation: None,
+            duration_source: None,
             activity_reason: None,
             alternative_activities: None,
             confidence: Some(0.9),
@@ -2362,6 +3010,8 @@ mod tests {
             end_time: Some("13:30".to_string()),
             duration_minutes: Some(30),
             description: Some("Client meeting".to_string()),
+            sequence_relation: None,
+            duration_source: None,
             activity_reason: None,
             alternative_activities: None,
             confidence: Some(0.9),
@@ -2394,6 +3044,8 @@ mod tests {
             end_time: Some("14:00".to_string()),
             duration_minutes: None,
             description: Some("Client meeting".to_string()),
+            sequence_relation: None,
+            duration_source: None,
             activity_reason: None,
             alternative_activities: None,
             confidence: Some(0.9),
@@ -2427,6 +3079,8 @@ mod tests {
             end_time: Some("21:48".to_string()),
             duration_minutes: Some(60),
             description: Some("Meetings for RR ITACs".to_string()),
+            sequence_relation: None,
+            duration_source: None,
             activity_reason: None,
             alternative_activities: None,
             confidence: Some(0.9),
@@ -2444,8 +3098,8 @@ mod tests {
         );
 
         assert!(!result.used_temporal_fallback);
-        assert_eq!(result.entry.start_minute, 1260);
-        assert_eq!(result.entry.end_minute, 1320);
+        assert_eq!(result.entry.start_minute, 1245);
+        assert_eq!(result.entry.end_minute, 1305);
         assert_eq!(result.entry.duration_minutes, 60);
     }
 
@@ -2459,6 +3113,8 @@ mod tests {
             end_time: None,
             duration_minutes: Some(60),
             description: Some("Meetings for RR ITACs".to_string()),
+            sequence_relation: None,
+            duration_source: None,
             activity_reason: None,
             alternative_activities: None,
             confidence: Some(0.9),
@@ -2493,6 +3149,8 @@ mod tests {
             end_time: None,
             duration_minutes: Some(60),
             description: Some("Meetings".to_string()),
+            sequence_relation: None,
+            duration_source: None,
             activity_reason: None,
             alternative_activities: None,
             confidence: Some(0.9),
@@ -2522,6 +3180,8 @@ mod tests {
             end_time: None,
             duration_minutes: None,
             description: Some("Meetings".to_string()),
+            sequence_relation: None,
+            duration_source: None,
             activity_reason: None,
             alternative_activities: None,
             confidence: Some(0.9),
@@ -2539,6 +3199,294 @@ mod tests {
         assert_eq!(result.entry.start_minute, 1290);
         assert_eq!(result.entry.end_minute, 1320);
         assert_eq!(result.entry.duration_minutes, 30);
+    }
+
+    #[test]
+    fn implicit_recent_duration_detection_identifies_bare_duration_worklogs() {
+        assert!(message_has_implicit_recent_duration_cue(
+            "15 minutes to non-sap FDT-DB-02 with Nick"
+        ));
+        assert!(message_has_implicit_recent_duration_cue(
+            "spent 30 minutes on SAP"
+        ));
+    }
+
+    #[test]
+    fn implicit_recent_duration_detection_excludes_future_planned_wording() {
+        assert!(!message_has_implicit_recent_duration_cue(
+            "going to spend 30 minutes on SAP"
+        ));
+        assert!(!message_has_implicit_recent_duration_cue(
+            "about to spend 30 minutes on SAP"
+        ));
+        assert!(!message_has_implicit_recent_duration_cue(
+            "tomorrow 15 minutes on non-sap"
+        ));
+    }
+
+    #[test]
+    fn implicit_recent_duration_detection_excludes_contextual_day_or_date_wording() {
+        assert!(message_has_contextual_day_or_date_cue(
+            "this morning I spent 30 minutes on SAP"
+        ));
+        assert!(!message_has_implicit_recent_duration_cue(
+            "yesterday spent 30 minutes on SAP"
+        ));
+    }
+
+    #[test]
+    fn normalization_preserves_quarter_hour_duration() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-15".to_string()),
+            start_time: Some("12:00".to_string()),
+            end_time: None,
+            duration_minutes: Some(15),
+            description: Some("Quick check-in".to_string()),
+            sequence_relation: None,
+            duration_source: None,
+            activity_reason: None,
+            alternative_activities: None,
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date"),
+            rounded_end_minute: 1320,
+        };
+
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "fallback",
+            TemporalCueType::ExplicitClock,
+        );
+
+        assert!(!result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
+        assert_eq!(result.entry.start_minute, 720);
+        assert_eq!(result.entry.end_minute, 735);
+        assert_eq!(result.entry.duration_minutes, 15);
+    }
+
+    #[test]
+    fn normalization_derives_from_bare_duration_when_recent_cue_has_no_times() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-02-17".to_string()),
+            start_time: None,
+            end_time: None,
+            duration_minutes: Some(15),
+            description: Some("Non-SAP work with Nick".to_string()),
+            sequence_relation: None,
+            duration_source: None,
+            activity_reason: None,
+            alternative_activities: None,
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 2, 17).expect("valid date"),
+            rounded_end_minute: 1095,
+        };
+
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "fallback",
+            TemporalCueType::ImplicitRecentDuration,
+        );
+
+        assert!(!result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
+        assert_eq!(result.temporal_source, "derived_from_bare_duration");
+        assert_eq!(result.entry.start_minute, 1080);
+        assert_eq!(result.entry.end_minute, 1095);
+        assert_eq!(result.entry.duration_minutes, 15);
+    }
+
+    #[test]
+    fn normalization_overrides_llm_times_for_capture_anchored_bare_duration() {
+        let entry = LlmEntry {
+            engagement_code: Some("E-123".to_string()),
+            activity_code: Some("ACT-01".to_string()),
+            date: Some("2026-05-09".to_string()),
+            start_time: Some("15:10".to_string()),
+            end_time: Some("15:40".to_string()),
+            duration_minutes: Some(30),
+            description: Some("30 minutes to SAP ITGCs".to_string()),
+            sequence_relation: None,
+            duration_source: None,
+            activity_reason: None,
+            alternative_activities: None,
+            confidence: Some(0.9),
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 5, 9).expect("valid date"),
+            rounded_end_minute: 885,
+        };
+
+        let result = normalize_llm_entry(
+            &entry,
+            &reference,
+            "30 minutes to SAP ITGCs.",
+            TemporalCueType::ImplicitRecentDuration,
+        );
+
+        assert!(!result.used_temporal_fallback);
+        assert!(!result.duration_defaulted);
+        assert_eq!(
+            result.temporal_source,
+            "derived_from_capture_duration_override"
+        );
+        assert_eq!(result.entry.start_minute, 855);
+        assert_eq!(result.entry.end_minute, 885);
+        assert_eq!(result.entry.duration_minutes, 30);
+    }
+
+    #[test]
+    fn sequencing_removes_llm_gap_after_that_with_explicit_duration() {
+        let mut entries = vec![
+            prepared_entry_for_test(930, 960, 30),
+            prepared_entry_for_test(990, 1050, 60),
+        ];
+        let contexts = vec![
+            SequencingEntryContext {
+                raw_duration: Some(30),
+                ..SequencingEntryContext::default()
+            },
+            SequencingEntryContext {
+                raw_duration: Some(60),
+                ..SequencingEntryContext::default()
+            },
+        ];
+
+        let adjustments = apply_multi_event_sequence_adjustments(
+            &mut entries,
+            &contexts,
+            "About to spend 30 minutes with the team on Example ITGCs. After that, an hour on Non-SAP ITGCs.",
+        );
+
+        assert!(!adjustments[0].applied);
+        assert!(adjustments[1].applied);
+        assert_eq!(entries[1].entry.start_minute, 960);
+        assert_eq!(entries[1].entry.end_minute, 1020);
+        assert_eq!(entries[1].entry.duration_minutes, 60);
+        assert!(!entries[1].duration_defaulted);
+        assert!(!entries[1].used_temporal_fallback);
+    }
+
+    #[test]
+    fn sequencing_defaults_missing_followup_duration_to_thirty_minutes() {
+        let mut entries = vec![
+            prepared_entry_for_test(780, 810, 30),
+            PreparedEntry {
+                used_temporal_fallback: true,
+                fallback_summary: Some("Temporal fallback applied".to_string()),
+                ..prepared_entry_for_test(900, 930, 30)
+            },
+        ];
+        let contexts = vec![
+            SequencingEntryContext {
+                raw_duration: Some(30),
+                ..SequencingEntryContext::default()
+            },
+            SequencingEntryContext {
+                raw_duration: Some(60),
+                ..SequencingEntryContext::default()
+            },
+        ];
+
+        let adjustments = apply_multi_event_sequence_adjustments(
+            &mut entries,
+            &contexts,
+            "At 1pm today, I worked on FF ITGcs. Then I worked on ExampleCo report 1.",
+        );
+
+        assert!(adjustments[1].applied);
+        assert_eq!(entries[1].entry.start_minute, 810);
+        assert_eq!(entries[1].entry.end_minute, 840);
+        assert_eq!(entries[1].entry.duration_minutes, 30);
+        assert!(entries[1].duration_defaulted);
+        assert!(!entries[1].used_temporal_fallback);
+        assert_eq!(entries[1].fallback_summary, None);
+    }
+
+    #[test]
+    fn sequencing_preserves_independent_explicit_followup_time() {
+        let mut entries = vec![
+            prepared_entry_for_test(780, 810, 30),
+            prepared_entry_for_test(900, 930, 30),
+        ];
+        let contexts = vec![
+            SequencingEntryContext::default(),
+            SequencingEntryContext {
+                raw_duration: Some(30),
+                ..SequencingEntryContext::default()
+            },
+        ];
+
+        let adjustments = apply_multi_event_sequence_adjustments(
+            &mut entries,
+            &contexts,
+            "At 1pm I worked on Example ITGCs. Then at 3pm I worked on ExampleCo report 1.",
+        );
+
+        assert!(!adjustments[1].applied);
+        assert_eq!(adjustments[1].reason, Some("independent_explicit_time"));
+        assert_eq!(entries[1].entry.start_minute, 900);
+        assert_eq!(entries[1].entry.end_minute, 930);
+    }
+
+    #[test]
+    fn sequencing_leaves_non_sequential_multi_event_messages_unchanged() {
+        let mut entries = vec![
+            prepared_entry_for_test(780, 810, 30),
+            prepared_entry_for_test(900, 930, 30),
+        ];
+        let contexts = vec![
+            SequencingEntryContext::default(),
+            SequencingEntryContext::default(),
+        ];
+
+        let adjustments = apply_multi_event_sequence_adjustments(
+            &mut entries,
+            &contexts,
+            "Worked on Example ITGCs and also logged ExampleCo report 1.",
+        );
+
+        assert!(!adjustments[1].applied);
+        assert_eq!(entries[1].entry.start_minute, 900);
+        assert_eq!(entries[1].entry.end_minute, 930);
+    }
+
+    #[test]
+    fn sequencing_uses_llm_sequence_metadata_when_segments_do_not_map_cleanly() {
+        let mut entries = vec![
+            prepared_entry_for_test(780, 810, 30),
+            prepared_entry_for_test(900, 930, 30),
+            prepared_entry_for_test(990, 1020, 30),
+        ];
+        let contexts = vec![
+            SequencingEntryContext::default(),
+            SequencingEntryContext::default(),
+            SequencingEntryContext {
+                raw_duration: None,
+                llm_sequence_relation: Some("startsAfterPrevious".to_string()),
+                llm_duration_source: Some("defaulted".to_string()),
+            },
+        ];
+
+        let adjustments = apply_multi_event_sequence_adjustments(
+            &mut entries,
+            &contexts,
+            "Worked on Example ITGCs. ExampleCo report 1 followed.",
+        );
+
+        assert!(adjustments[2].applied);
+        assert_eq!(entries[2].entry.start_minute, 930);
+        assert_eq!(entries[2].entry.end_minute, 960);
+        assert!(entries[2].duration_defaulted);
     }
 
     #[test]
