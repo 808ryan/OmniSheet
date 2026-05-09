@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod error;
+mod macos_permissions;
 mod models;
 mod openai;
 mod state;
@@ -47,16 +48,25 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::settings_get_status,
             commands::settings_set_openai_key,
+            commands::settings_set_openai_model,
+            commands::settings_set_transcription_model,
+            commands::summary_layout_state_get,
+            commands::summary_layout_state_set,
             commands::engagement_list,
             commands::engagement_upsert,
             commands::engagement_delete,
             commands::activity_upsert,
             commands::activity_delete,
             commands::timeline_list_for_date,
+            commands::timeline_list_for_week_view,
             commands::timeline_month_summary,
             commands::timeline_weekly_summary,
+            commands::summary_export_weekly_excel,
             commands::timeline_update_entry,
+            commands::timeline_create_entry,
             commands::timeline_delete_entry,
+            commands::transcribe_audio_clip,
+            commands::voice_request_microphone_permission,
             commands::interpret_text_message,
             commands::diagnostics_record_frontend_event,
             commands::diagnostics_list,

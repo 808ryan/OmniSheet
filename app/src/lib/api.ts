@@ -14,9 +14,19 @@ import type {
   IdResult,
   InterpretResult,
   InterpretTextInput,
+  MicrophonePermissionResult,
+  OpenAiModelId,
   SettingsStatus,
+  SummaryExportResult,
+  SummaryExportWeeklyExcelInput,
+  SummaryLayoutState,
+  TranscribeAudioInput,
+  TranscribeAudioResult,
+  TranscriptionModelId,
   TimelineDaySummary,
+  TimelineCreateInput,
   TimelineEntry,
+  TimelineWeekView,
   TimelineWeeklySummary,
   TimelineMonthSummaryInput,
   TimelineUpdateInput,
@@ -94,6 +104,10 @@ async function recordFrontendDiagnostic(input: DiagnosticsRecordInput): Promise<
   }
 }
 
+export function diagnosticsRecordFrontendEvent(input: DiagnosticsRecordInput): Promise<void> {
+  return recordFrontendDiagnostic(input)
+}
+
 async function invokeCommand<T>(
   command: string,
   args?: Record<string, unknown>,
@@ -166,6 +180,26 @@ export function settingsSetOpenAiKey(apiKey: string): Promise<void> {
   })
 }
 
+export function settingsSetOpenAiModel(model: OpenAiModelId): Promise<void> {
+  return invokeCommand<void>('settings_set_openai_model', {
+    input: { model },
+  })
+}
+
+export function settingsSetTranscriptionModel(model: TranscriptionModelId): Promise<void> {
+  return invokeCommand<void>('settings_set_transcription_model', {
+    input: { model },
+  })
+}
+
+export function summaryLayoutStateGet(): Promise<SummaryLayoutState> {
+  return invokeCommand<SummaryLayoutState>('summary_layout_state_get')
+}
+
+export function summaryLayoutStateSet(input: SummaryLayoutState): Promise<SummaryLayoutState> {
+  return invokeCommand<SummaryLayoutState>('summary_layout_state_set', { input })
+}
+
 export function engagementList(): Promise<Engagement[]> {
   return invokeCommand<Engagement[]>('engagement_list')
 }
@@ -196,8 +230,20 @@ export function interpretTextMessage(input: InterpretTextInput): Promise<Interpr
   })
 }
 
+export function transcribeAudioClip(input: TranscribeAudioInput): Promise<TranscribeAudioResult> {
+  return invokeCommand<TranscribeAudioResult>('transcribe_audio_clip', { input })
+}
+
+export function voiceRequestMicrophonePermission(): Promise<MicrophonePermissionResult> {
+  return invokeCommand<MicrophonePermissionResult>('voice_request_microphone_permission')
+}
+
 export function timelineListForDate(input: DateInput): Promise<TimelineEntry[]> {
   return invokeCommand<TimelineEntry[]>('timeline_list_for_date', { input })
+}
+
+export function timelineListForWeekView(input: DateInput): Promise<TimelineWeekView> {
+  return invokeCommand<TimelineWeekView>('timeline_list_for_week_view', { input })
 }
 
 export function timelineMonthSummary(
@@ -210,8 +256,16 @@ export function timelineWeeklySummary(input: DateInput): Promise<TimelineWeeklyS
   return invokeCommand<TimelineWeeklySummary>('timeline_weekly_summary', { input })
 }
 
+export function summaryExportWeeklyExcel(input: SummaryExportWeeklyExcelInput): Promise<SummaryExportResult> {
+  return invokeCommand<SummaryExportResult>('summary_export_weekly_excel', { input })
+}
+
 export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {
   return invokeCommand<void>('timeline_update_entry', { input })
+}
+
+export function timelineCreateEntry(input: TimelineCreateInput): Promise<IdResult> {
+  return invokeCommand<IdResult>('timeline_create_entry', { input })
 }
 
 export function timelineDeleteEntry(id: string): Promise<void> {

@@ -3,16 +3,17 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, Params};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
-    DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, TimelineDaySummary,
-    TimelineEntry, TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
-    TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, Warning, WarningType,
+    DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
+    TimelineDaySummary, TimelineEntry, TimelineWeeklySummary, TimelineWeeklySummaryCell,
+    TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
+    TranscriptionModelId, Warning, WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
@@ -50,7 +51,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
 
       CREATE TABLE IF NOT EXISTS engagements (
         id TEXT PRIMARY KEY,
-        code TEXT NOT NULL UNIQUE,
+        code TEXT,
         name TEXT NOT NULL,
         client TEXT,
         color_hex TEXT,
@@ -64,7 +65,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
       CREATE TABLE IF NOT EXISTS activities (
         id TEXT PRIMARY KEY,
         engagement_id TEXT NOT NULL,
-        code TEXT NOT NULL,
+        code TEXT,
         name TEXT NOT NULL,
         color_hex TEXT,
         tags TEXT NOT NULL,
@@ -75,13 +76,22 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
       );
 
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_engagements_unique_code
+      ON engagements(code)
+      WHERE code IS NOT NULL AND length(trim(code)) > 0;
+
       CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_unique_code
-      ON activities(engagement_id, code);
+      ON activities(engagement_id, code)
+      WHERE code IS NOT NULL AND length(trim(code)) > 0;
 
       CREATE TABLE IF NOT EXISTS raw_messages (
         id TEXT PRIMARY KEY,
         raw_text TEXT NOT NULL,
         interpreted_entries_json TEXT NOT NULL,
+        open_ai_model TEXT,
+        capture_source TEXT NOT NULL DEFAULT 'text',
+        transcription_model TEXT,
+        transcription_duration_ms INTEGER,
         confidence REAL NOT NULL,
         status TEXT NOT NULL,
         message_timestamp INTEGER NOT NULL,
@@ -159,6 +169,8 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
     )?;
 
     ensure_expected_columns(conn)?;
+    migrate_optional_user_code_schema(conn)?;
+    ensure_optional_code_indexes(conn)?;
 
     Ok(())
 }
@@ -206,6 +218,15 @@ fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
         "interpreted_entry_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_column_exists(conn, "raw_messages", "open_ai_model", "TEXT")?;
+    ensure_column_exists(
+        conn,
+        "raw_messages",
+        "capture_source",
+        "TEXT NOT NULL DEFAULT 'text'",
+    )?;
+    ensure_column_exists(conn, "raw_messages", "transcription_model", "TEXT")?;
+    ensure_column_exists(conn, "raw_messages", "transcription_duration_ms", "INTEGER")?;
     ensure_column_exists(
         conn,
         "raw_messages",
@@ -231,6 +252,127 @@ fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     Ok(())
+}
+
+fn migrate_optional_user_code_schema(conn: &Connection) -> AppResult<()> {
+    let engagements_code_not_null = column_is_not_null(conn, "engagements", "code")?;
+    let activities_code_not_null = column_is_not_null(conn, "activities", "code")?;
+
+    if !engagements_code_not_null && !activities_code_not_null {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        r#"
+      PRAGMA foreign_keys = OFF;
+      BEGIN IMMEDIATE TRANSACTION;
+
+      CREATE TABLE engagements_new (
+        id TEXT PRIMARY KEY,
+        code TEXT,
+        name TEXT NOT NULL,
+        client TEXT,
+        color_hex TEXT,
+        tags TEXT NOT NULL,
+        describe_when_to_use TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      INSERT INTO engagements_new (
+        id, code, name, client, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+      )
+      SELECT
+        id,
+        NULLIF(TRIM(code), ''),
+        name,
+        client,
+        color_hex,
+        tags,
+        describe_when_to_use,
+        is_active,
+        created_at,
+        updated_at
+      FROM engagements;
+
+      CREATE TABLE activities_new (
+        id TEXT PRIMARY KEY,
+        engagement_id TEXT NOT NULL,
+        code TEXT,
+        name TEXT NOT NULL,
+        color_hex TEXT,
+        tags TEXT NOT NULL,
+        describe_when_to_use TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+      );
+
+      INSERT INTO activities_new (
+        id, engagement_id, code, name, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+      )
+      SELECT
+        id,
+        engagement_id,
+        NULLIF(TRIM(code), ''),
+        name,
+        color_hex,
+        tags,
+        describe_when_to_use,
+        is_active,
+        created_at,
+        updated_at
+      FROM activities;
+
+      DROP TABLE activities;
+      DROP TABLE engagements;
+
+      ALTER TABLE engagements_new RENAME TO engagements;
+      ALTER TABLE activities_new RENAME TO activities;
+
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    "#,
+    )?;
+
+    Ok(())
+}
+
+fn ensure_optional_code_indexes(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        r#"
+      DROP INDEX IF EXISTS idx_engagements_unique_code;
+      DROP INDEX IF EXISTS idx_activities_unique_code;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_engagements_unique_code
+      ON engagements(code)
+      WHERE code IS NOT NULL AND length(trim(code)) > 0;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_unique_code
+      ON activities(engagement_id, code)
+      WHERE code IS NOT NULL AND length(trim(code)) > 0;
+    "#,
+    )?;
+
+    Ok(())
+}
+
+fn column_is_not_null(conn: &Connection, table_name: &str, column_name: &str) -> AppResult<bool> {
+    let query = format!("PRAGMA table_info({table_name})");
+    let mut statement = conn.prepare(&query)?;
+    let mut rows = statement.query([])?;
+
+    while let Some(row) = rows.next()? {
+        let candidate_name: String = row.get(1)?;
+        if candidate_name == column_name {
+            let is_not_null: i64 = row.get(3)?;
+            return Ok(is_not_null == 1);
+        }
+    }
+
+    Ok(false)
 }
 
 fn ensure_column_exists(
@@ -262,14 +404,20 @@ fn ensure_column_exists(
 }
 
 pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> AppResult<String> {
-    if input.code.trim().is_empty() || input.name.trim().is_empty() {
+    if input.name.trim().is_empty() {
         return Err(AppError::InvalidInput(
-            "engagement code and name are required".to_string(),
+            "engagement name is required".to_string(),
+        ));
+    }
+    if input.describe_when_to_use.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "engagement usage guidance is required".to_string(),
         ));
     }
 
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let code = normalize_optional_code(input.code);
     let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
     let describe_when_to_use = normalize_usage_description(input.describe_when_to_use)?;
@@ -297,7 +445,7 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
     "#,
         params![
             id,
-            input.code.trim(),
+            code,
             input.name.trim(),
             input.client.as_ref().map(|client| client.trim()),
             color_hex,
@@ -317,17 +465,20 @@ pub fn delete_engagement(conn: &Connection, id: &str) -> AppResult<()> {
 }
 
 pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResult<String> {
-    if input.engagement_id.trim().is_empty()
-        || input.code.trim().is_empty()
-        || input.name.trim().is_empty()
-    {
+    if input.engagement_id.trim().is_empty() || input.name.trim().is_empty() {
         return Err(AppError::InvalidInput(
-            "activity engagement, code, and name are required".to_string(),
+            "activity engagement and name are required".to_string(),
+        ));
+    }
+    if input.describe_when_to_use.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "activity usage guidance is required".to_string(),
         ));
     }
 
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let code = normalize_optional_code(input.code);
     let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
     let describe_when_to_use = normalize_usage_description(input.describe_when_to_use)?;
@@ -353,10 +504,10 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
         is_active = excluded.is_active,
         updated_at = excluded.updated_at
     "#,
-    params![
+        params![
       id,
       input.engagement_id.trim(),
-      input.code.trim(),
+      code,
       input.name.trim(),
       color_hex,
       tags_json,
@@ -376,6 +527,31 @@ pub fn delete_activity(conn: &Connection, id: &str) -> AppResult<()> {
 
 pub fn delete_timeline_entry(conn: &Connection, id: &str) -> AppResult<()> {
     conn.execute("DELETE FROM timesheet_entries WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn get_app_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(value)
+}
+
+pub fn upsert_app_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
+    conn.execute(
+        r#"
+        INSERT INTO app_settings (key, value)
+        VALUES (?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
+        params![key, value],
+    )?;
+
     Ok(())
 }
 
@@ -457,7 +633,10 @@ pub fn load_code_context(conn: &Connection) -> AppResult<CodeContext> {
     let contexts = engagements
         .into_iter()
         .filter(|engagement| engagement.is_active)
-        .map(|engagement| ContextEngagement {
+        .enumerate()
+        .map(|(engagement_index, engagement)| ContextEngagement {
+            id: engagement.id,
+            engagement_ref: format!("eng-{:03}", engagement_index + 1),
             code: engagement.code,
             name: engagement.name,
             tags: engagement.tags,
@@ -466,7 +645,14 @@ pub fn load_code_context(conn: &Connection) -> AppResult<CodeContext> {
                 .activities
                 .into_iter()
                 .filter(|activity| activity.is_active)
-                .map(|activity| ContextActivity {
+                .enumerate()
+                .map(|(activity_index, activity)| ContextActivity {
+                    id: activity.id,
+                    activity_ref: format!(
+                        "act-{:03}-{:03}",
+                        engagement_index + 1,
+                        activity_index + 1
+                    ),
                     code: activity.code,
                     name: activity.name,
                     tags: activity.tags,
@@ -486,6 +672,10 @@ pub fn insert_raw_message(
     id: &str,
     raw_text: &str,
     interpreted_entries_json: &str,
+    open_ai_model: &str,
+    capture_source: &str,
+    transcription_model: Option<&str>,
+    transcription_duration_ms: Option<i64>,
     confidence: f64,
     message_timestamp: i64,
     interpreted_entry_count: i64,
@@ -499,16 +689,21 @@ pub fn insert_raw_message(
     conn.execute(
         r#"
       INSERT INTO raw_messages (
-        id, raw_text, interpreted_entries_json, confidence,
+        id, raw_text, interpreted_entries_json, open_ai_model, capture_source,
+        transcription_model, transcription_duration_ms, confidence,
         status, message_timestamp, interpreted_entry_count, unique_entry_count,
         saved_entry_count, truncated_entry_count, contains_multiple_events, created_at
       )
-      VALUES (?1, ?2, ?3, ?4, 'processed', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'processed', ?9, ?10, ?11, ?12, ?13, ?14, ?15)
     "#,
         params![
             id,
             raw_text.trim(),
             interpreted_entries_json,
+            open_ai_model,
+            capture_source,
+            transcription_model,
+            transcription_duration_ms,
             confidence,
             message_timestamp,
             interpreted_entry_count,
@@ -569,6 +764,41 @@ pub fn insert_timesheet_entry(
             fallback_summary,
             source_message_entry_index,
             source_message_entry_count,
+            now,
+        ],
+    )?;
+
+    Ok(id)
+}
+
+pub fn insert_manual_timeline_entry(
+    conn: &Connection,
+    date: &str,
+    start_minute: i64,
+    end_minute: i64,
+    duration_minutes: i64,
+    description: &str,
+) -> AppResult<String> {
+    let id = Uuid::new_v4().to_string();
+    let now = current_unix_timestamp();
+
+    conn.execute(
+        r#"
+      INSERT INTO timesheet_entries (
+        id, engagement_id, activity_id, date, start_minute, end_minute,
+        duration_minutes, description, user_submission_text, source, raw_message_id, confidence,
+        used_activity_fallback, used_temporal_fallback, duration_defaulted,
+        fallback_summary, source_message_entry_index, source_message_entry_count, created_at, updated_at
+      )
+      VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, 'Manual Entry', 'manual', NULL, 1.0, 0, 0, 0, NULL, NULL, NULL, ?7, ?7)
+    "#,
+        params![
+            id,
+            date,
+            start_minute,
+            end_minute,
+            duration_minutes,
+            description.trim(),
             now,
         ],
     )?;
@@ -700,42 +930,25 @@ pub fn recompute_overlap_warnings(conn: &Connection, date: &str) -> AppResult<Ve
     Ok(warnings)
 }
 
-pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<TimelineEntry>> {
-    let mut statement = conn.prepare(
-        r#"
-      SELECT
-        te.id,
-        te.date,
-        te.start_minute,
-        te.end_minute,
-        te.duration_minutes,
-        te.description,
-        COALESCE(te.user_submission_text, rm.raw_text, '') AS user_submission_text,
-        te.source,
-        te.confidence,
-        te.engagement_id,
-        te.activity_id,
-        e.code,
-        e.name,
-        a.code,
-        a.name,
-        te.used_activity_fallback,
-        te.used_temporal_fallback,
-        te.duration_defaulted,
-        te.fallback_summary,
-        te.source_message_entry_index,
-        te.source_message_entry_count
-      FROM timesheet_entries te
-      LEFT JOIN engagements e ON e.id = te.engagement_id
-      LEFT JOIN activities a ON a.id = te.activity_id
-      LEFT JOIN raw_messages rm ON rm.id = te.raw_message_id
-      WHERE te.date = ?1
-      ORDER BY te.start_minute
-    "#,
-    )?;
+fn collect_timeline_entries<P>(
+    conn: &Connection,
+    query: &str,
+    params: P,
+) -> AppResult<Vec<TimelineEntry>>
+where
+    P: Params,
+{
+    let mut statement = conn.prepare(query)?;
 
     let mut entries = statement
-        .query_map(params![date], |row| {
+        .query_map(params, |row| {
+            let model_used = row
+                .get::<_, Option<String>>(21)?
+                .and_then(|value| OpenAiModelId::from_api_name(&value));
+            let transcription_model_used = row
+                .get::<_, Option<String>>(22)?
+                .and_then(|value| TranscriptionModelId::from_api_name(&value));
+
             Ok(TimelineEntry {
                 id: row.get(0)?,
                 date: row.get(1)?,
@@ -758,6 +971,11 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
                 fallback_summary: row.get(18)?,
                 source_message_entry_index: row.get(19)?,
                 source_message_entry_count: row.get(20)?,
+                model_used,
+                model_used_label: model_used.map(|model| model.display_label().to_string()),
+                transcription_model_used,
+                transcription_model_used_label: transcription_model_used
+                    .map(|model| model.display_label().to_string()),
                 warning_flags: Vec::new(),
             })
         })?
@@ -768,6 +986,88 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
     }
 
     Ok(entries)
+}
+
+pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<TimelineEntry>> {
+    collect_timeline_entries(
+        conn,
+        r#"
+      SELECT
+        te.id,
+        te.date,
+        te.start_minute,
+        te.end_minute,
+        te.duration_minutes,
+        te.description,
+        COALESCE(te.user_submission_text, rm.raw_text, '') AS user_submission_text,
+        te.source,
+        te.confidence,
+        te.engagement_id,
+        te.activity_id,
+        e.code,
+        e.name,
+        a.code,
+        a.name,
+        te.used_activity_fallback,
+        te.used_temporal_fallback,
+        te.duration_defaulted,
+        te.fallback_summary,
+        te.source_message_entry_index,
+        te.source_message_entry_count,
+        rm.open_ai_model,
+        rm.transcription_model
+      FROM timesheet_entries te
+      LEFT JOIN engagements e ON e.id = te.engagement_id
+      LEFT JOIN activities a ON a.id = te.activity_id
+      LEFT JOIN raw_messages rm ON rm.id = te.raw_message_id
+      WHERE te.date = ?1
+      ORDER BY te.start_minute, te.end_minute, te.id
+    "#,
+        params![date],
+    )
+}
+
+pub fn list_timeline_entries_for_date_range(
+    conn: &Connection,
+    start_date: &str,
+    end_date_exclusive: &str,
+) -> AppResult<Vec<TimelineEntry>> {
+    collect_timeline_entries(
+        conn,
+        r#"
+      SELECT
+        te.id,
+        te.date,
+        te.start_minute,
+        te.end_minute,
+        te.duration_minutes,
+        te.description,
+        COALESCE(te.user_submission_text, rm.raw_text, '') AS user_submission_text,
+        te.source,
+        te.confidence,
+        te.engagement_id,
+        te.activity_id,
+        e.code,
+        e.name,
+        a.code,
+        a.name,
+        te.used_activity_fallback,
+        te.used_temporal_fallback,
+        te.duration_defaulted,
+        te.fallback_summary,
+        te.source_message_entry_index,
+        te.source_message_entry_count,
+        rm.open_ai_model,
+        rm.transcription_model
+      FROM timesheet_entries te
+      LEFT JOIN engagements e ON e.id = te.engagement_id
+      LEFT JOIN activities a ON a.id = te.activity_id
+      LEFT JOIN raw_messages rm ON rm.id = te.raw_message_id
+      WHERE te.date >= ?1 AND te.date < ?2
+      ORDER BY te.date, te.start_minute, te.end_minute, te.id
+    "#,
+        params![start_date, end_date_exclusive],
+    )
 }
 
 pub fn list_timeline_day_summaries_for_month(
@@ -803,8 +1103,10 @@ pub fn list_timeline_day_summaries_for_month(
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct WeeklySummaryRowKey {
-    engagement_code: String,
-    activity_code: String,
+    engagement_id: Option<String>,
+    activity_id: Option<String>,
+    engagement_code: Option<String>,
+    activity_code: Option<String>,
     activity_name: String,
     engagement_name: String,
     client_name: String,
@@ -813,8 +1115,10 @@ struct WeeklySummaryRowKey {
 
 #[derive(Debug, Clone)]
 struct WeeklySummaryRowAccumulator {
-    engagement_code: String,
-    activity_code: String,
+    engagement_id: Option<String>,
+    activity_id: Option<String>,
+    engagement_code: Option<String>,
+    activity_code: Option<String>,
     activity_name: String,
     engagement_name: String,
     client_name: String,
@@ -840,6 +1144,8 @@ pub fn list_timeline_weekly_summary(
         te.end_minute,
         te.duration_minutes,
         te.description,
+        te.engagement_id,
+        te.activity_id,
         e.code,
         e.name,
         e.client,
@@ -867,6 +1173,8 @@ pub fn list_timeline_weekly_summary(
             row.get::<_, Option<String>>(7)?,
             row.get::<_, Option<String>>(8)?,
             row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
         ))
     })?;
 
@@ -877,6 +1185,8 @@ pub fn list_timeline_weekly_summary(
             end_minute,
             duration_minutes,
             description,
+            engagement_id_raw,
+            activity_id_raw,
             engagement_code_raw,
             engagement_name_raw,
             client_name_raw,
@@ -914,15 +1224,29 @@ pub fn list_timeline_weekly_summary(
             .map(str::trim)
             .filter(|value| !value.is_empty());
 
-        let is_uncategorized = engagement_code_trimmed.is_none() || activity_code_trimmed.is_none();
+        let engagement_id = engagement_id_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        let activity_id = activity_id_raw
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        let is_uncategorized = engagement_id.is_none() || activity_id.is_none();
 
-        let engagement_code = engagement_code_trimmed.unwrap_or("UNCAT").to_string();
-        let activity_code = activity_code_trimmed.unwrap_or("UNCAT").to_string();
+        let engagement_code = engagement_code_trimmed.map(|value| value.to_string());
+        let activity_code = activity_code_trimmed.map(|value| value.to_string());
         let activity_name = activity_name_trimmed.unwrap_or("Uncategorized").to_string();
-        let engagement_name = engagement_name_trimmed.unwrap_or("Uncategorized").to_string();
+        let engagement_name = engagement_name_trimmed
+            .unwrap_or("Uncategorized")
+            .to_string();
         let client_name = client_name_trimmed.unwrap_or("").to_string();
 
         let key = WeeklySummaryRowKey {
+            engagement_id: engagement_id.clone(),
+            activity_id: activity_id.clone(),
             engagement_code: engagement_code.clone(),
             activity_code: activity_code.clone(),
             activity_name: activity_name.clone(),
@@ -934,6 +1258,8 @@ pub fn list_timeline_weekly_summary(
         let accumulator = rows_by_key
             .entry(key)
             .or_insert_with(|| WeeklySummaryRowAccumulator {
+                engagement_id: engagement_id.clone(),
+                activity_id: activity_id.clone(),
                 engagement_code: engagement_code.clone(),
                 activity_code: activity_code.clone(),
                 activity_name: activity_name.clone(),
@@ -968,6 +1294,8 @@ pub fn list_timeline_weekly_summary(
                 .collect::<Vec<_>>();
 
             TimelineWeeklySummaryRow {
+                engagement_id: accumulator.engagement_id,
+                activity_id: accumulator.activity_id,
                 engagement_code: accumulator.engagement_code,
                 activity_code: accumulator.activity_code,
                 activity_name: accumulator.activity_name,
@@ -990,12 +1318,22 @@ pub fn list_timeline_weekly_summary(
         }
 
         left.engagement_code
+            .as_deref()
+            .unwrap_or("")
             .to_lowercase()
-            .cmp(&right.engagement_code.to_lowercase())
+            .cmp(
+                &right
+                    .engagement_code
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase(),
+            )
             .then_with(|| {
                 left.activity_code
+                    .as_deref()
+                    .unwrap_or("")
                     .to_lowercase()
-                    .cmp(&right.activity_code.to_lowercase())
+                    .cmp(&right.activity_code.as_deref().unwrap_or("").to_lowercase())
             })
             .then_with(|| {
                 left.engagement_name
@@ -1106,49 +1444,6 @@ pub fn get_entry_date(conn: &Connection, entry_id: &str) -> AppResult<Option<Str
     }
 }
 
-pub fn resolve_code_ids(
-    conn: &Connection,
-    engagement_code: Option<&str>,
-    activity_code: Option<&str>,
-) -> AppResult<(Option<String>, Option<String>)> {
-    let Some(engagement_code) = engagement_code else {
-        return Ok((None, None));
-    };
-
-    let mut engagement_statement =
-        conn.prepare("SELECT id FROM engagements WHERE code = ?1 AND is_active = 1")?;
-    let engagement_id = match engagement_statement
-        .query_row(params![engagement_code], |row| row.get::<_, String>(0))
-    {
-        Ok(id) => Some(id),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(error) => return Err(AppError::Database(error)),
-    };
-
-    let Some(engagement_id_value) = &engagement_id else {
-        return Ok((None, None));
-    };
-
-    let Some(activity_code) = activity_code else {
-        return Ok((engagement_id, None));
-    };
-
-    let mut activity_statement = conn.prepare(
-        "SELECT id FROM activities WHERE engagement_id = ?1 AND code = ?2 AND is_active = 1",
-    )?;
-
-    let activity_id = match activity_statement
-        .query_row(params![engagement_id_value, activity_code], |row| {
-            row.get::<_, String>(0)
-        }) {
-        Ok(id) => Some(id),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(error) => return Err(AppError::Database(error)),
-    };
-
-    Ok((engagement_id, activity_id))
-}
-
 pub fn prune_old_diagnostics(conn: &Connection, retention_days: i64) -> AppResult<()> {
     let normalized_days = retention_days.max(1);
     let cutoff_timestamp = current_unix_timestamp() - (normalized_days * 24 * 60 * 60);
@@ -1253,7 +1548,10 @@ pub fn list_diagnostics_events(
             r#"
           SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
           FROM diagnostics_events
-          WHERE command = 'interpret_text_message' OR event_type LIKE 'llm_%'
+          WHERE command IN ('interpret_text_message', 'transcribe_audio_clip')
+             OR event_type LIKE 'llm_%'
+             OR event_type LIKE 'transcription_%'
+             OR event_type LIKE 'voice_%'
           ORDER BY timestamp DESC
           LIMIT ?1
         "#,
@@ -1263,7 +1561,12 @@ pub fn list_diagnostics_events(
             r#"
           SELECT id, timestamp, session_id, correlation_id, layer, event_type, command, status, duration_ms, message_text, details_json
           FROM diagnostics_events
-          WHERE command IN ('settings_get_status', 'settings_set_openai_key') OR event_type = 'key_save_verify'
+          WHERE command IN (
+            'settings_get_status',
+            'settings_set_openai_key',
+            'settings_set_openai_model',
+            'settings_set_transcription_model'
+          ) OR event_type = 'key_save_verify'
           ORDER BY timestamp DESC
           LIMIT ?1
         "#,
@@ -1328,14 +1631,23 @@ fn normalize_color_hex(raw_value: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(candidate))
 }
 
-fn normalize_usage_description(raw_value: Option<String>) -> AppResult<Option<String>> {
-    let Some(value) = raw_value else {
-        return Ok(None);
-    };
+fn normalize_optional_code(raw_value: Option<String>) -> Option<String> {
+    raw_value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
 
-    let trimmed = value.trim();
+fn normalize_usage_description(raw_value: String) -> AppResult<String> {
+    let trimmed = raw_value.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Err(AppError::InvalidInput(
+            "usage guidance is required".to_string(),
+        ));
     }
 
     if trimmed.chars().count() > MAX_USAGE_DESCRIPTION_LENGTH {
@@ -1345,7 +1657,7 @@ fn normalize_usage_description(raw_value: Option<String>) -> AppResult<Option<St
         )));
     }
 
-    Ok(Some(trimmed.to_string()))
+    Ok(trimmed.to_string())
 }
 
 fn parse_tags(tags_json: &str) -> Option<Vec<String>> {
@@ -1375,5 +1687,476 @@ fn db_value_to_warning_type(value: &str) -> WarningType {
         "overlap" => WarningType::Overlap,
         "unmatched" => WarningType::Unmatched,
         _ => WarningType::Unmatched,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::{
+        current_unix_timestamp, get_app_setting, insert_manual_timeline_entry, insert_raw_message,
+        insert_timesheet_entry, list_engagements, list_timeline_entries,
+        list_timeline_entries_for_date_range, list_timeline_weekly_summary, run_migrations,
+        upsert_activity, upsert_app_setting, upsert_engagement,
+    };
+    use crate::models::{
+        ActivityUpsertInput, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
+        TranscriptionModelId,
+    };
+
+    fn test_connection() -> Connection {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        run_migrations(&connection).expect("migrations should run");
+        connection
+    }
+
+    #[test]
+    fn engagement_upsert_allows_missing_code() {
+        let connection = test_connection();
+
+        let engagement_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: None,
+                name: "No Code Engagement".to_string(),
+                client: None,
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use when the user has no external code.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("engagement should save without a code");
+
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        let saved = engagements
+            .into_iter()
+            .find(|engagement| engagement.id == engagement_id)
+            .expect("saved engagement should exist");
+
+        assert!(saved.code.is_none());
+        assert_eq!(saved.name, "No Code Engagement");
+    }
+
+    #[test]
+    fn app_settings_round_trip_saved_value() {
+        let connection = test_connection();
+
+        assert_eq!(
+            get_app_setting(&connection, "openai_model").expect("settings lookup should work"),
+            None
+        );
+
+        upsert_app_setting(&connection, "openai_model", "gpt-4.1-nano")
+            .expect("setting should save");
+
+        assert_eq!(
+            get_app_setting(&connection, "openai_model").expect("settings lookup should work"),
+            Some("gpt-4.1-nano".to_string())
+        );
+    }
+
+    #[test]
+    fn timeline_entries_include_model_provenance_from_raw_message() {
+        let connection = test_connection();
+
+        insert_raw_message(
+            &connection,
+            "raw-model",
+            "worked on controls testing",
+            "{\"entries\":[]}",
+            "gpt-5-nano",
+            "text",
+            None,
+            None,
+            0.8,
+            current_unix_timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message should save");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-15".to_string(),
+            start_minute: 540,
+            end_minute: 570,
+            duration_minutes: 30,
+            description: "Control testing".to_string(),
+            user_submission_text: "Control testing".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-model",
+            &entry,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "text",
+        )
+        .expect("timesheet entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-15")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.model_used, Some(OpenAiModelId::Gpt5Nano));
+        assert_eq!(saved_entry.model_used_label.as_deref(), Some("GPT-5 Nano"));
+    }
+
+    #[test]
+    fn timeline_entries_hide_model_provenance_when_raw_message_has_no_model() {
+        let connection = test_connection();
+        let now = current_unix_timestamp();
+
+        connection
+            .execute(
+                r#"
+                INSERT INTO raw_messages (
+                  id, raw_text, interpreted_entries_json, open_ai_model, capture_source,
+                  transcription_model, transcription_duration_ms, confidence,
+                  status, message_timestamp, interpreted_entry_count, unique_entry_count,
+                  saved_entry_count, truncated_entry_count, contains_multiple_events, created_at
+                )
+                VALUES (?1, ?2, ?3, NULL, 'text', NULL, NULL, ?4, 'processed', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "#,
+                rusqlite::params![
+                    "raw-null-model",
+                    "worked on controls testing",
+                    "{\"entries\":[]}",
+                    0.8,
+                    now,
+                    1,
+                    1,
+                    1,
+                    0,
+                    0,
+                    now,
+                ],
+            )
+            .expect("raw message should save with null model");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-16".to_string(),
+            start_minute: 600,
+            end_minute: 630,
+            duration_minutes: 30,
+            description: "Control testing".to_string(),
+            user_submission_text: "Control testing".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-null-model",
+            &entry,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "text",
+        )
+        .expect("timesheet entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-16")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.model_used, None);
+        assert_eq!(saved_entry.model_used_label, None);
+    }
+
+    #[test]
+    fn timeline_entries_ignore_invalid_historical_model_values() {
+        let connection = test_connection();
+
+        insert_raw_message(
+            &connection,
+            "raw-invalid-model",
+            "worked on controls testing",
+            "{\"entries\":[]}",
+            "legacy-model",
+            "text",
+            None,
+            None,
+            0.8,
+            current_unix_timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message should save");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-17".to_string(),
+            start_minute: 660,
+            end_minute: 690,
+            duration_minutes: 30,
+            description: "Control testing".to_string(),
+            user_submission_text: "Control testing".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-invalid-model",
+            &entry,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "text",
+        )
+        .expect("timesheet entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-17")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.model_used, None);
+        assert_eq!(saved_entry.model_used_label, None);
+    }
+
+    #[test]
+    fn timeline_entries_include_transcription_model_for_voice_sources() {
+        let connection = test_connection();
+
+        insert_raw_message(
+            &connection,
+            "raw-voice",
+            "worked on controls testing",
+            "{\"entries\":[]}",
+            "gpt-5-nano",
+            "voice",
+            Some("whisper-1"),
+            Some(1800),
+            0.8,
+            current_unix_timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message should save");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-18".to_string(),
+            start_minute: 720,
+            end_minute: 750,
+            duration_minutes: 30,
+            description: "Voice captured testing".to_string(),
+            user_submission_text: "Voice captured testing".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-voice",
+            &entry,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "voice",
+        )
+        .expect("timesheet entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-18")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(
+            saved_entry.transcription_model_used,
+            Some(TranscriptionModelId::Whisper1)
+        );
+        assert_eq!(
+            saved_entry.transcription_model_used_label.as_deref(),
+            Some("Whisper")
+        );
+    }
+
+    #[test]
+    fn manual_timeline_entry_uses_manual_defaults() {
+        let connection = test_connection();
+
+        insert_manual_timeline_entry(&connection, "2026-03-19", 600, 630, 30, "")
+            .expect("manual timeline entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-19")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.source, "manual");
+        assert_eq!(saved_entry.description, "");
+        assert_eq!(saved_entry.user_submission_text, "Manual Entry");
+        assert_eq!(saved_entry.confidence, 1.0);
+        assert_eq!(saved_entry.source_message_entry_index, None);
+        assert_eq!(saved_entry.source_message_entry_count, None);
+    }
+
+    #[test]
+    fn timeline_entries_for_range_include_week_entries_in_date_order() {
+        let connection = test_connection();
+
+        insert_manual_timeline_entry(&connection, "2026-03-30", 540, 570, 30, "Monday task")
+            .expect("first entry should save");
+        insert_manual_timeline_entry(&connection, "2026-03-29", 600, 630, 30, "Sunday task")
+            .expect("second entry should save");
+        insert_manual_timeline_entry(&connection, "2026-04-01", 480, 510, 30, "Wednesday task")
+            .expect("third entry should save");
+
+        let entries =
+            list_timeline_entries_for_date_range(&connection, "2026-03-29", "2026-04-05")
+                .expect("range entries should load");
+
+        let ordered_descriptions = entries
+            .iter()
+            .map(|entry| (entry.date.as_str(), entry.description.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered_descriptions,
+            vec![
+                ("2026-03-29", "Sunday task"),
+                ("2026-03-30", "Monday task"),
+                ("2026-04-01", "Wednesday task"),
+            ]
+        );
+    }
+
+    #[test]
+    fn weekly_summary_keeps_categorized_rows_when_codes_are_blank() {
+        let connection = test_connection();
+
+        let engagement_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: None,
+                name: "Client Work".to_string(),
+                client: Some("Example Client".to_string()),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for client delivery work.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("engagement should save");
+
+        let activity_id = upsert_activity(
+            &connection,
+            ActivityUpsertInput {
+                id: None,
+                engagement_id: engagement_id.clone(),
+                code: None,
+                name: "Fieldwork".to_string(),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for fieldwork activity.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("activity should save");
+
+        insert_raw_message(
+            &connection,
+            "raw-1",
+            "worked on client walkthrough",
+            "{\"entries\":[]}",
+            "gpt-5-nano",
+            "text",
+            None,
+            None,
+            0.8,
+            current_unix_timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message should save");
+
+        let entry = NormalizedEntry {
+            date: "2026-03-02".to_string(),
+            start_minute: 540,
+            end_minute: 600,
+            duration_minutes: 60,
+            description: "Client walkthrough".to_string(),
+            user_submission_text: "Client walkthrough".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+
+        insert_timesheet_entry(
+            &connection,
+            "raw-1",
+            &entry,
+            Some(&engagement_id),
+            Some(&activity_id),
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            "text",
+        )
+        .expect("timesheet entry should save");
+
+        let summary = list_timeline_weekly_summary(&connection, "2026-02-28", "2026-03-07")
+            .expect("summary should load");
+        let row = summary.rows.first().expect("summary row should exist");
+
+        assert!(!row.is_uncategorized);
+        assert!(row.engagement_code.is_none());
+        assert!(row.activity_code.is_none());
+        assert_eq!(row.engagement_name, "Client Work");
+        assert_eq!(row.activity_name, "Fieldwork");
     }
 }
