@@ -6,6 +6,139 @@ pub struct ApiKeyInput {
     pub api_key: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpenAiModelId {
+    #[serde(rename = "gpt-5-nano")]
+    Gpt5Nano,
+    #[serde(rename = "gpt-4.1-nano")]
+    Gpt41Nano,
+}
+
+impl Default for OpenAiModelId {
+    fn default() -> Self {
+        Self::Gpt5Nano
+    }
+}
+
+impl OpenAiModelId {
+    pub const ALL: [Self; 2] = [Self::Gpt5Nano, Self::Gpt41Nano];
+
+    pub fn api_name(self) -> &'static str {
+        match self {
+            Self::Gpt5Nano => "gpt-5-nano",
+            Self::Gpt41Nano => "gpt-4.1-nano",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Gpt5Nano => "GPT-5 Nano",
+            Self::Gpt41Nano => "GPT-4.1 Nano",
+        }
+    }
+
+    pub fn from_api_name(value: &str) -> Option<Self> {
+        match value.trim() {
+            "gpt-5-nano" => Some(Self::Gpt5Nano),
+            "gpt-4.1-nano" => Some(Self::Gpt41Nano),
+            _ => None,
+        }
+    }
+
+    pub fn options() -> Vec<OpenAiModelOption> {
+        Self::ALL
+            .into_iter()
+            .map(|model| OpenAiModelOption {
+                id: model,
+                label: model.display_label().to_string(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranscriptionModelId {
+    #[serde(rename = "gpt-4o-mini-transcribe")]
+    Gpt4oMiniTranscribe,
+    #[serde(rename = "whisper-1")]
+    Whisper1,
+}
+
+impl Default for TranscriptionModelId {
+    fn default() -> Self {
+        Self::Gpt4oMiniTranscribe
+    }
+}
+
+impl TranscriptionModelId {
+    pub const ALL: [Self; 2] = [Self::Gpt4oMiniTranscribe, Self::Whisper1];
+
+    pub fn api_name(self) -> &'static str {
+        match self {
+            Self::Gpt4oMiniTranscribe => "gpt-4o-mini-transcribe",
+            Self::Whisper1 => "whisper-1",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Gpt4oMiniTranscribe => "GPT-4o Mini Transcribe",
+            Self::Whisper1 => "Whisper",
+        }
+    }
+
+    pub fn from_api_name(value: &str) -> Option<Self> {
+        match value.trim() {
+            "gpt-4o-mini-transcribe" => Some(Self::Gpt4oMiniTranscribe),
+            "whisper-1" => Some(Self::Whisper1),
+            _ => None,
+        }
+    }
+
+    pub fn options() -> Vec<TranscriptionModelOption> {
+        Self::ALL
+            .into_iter()
+            .map(|model| TranscriptionModelOption {
+                id: model,
+                label: model.display_label().to_string(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureSourceId {
+    Text,
+    Voice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAiModelOption {
+    pub id: OpenAiModelId,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionModelOption {
+    pub id: TranscriptionModelId,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSetOpenAiModelInput {
+    pub model: OpenAiModelId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSetTranscriptionModelInput {
+    pub model: TranscriptionModelId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsStatus {
@@ -14,6 +147,10 @@ pub struct SettingsStatus {
     pub key_source: KeySource,
     pub status_level: StatusLevel,
     pub last_error: Option<String>,
+    pub selected_open_ai_model: OpenAiModelId,
+    pub available_open_ai_models: Vec<OpenAiModelOption>,
+    pub selected_transcription_model: TranscriptionModelId,
+    pub available_transcription_models: Vec<TranscriptionModelOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +182,7 @@ pub enum StatusLevel {
 pub struct Activity {
     pub id: String,
     pub engagement_id: String,
-    pub code: String,
+    pub code: Option<String>,
     pub name: String,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
@@ -59,7 +196,7 @@ pub struct Activity {
 #[serde(rename_all = "camelCase")]
 pub struct Engagement {
     pub id: String,
-    pub code: String,
+    pub code: Option<String>,
     pub name: String,
     pub client: Option<String>,
     pub color_hex: Option<String>,
@@ -75,12 +212,12 @@ pub struct Engagement {
 #[serde(rename_all = "camelCase")]
 pub struct EngagementUpsertInput {
     pub id: Option<String>,
-    pub code: String,
+    pub code: Option<String>,
     pub name: String,
     pub client: Option<String>,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
-    pub describe_when_to_use: Option<String>,
+    pub describe_when_to_use: String,
     pub is_active: Option<bool>,
 }
 
@@ -89,11 +226,11 @@ pub struct EngagementUpsertInput {
 pub struct ActivityUpsertInput {
     pub id: Option<String>,
     pub engagement_id: String,
-    pub code: String,
+    pub code: Option<String>,
     pub name: String,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
-    pub describe_when_to_use: Option<String>,
+    pub describe_when_to_use: String,
     pub is_active: Option<bool>,
 }
 
@@ -124,6 +261,46 @@ pub struct InterpretTextInput {
     pub client_local_date: String,
     pub client_local_time: String,
     pub client_utc_offset_minutes: i64,
+    pub open_ai_model: Option<OpenAiModelId>,
+    pub capture_source: Option<CaptureSourceId>,
+    pub transcription_model: Option<TranscriptionModelId>,
+    pub transcription_duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribeAudioInput {
+    pub audio_base64: String,
+    pub mime_type: String,
+    pub duration_ms: i64,
+    pub capture_timestamp_iso: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribeAudioResult {
+    pub transcript_text: String,
+    pub transcription_model_used: TranscriptionModelId,
+    pub transcription_model_used_label: String,
+    pub transcription_duration_ms: i64,
+    pub audio_duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MicrophonePermissionStatus {
+    Granted,
+    Denied,
+    Restricted,
+    NotDetermined,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicrophonePermissionResult {
+    pub status: MicrophonePermissionStatus,
+    pub requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +317,9 @@ pub struct InterpretResult {
     pub touched_month_keys: Vec<String>,
     pub warnings: Vec<Warning>,
     pub normalization_notes: Vec<String>,
+    pub model_used: OpenAiModelId,
+    pub model_used_label: String,
+    pub llm_duration_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -182,6 +362,10 @@ pub struct TimelineEntry {
     pub fallback_summary: Option<String>,
     pub source_message_entry_index: Option<i64>,
     pub source_message_entry_count: Option<i64>,
+    pub model_used: Option<OpenAiModelId>,
+    pub model_used_label: Option<String>,
+    pub transcription_model_used: Option<TranscriptionModelId>,
+    pub transcription_model_used_label: Option<String>,
     pub warning_flags: Vec<WarningType>,
 }
 
@@ -213,8 +397,10 @@ pub struct TimelineWeeklySummaryDay {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineWeeklySummaryRow {
-    pub engagement_code: String,
-    pub activity_code: String,
+    pub engagement_id: Option<String>,
+    pub activity_id: Option<String>,
+    pub engagement_code: Option<String>,
+    pub activity_code: Option<String>,
     pub activity_name: String,
     pub engagement_name: String,
     pub client_name: String,
@@ -239,16 +425,111 @@ pub struct TimelineWeeklySummaryNote {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineWeekView {
+    pub week_start_date: String,
+    pub week_end_date: String,
+    pub days: Vec<TimelineWeekViewDay>,
+    pub entries: Vec<TimelineEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineWeekViewDay {
+    pub date: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryExportResult {
+    pub file_path: String,
+    pub file_name: String,
+    pub auto_open_attempted: bool,
+    pub auto_open_succeeded: bool,
+    pub auto_open_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryExportWeeklyExcelInput {
+    pub date: String,
+    pub layout_preset: SummaryLayoutPreset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SummaryLayoutFieldKey {
+    EngagementCode,
+    EngagementName,
+    ClientName,
+    EngagementTags,
+    EngagementUsage,
+    ActivityCode,
+    ActivityName,
+    ActivityTags,
+    ActivityUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SummaryLayoutColumn {
+    Field {
+        id: String,
+        #[serde(rename = "fieldKey", alias = "field_key")]
+        field_key: SummaryLayoutFieldKey,
+    },
+    Day {
+        id: String,
+        #[serde(rename = "dayIndex", alias = "day_index")]
+        day_index: u8,
+    },
+    FreeText { id: String, label: String },
+    RowTotal { id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryLayoutPreset {
+    pub id: String,
+    pub name: String,
+    pub columns: Vec<SummaryLayoutColumn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryLayoutState {
+    pub version: i64,
+    pub selected_preset_id: String,
+    pub presets: Vec<SummaryLayoutPreset>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineUpdateMode {
+    Manual,
+    Drag,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineUpdateInput {
     pub id: String,
     pub engagement_id: Option<String>,
     pub activity_id: Option<String>,
+    pub mode: TimelineUpdateMode,
     pub date: String,
     pub start_minute: i64,
     pub end_minute: i64,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineCreateInput {
+    pub date: String,
+    pub start_minute: i64,
+    pub end_minute: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -308,7 +589,11 @@ pub struct CodeContext {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextEngagement {
-    pub code: String,
+    #[serde(skip_serializing)]
+    pub id: String,
+    pub engagement_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub name: String,
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -319,7 +604,11 @@ pub struct ContextEngagement {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextActivity {
-    pub code: String,
+    #[serde(skip_serializing)]
+    pub id: String,
+    pub activity_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub name: String,
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -335,8 +624,8 @@ pub struct LlmResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmEntry {
-    pub engagement_code: Option<String>,
-    pub activity_code: Option<String>,
+    pub engagement_ref: Option<String>,
+    pub activity_ref: Option<String>,
     pub date: Option<String>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
@@ -352,7 +641,7 @@ pub struct LlmEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmAlternativeActivity {
-    pub activity_code: String,
+    pub activity_ref: String,
     pub reason: String,
 }
 
@@ -365,26 +654,88 @@ pub struct NormalizedEntry {
     pub description: String,
     pub user_submission_text: String,
     pub confidence: f64,
-    pub engagement_code: Option<String>,
-    pub activity_code: Option<String>,
+    pub engagement_ref: Option<String>,
+    pub activity_ref: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
 
-    use super::{CodeContext, ContextActivity, ContextEngagement};
+    use super::{
+        CodeContext, ContextActivity, ContextEngagement, OpenAiModelId, SummaryLayoutColumn,
+        SummaryLayoutFieldKey, TranscriptionModelId,
+    };
+
+    #[test]
+    fn openai_model_default_and_labels_match_expected_values() {
+        let default_model = OpenAiModelId::default();
+
+        assert_eq!(default_model, OpenAiModelId::Gpt5Nano);
+        assert_eq!(default_model.api_name(), "gpt-5-nano");
+        assert_eq!(default_model.display_label(), "GPT-5 Nano");
+        assert_eq!(OpenAiModelId::Gpt41Nano.display_label(), "GPT-4.1 Nano");
+    }
+
+    #[test]
+    fn openai_model_serialization_round_trips_supported_ids() {
+        let serialized = serde_json::to_string(&OpenAiModelId::Gpt41Nano)
+            .expect("model serialization should work");
+        assert_eq!(serialized, "\"gpt-4.1-nano\"");
+
+        let parsed: OpenAiModelId =
+            serde_json::from_str("\"gpt-5-nano\"").expect("model deserialization should work");
+        assert_eq!(parsed, OpenAiModelId::Gpt5Nano);
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-4.1-nano"),
+            Some(OpenAiModelId::Gpt41Nano)
+        );
+        assert_eq!(OpenAiModelId::from_api_name("gpt-4.1"), None);
+    }
+
+    #[test]
+    fn transcription_model_default_and_labels_match_expected_values() {
+        let default_model = TranscriptionModelId::default();
+
+        assert_eq!(default_model, TranscriptionModelId::Gpt4oMiniTranscribe);
+        assert_eq!(default_model.api_name(), "gpt-4o-mini-transcribe");
+        assert_eq!(default_model.display_label(), "GPT-4o Mini Transcribe");
+        assert_eq!(TranscriptionModelId::Whisper1.display_label(), "Whisper");
+    }
+
+    #[test]
+    fn transcription_model_serialization_round_trips_supported_ids() {
+        let serialized = serde_json::to_string(&TranscriptionModelId::Whisper1)
+            .expect("model serialization should work");
+        assert_eq!(serialized, "\"whisper-1\"");
+
+        let parsed: TranscriptionModelId = serde_json::from_str("\"gpt-4o-mini-transcribe\"")
+            .expect("model deserialization should work");
+        assert_eq!(parsed, TranscriptionModelId::Gpt4oMiniTranscribe);
+        assert_eq!(
+            TranscriptionModelId::from_api_name("whisper-1"),
+            Some(TranscriptionModelId::Whisper1)
+        );
+        assert_eq!(
+            TranscriptionModelId::from_api_name("gpt-4o-transcribe"),
+            None
+        );
+    }
 
     #[test]
     fn context_serialization_omits_null_usage_description_fields() {
         let context = CodeContext {
             engagements: vec![ContextEngagement {
-                code: "E-001".to_string(),
+                id: "engagement-id-1".to_string(),
+                engagement_ref: "eng-001".to_string(),
+                code: None,
                 name: "Example Engagement".to_string(),
                 tags: vec!["example".to_string()],
                 describe_when_to_use: None,
                 activities: vec![ContextActivity {
-                    code: "A-001".to_string(),
+                    id: "activity-id-1".to_string(),
+                    activity_ref: "act-001".to_string(),
+                    code: None,
                     name: "Example Activity".to_string(),
                     tags: vec!["task".to_string()],
                     describe_when_to_use: None,
@@ -400,6 +751,15 @@ mod tests {
             .and_then(Value::as_object)
             .expect("engagement should exist");
 
+        assert_eq!(
+            engagement
+                .get("engagementRef")
+                .and_then(Value::as_str)
+                .expect("engagement ref should exist"),
+            "eng-001"
+        );
+        assert!(!engagement.contains_key("id"));
+        assert!(!engagement.contains_key("code"));
         assert!(!engagement.contains_key("describeWhenToUse"));
 
         let activity = engagement
@@ -409,6 +769,15 @@ mod tests {
             .and_then(Value::as_object)
             .expect("activity should exist");
 
+        assert_eq!(
+            activity
+                .get("activityRef")
+                .and_then(Value::as_str)
+                .expect("activity ref should exist"),
+            "act-001"
+        );
+        assert!(!activity.contains_key("id"));
+        assert!(!activity.contains_key("code"));
         assert!(!activity.contains_key("describeWhenToUse"));
     }
 
@@ -416,12 +785,16 @@ mod tests {
     fn context_serialization_includes_non_null_usage_description_fields() {
         let context = CodeContext {
             engagements: vec![ContextEngagement {
-                code: "E-001".to_string(),
+                id: "engagement-id-1".to_string(),
+                engagement_ref: "eng-001".to_string(),
+                code: Some("E-001".to_string()),
                 name: "Example Engagement".to_string(),
                 tags: vec!["example".to_string()],
                 describe_when_to_use: Some("Use for client example work.".to_string()),
                 activities: vec![ContextActivity {
-                    code: "A-001".to_string(),
+                    id: "activity-id-1".to_string(),
+                    activity_ref: "act-001".to_string(),
+                    code: Some("A-001".to_string()),
                     name: "Example Activity".to_string(),
                     tags: vec!["task".to_string()],
                     describe_when_to_use: Some("Use for walkthrough sessions.".to_string()),
@@ -444,6 +817,13 @@ mod tests {
                 .expect("engagement description should exist"),
             "Use for client example work."
         );
+        assert_eq!(
+            engagement
+                .get("code")
+                .and_then(Value::as_str)
+                .expect("engagement code should exist"),
+            "E-001"
+        );
 
         let activity = engagement
             .get("activities")
@@ -459,5 +839,54 @@ mod tests {
                 .expect("activity description should exist"),
             "Use for walkthrough sessions."
         );
+        assert_eq!(
+            activity
+                .get("code")
+                .and_then(Value::as_str)
+                .expect("activity code should exist"),
+            "A-001"
+        );
+    }
+
+    #[test]
+    fn summary_layout_column_serializes_and_deserializes_camel_case_variant_fields() {
+        let column = SummaryLayoutColumn::Field {
+            id: "field-1".to_string(),
+            field_key: SummaryLayoutFieldKey::EngagementName,
+        };
+
+        let serialized = serde_json::to_value(&column).expect("column serialization should work");
+        let serialized_object = serialized.as_object().expect("column should serialize to an object");
+        assert_eq!(
+            serialized_object
+                .get("fieldKey")
+                .and_then(Value::as_str)
+                .expect("fieldKey should exist"),
+            "engagementName"
+        );
+        assert!(!serialized_object.contains_key("field_key"));
+
+        let parsed: SummaryLayoutColumn = serde_json::from_value(serde_json::json!({
+            "kind": "day",
+            "id": "day-1",
+            "dayIndex": 1
+        }))
+        .expect("camelCase payload should deserialize");
+
+        match parsed {
+            SummaryLayoutColumn::Day { day_index, .. } => assert_eq!(day_index, 1),
+            _ => panic!("expected day column"),
+        }
+
+        let parsed_row_total: SummaryLayoutColumn = serde_json::from_value(serde_json::json!({
+            "kind": "rowTotal",
+            "id": "row-total"
+        }))
+        .expect("row total payload should deserialize");
+
+        match parsed_row_total {
+            SummaryLayoutColumn::RowTotal { id } => assert_eq!(id, "row-total"),
+            _ => panic!("expected row total column"),
+        }
     }
 }

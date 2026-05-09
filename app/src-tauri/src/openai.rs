@@ -1,12 +1,13 @@
+use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{CodeContext, LlmResponse};
+use crate::models::{CodeContext, LlmResponse, OpenAiModelId, TranscriptionModelId};
 
-const OPENAI_MODEL: &str = "gpt-5-nano";
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_AUDIO_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MAX_ATTEMPTS: usize = 3;
 const OPENAI_RETRY_BASE_DELAY_MS: u64 = 700;
 
@@ -30,8 +31,8 @@ Return strict JSON with this shape:
 {
   "entries": [
     {
-      "engagementCode": string | null,
-      "activityCode": string | null,
+      "engagementRef": string | null,
+      "activityRef": string | null,
       "date": "YYYY-MM-DD",
       "startTime": "HH:MM" | null,
       "endTime": "HH:MM" | null,
@@ -42,7 +43,7 @@ Return strict JSON with this shape:
       "activityReason": string | null,
       "alternativeActivities": [
         {
-          "activityCode": string,
+          "activityRef": string,
           "reason": string
         }
       ] | null,
@@ -87,14 +88,24 @@ Additional rules:
 - Infer date from capture context and inferred time window.
 - Never default missing times to 00:00.
 - If uncertain, set lower confidence.
-- Use describeWhenToUse as the primary categorization signal for engagements and activities.
+- Use the strongest evidence across both engagement-level and activity-level context.
+- Use describeWhenToUse as the primary categorization signal, especially when it is more specific than names or tags.
+- Use names as the primary visible categorization cue.
+- If a user-provided code appears in the context, treat it as a secondary hint only.
 - Use tags/key words as secondary hints; exact keyword overlap is not required.
-- If you identify an engagementCode and that engagement has activities in the provided context, choose the best available activityCode from that engagement.
-- Use activityCode = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
-- If no engagement match exists, set engagementCode/activityCode to null.
-- If activityCode is not null, include activityReason that cites the strongest evidence from message text plus provided context.
-- If activityCode is not null, include alternativeActivities with up to 3 rejected codes from the same engagement and concise rejection reasons.
-- If activityCode is null, set activityReason and alternativeActivities to null.
+- engagementRef must be selected from engagementActivityContext.engagements[].engagementRef only.
+- activityRef must be selected from the chosen engagement's activities[].activityRef only.
+- Never invent or modify refs.
+- A strong match to an activity is sufficient to infer that activity's parent engagementRef.
+- If an activity under engagement X is the best match, return that activityRef together with engagement X's engagementRef.
+- Do not require the parent engagement's own describeWhenToUse, name, or tags to independently match when the child activity is a clear best match.
+- If you identify an engagementRef and that engagement has activities in the provided context, choose the best available activityRef from that engagement.
+- Prefer the most specific workstream activity over generic meeting/admin activities when the message contains workstream-specific terms such as non-sap, rr itacs, firefighter, sap itgcs, or exampleco review work.
+- Use activityRef = null only as a last resort when the selected engagement has no activities or no reasonable mapping can be inferred.
+- If no specific activity or engagement can be reasonably inferred, set engagementRef/activityRef to null.
+- If activityRef is not null, include activityReason that cites the strongest evidence from message text plus provided context.
+- If activityRef is not null, include alternativeActivities with up to 3 rejected activityRef values from the same engagement and concise rejection reasons.
+- If activityRef is null, set activityReason and alternativeActivities to null.
 - Duration and times must be internally consistent.
 - Confidence must be in range 0.0 to 1.0.
 - Never include text outside JSON.
@@ -125,14 +136,18 @@ Examples:
   Expected temporal intent: first entry startTime "13:00", endTime "13:30", durationMinutes 30; second entry sequenceRelation "startsAfterPrevious", startTime "13:30", endTime "14:00", durationMinutes 30, durationSource "defaulted".
 - Message: "At 1pm I worked on Example ITGCs. Then at 3pm I worked on ExampleCo report 1."
   Expected temporal intent: preserve the explicit 15:00 second start; do not force the second entry to start immediately after the first.
+- Message: "uploading prior year workpapers for non-sap, 30 minutes"
+  Expected categorization intent: if the context contains a child activity whose name or describeWhenToUse clearly matches "non-sap", return that activityRef together with its parent engagementRef even if the parent engagement description is generic audit wording.
+  Expected temporal intent: startTime null, endTime null, durationMinutes 30.
+- Message: "team sync and status meeting, 30 minutes"
+  Expected categorization intent: use a generic meeting/admin activity only when there is no more specific workstream activity signal in the message.
 - Message: "worked on controls testing"
   Expected temporal intent: startTime null, endTime null, durationMinutes null.
 "#
 }
 
-pub async fn interpret_message(
-    client: &reqwest::Client,
-    api_key: &str,
+fn build_request_body(
+    model: OpenAiModelId,
     raw_text: &str,
     client_timestamp_iso: &str,
     client_local_date: &str,
@@ -140,8 +155,7 @@ pub async fn interpret_message(
     client_utc_offset_minutes: i64,
     timezone: &str,
     code_context: &CodeContext,
-    attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
-) -> AppResult<LlmResponse> {
+) -> Value {
     let system_prompt = build_system_prompt();
 
     let user_prompt = json!({
@@ -154,14 +168,81 @@ pub async fn interpret_message(
       "engagementActivityContext": code_context,
     });
 
-    let request_body = json!({
-      "model": OPENAI_MODEL,
+    json!({
+      "model": model.api_name(),
       "response_format": { "type": "json_object" },
       "messages": [
         { "role": "system", "content": system_prompt },
         { "role": "user", "content": user_prompt.to_string() }
       ]
-    });
+    })
+}
+
+fn audio_filename_for_mime_type(mime_type: &str) -> &'static str {
+    let normalized = mime_type.trim().to_ascii_lowercase();
+
+    if normalized.contains("webm") {
+        return "capture.webm";
+    }
+
+    if normalized.contains("wav") {
+        return "capture.wav";
+    }
+
+    if normalized.contains("mpeg") || normalized.contains("mp3") {
+        return "capture.mp3";
+    }
+
+    if normalized.contains("ogg") {
+        return "capture.ogg";
+    }
+
+    if normalized.contains("mp4") || normalized.contains("m4a") {
+        return "capture.m4a";
+    }
+
+    "capture.webm"
+}
+
+fn build_transcription_form(
+    model: TranscriptionModelId,
+    audio_bytes: &[u8],
+    mime_type: &str,
+) -> AppResult<Form> {
+    let file_part = Part::bytes(audio_bytes.to_vec())
+        .file_name(audio_filename_for_mime_type(mime_type).to_string())
+        .mime_str(mime_type)
+        .map_err(|error| AppError::InvalidInput(format!("unsupported audio mime type: {error}")))?;
+
+    Ok(Form::new()
+        .text("model", model.api_name().to_string())
+        .text("response_format", "json".to_string())
+        .part("file", file_part))
+}
+
+pub async fn interpret_message(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: OpenAiModelId,
+    raw_text: &str,
+    client_timestamp_iso: &str,
+    client_local_date: &str,
+    client_local_time: &str,
+    client_utc_offset_minutes: i64,
+    timezone: &str,
+    code_context: &CodeContext,
+    attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
+) -> AppResult<LlmResponse> {
+    let request_body = build_request_body(
+        model,
+        raw_text,
+        client_timestamp_iso,
+        client_local_date,
+        client_local_time,
+        client_utc_offset_minutes,
+        timezone,
+        code_context,
+    );
 
     for attempt in 0..OPENAI_MAX_ATTEMPTS {
         let attempt_number = attempt + 1;
@@ -346,6 +427,180 @@ pub async fn interpret_message(
     ))
 }
 
+pub async fn transcribe_audio(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: TranscriptionModelId,
+    audio_bytes: &[u8],
+    mime_type: &str,
+    attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
+) -> AppResult<String> {
+    for attempt in 0..OPENAI_MAX_ATTEMPTS {
+        let attempt_number = attempt + 1;
+        let attempt_started_at = Instant::now();
+        let form = build_transcription_form(model, audio_bytes, mime_type)?;
+
+        let response = client
+            .post(OPENAI_AUDIO_TRANSCRIPTIONS_URL)
+            .bearer_auth(api_key)
+            .multipart(form)
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(value) => value,
+            Err(error) => {
+                let retryable =
+                    attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_transport_error(&error);
+                let delay_ms = if retryable {
+                    Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+                } else {
+                    None
+                };
+
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "transport_error",
+                    http_status: None,
+                    retryable,
+                    retry_delay_ms: delay_ms,
+                    error_class: Some(transport_error_class(&error)),
+                    error_message: Some(error.to_string()),
+                });
+
+                if let Some(delay_ms) = delay_ms {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    continue;
+                }
+
+                return Err(AppError::Network(error));
+            }
+        };
+
+        let status = response.status();
+        let response_text = match response.text().await {
+            Ok(value) => value,
+            Err(error) => {
+                let retryable =
+                    attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_transport_error(&error);
+                let delay_ms = if retryable {
+                    Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+                } else {
+                    None
+                };
+
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "transport_error",
+                    http_status: Some(status.as_u16()),
+                    retryable,
+                    retry_delay_ms: delay_ms,
+                    error_class: Some(transport_error_class(&error)),
+                    error_message: Some(error.to_string()),
+                });
+
+                if let Some(delay_ms) = delay_ms {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    continue;
+                }
+
+                return Err(AppError::Network(error));
+            }
+        };
+
+        if !status.is_success() {
+            let retryable =
+                attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_status(status.as_u16());
+            let delay_ms = if retryable {
+                Some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64)
+            } else {
+                None
+            };
+
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "http_error",
+                http_status: Some(status.as_u16()),
+                retryable,
+                retry_delay_ms: delay_ms,
+                error_class: None,
+                error_message: Some(format!("OpenAI transcription API error ({status})")),
+            });
+
+            if let Some(delay_ms) = delay_ms {
+                thread::sleep(Duration::from_millis(delay_ms));
+                continue;
+            }
+
+            return Err(AppError::Service(format!(
+                "OpenAI transcription API error ({status}): {response_text}"
+            )));
+        }
+
+        let response_json: Value = serde_json::from_str(&response_text).map_err(|error| {
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "parse_error",
+                http_status: Some(status.as_u16()),
+                retryable: false,
+                retry_delay_ms: None,
+                error_class: None,
+                error_message: Some(error.to_string()),
+            });
+
+            AppError::Service(format!(
+                "Failed to parse OpenAI transcription response JSON: {error}. Raw response: {response_text}"
+            ))
+        })?;
+
+        let transcript = response_json
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "parse_error",
+                    http_status: Some(status.as_u16()),
+                    retryable: false,
+                    retry_delay_ms: None,
+                    error_class: None,
+                    error_message: Some("OpenAI transcription response missing text".to_string()),
+                });
+                AppError::Service("OpenAI transcription response missing text".to_string())
+            })?;
+
+        attempt_telemetry.push(LlmAttemptTelemetry {
+            attempt: attempt_number,
+            max_attempts: OPENAI_MAX_ATTEMPTS,
+            duration_ms: attempt_duration_ms(attempt_started_at),
+            outcome: "success",
+            http_status: Some(status.as_u16()),
+            retryable: false,
+            retry_delay_ms: None,
+            error_class: None,
+            error_message: None,
+        });
+
+        return Ok(transcript.to_string());
+    }
+
+    Err(AppError::Service(
+        "OpenAI transcription request exhausted retry attempts".to_string(),
+    ))
+}
+
 fn attempt_duration_ms(started_at: Instant) -> i64 {
     started_at.elapsed().as_millis() as i64
 }
@@ -372,7 +627,12 @@ fn is_retryable_status(status_code: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_system_prompt, is_retryable_status};
+    use serde_json::Value;
+
+    use super::{
+        audio_filename_for_mime_type, build_request_body, build_system_prompt, is_retryable_status,
+    };
+    use crate::models::{CodeContext, OpenAiModelId};
 
     #[test]
     fn prompt_includes_relative_duration_inference_rules() {
@@ -380,6 +640,7 @@ mod tests {
         assert!(prompt.contains("Relative duration cues"));
         assert!(prompt.contains("Infer endTime from clientLocalTime"));
         assert!(prompt.contains("for the past hour"));
+        assert!(prompt.contains("Bare duration worklog cues without explicit clock times"));
     }
 
     #[test]
@@ -435,16 +696,49 @@ mod tests {
     #[test]
     fn prompt_makes_activity_null_a_last_resort_when_engagement_is_known() {
         let prompt = build_system_prompt();
-        assert!(prompt.contains("choose the best available activityCode"));
-        assert!(prompt.contains("Use activityCode = null only as a last resort"));
-        assert!(prompt.contains("If no engagement match exists"));
+        assert!(prompt.contains("choose the best available activityRef"));
+        assert!(prompt.contains("Use activityRef = null only as a last resort"));
+        assert!(prompt.contains("If no specific activity or engagement can be reasonably inferred"));
     }
 
     #[test]
     fn prompt_prioritizes_description_over_tags_for_categorization() {
         let prompt = build_system_prompt();
+        assert!(prompt.contains(
+            "Use the strongest evidence across both engagement-level and activity-level context"
+        ));
         assert!(prompt.contains("Use describeWhenToUse as the primary categorization signal"));
+        assert!(prompt.contains("Use names as the primary visible categorization cue"));
         assert!(prompt.contains("Use tags/key words as secondary hints"));
+    }
+
+    #[test]
+    fn prompt_allows_activity_to_imply_parent_engagement() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("A strong match to an activity is sufficient to infer that activity's parent engagementRef"));
+        assert!(
+            prompt.contains("return that activityRef together with engagement X's engagementRef")
+        );
+        assert!(prompt.contains("Do not require the parent engagement's own describeWhenToUse"));
+    }
+
+    #[test]
+    fn prompt_includes_non_sap_and_generic_meeting_disambiguation_examples() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("\"15 minutes to non-sap FDT-DB-02 with Nick\""));
+        assert!(prompt.contains(
+            "when the phrasing indicates recent/current work, infer startTime \"18:03\", endTime \"18:18\", durationMinutes 15."
+        ));
+        assert!(prompt.contains("\"30 minutes to SAP ITGCs\""));
+        assert!(prompt.contains("do not interpret them as start now and end later"));
+        assert!(prompt.contains("Do not return startTime \"14:40\" and endTime \"15:10\""));
+        assert!(prompt.contains("\"tomorrow 15 minutes on non-sap\""));
+        assert!(prompt.contains("\"uploading prior year workpapers for non-sap, 30 minutes\""));
+        assert!(prompt.contains(
+            "child activity whose name or describeWhenToUse clearly matches \"non-sap\""
+        ));
+        assert!(prompt.contains("\"team sync and status meeting, 30 minutes\""));
+        assert!(prompt.contains("generic meeting/admin activity only when there is no more specific workstream activity signal"));
     }
 
     #[test]
@@ -453,7 +747,7 @@ mod tests {
         assert!(prompt.contains("\"activityReason\": string | null"));
         assert!(prompt.contains("\"alternativeActivities\""));
         assert!(prompt.contains("include activityReason"));
-        assert!(prompt.contains("rejected codes"));
+        assert!(prompt.contains("rejected activityRef values"));
     }
 
     #[test]
@@ -475,5 +769,44 @@ mod tests {
         assert!(is_retryable_status(429));
         assert!(is_retryable_status(500));
         assert!(!is_retryable_status(400));
+    }
+
+    #[test]
+    fn request_body_uses_resolved_model_id() {
+        let request_body = build_request_body(
+            OpenAiModelId::Gpt41Nano,
+            "worked on controls testing",
+            "2026-03-15T18:00:00Z",
+            "2026-03-15",
+            "11:00",
+            -420,
+            "America/Los_Angeles",
+            &CodeContext {
+                engagements: vec![],
+            },
+        );
+
+        assert_eq!(
+            request_body
+                .get("model")
+                .and_then(Value::as_str)
+                .expect("model should be serialized"),
+            "gpt-4.1-nano"
+        );
+    }
+
+    #[test]
+    fn audio_filename_defaults_match_common_recording_mime_types() {
+        assert_eq!(
+            audio_filename_for_mime_type("audio/webm;codecs=opus"),
+            "capture.webm"
+        );
+        assert_eq!(audio_filename_for_mime_type("audio/wav"), "capture.wav");
+        assert_eq!(audio_filename_for_mime_type("audio/mp4"), "capture.m4a");
+        assert_eq!(audio_filename_for_mime_type("audio/ogg"), "capture.ogg");
+        assert_eq!(
+            audio_filename_for_mime_type("application/octet-stream"),
+            "capture.webm"
+        );
     }
 }
