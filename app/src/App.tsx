@@ -994,6 +994,9 @@ function App() {
     ),
     [timelineEntriesForLayout, timelineExcludeUncategorizedFromDailyTotals],
   )
+  const shouldShowTimelineDayUncategorizedDailyTotal =
+    shouldShowTimelineUncategorizedDailyTotal
+    && timelineDayTotalBreakdown.uncategorizedMinutes > 0
   const previewPositionedTimelineEntries = useMemo(
     () => positionTimelineEntries(
       timelineEntriesForLayout,
@@ -4226,7 +4229,7 @@ function App() {
                   <span className="timeline-range-total">
                     {formatTimelineHoursCompact(timelineDayTotalBreakdown.primaryMinutes)} total
                   </span>
-                  {shouldShowTimelineUncategorizedDailyTotal ? (
+                  {shouldShowTimelineDayUncategorizedDailyTotal ? (
                     <>
                       <span className="timeline-range-separator" aria-hidden="true">•</span>
                       <span className="timeline-range-total timeline-range-total-secondary">
@@ -4498,6 +4501,9 @@ function App() {
                       const dayTotalBreakdown =
                         weekTimelineDayTotalBreakdowns.get(day.date)
                         ?? createEmptyTimelineTotalBreakdown()
+                      const shouldShowDayUncategorizedDailyTotal =
+                        shouldShowTimelineUncategorizedDailyTotal
+                        && dayTotalBreakdown.uncategorizedMinutes > 0
                       const headerClassName = [
                         'week-timeline-day-header',
                         isSelectedDay ? 'is-selected' : '',
@@ -4516,7 +4522,7 @@ function App() {
                               {formatTimelineHoursCompact(dayTotalBreakdown.primaryMinutes)}
                               {shouldShowTimelineUncategorizedDailyTotal ? ' total' : ''}
                             </span>
-                            {shouldShowTimelineUncategorizedDailyTotal ? (
+                            {shouldShowDayUncategorizedDailyTotal ? (
                               <span className="week-timeline-day-uncategorized-total">
                                 {formatTimelineHoursCompact(dayTotalBreakdown.uncategorizedMinutes)} uncategorized
                               </span>
