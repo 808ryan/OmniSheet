@@ -17,6 +17,7 @@ import type {
   MicrophonePermissionResult,
   OpenAiModelId,
   SettingsStatus,
+  SettingsTimelinePreferencesInput,
   SummaryExportResult,
   SummaryExportWeeklyExcelInput,
   SummaryLayoutState,
@@ -192,6 +193,12 @@ export function settingsSetTranscriptionModel(model: TranscriptionModelId): Prom
   })
 }
 
+export function settingsSetTimelinePreferences(
+  input: SettingsTimelinePreferencesInput,
+): Promise<void> {
+  return invokeCommand<void>('settings_set_timeline_preferences', { input })
+}
+
 export function summaryLayoutStateGet(): Promise<SummaryLayoutState> {
   return invokeCommand<SummaryLayoutState>('summary_layout_state_get')
 }
@@ -236,6 +243,14 @@ export function transcribeAudioClip(input: TranscribeAudioInput): Promise<Transc
 
 export function voiceRequestMicrophonePermission(): Promise<MicrophonePermissionResult> {
   return invokeCommand<MicrophonePermissionResult>('voice_request_microphone_permission')
+}
+
+export function quickAddHideWindow(): Promise<void> {
+  return invokeCommand<void>('quick_add_hide_window')
+}
+
+export function quickAddShowMainWindow(): Promise<void> {
+  return invokeCommand<void>('quick_add_show_main_window')
 }
 
 export function timelineListForDate(input: DateInput): Promise<TimelineEntry[]> {

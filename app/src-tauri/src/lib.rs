@@ -4,6 +4,7 @@ mod error;
 mod macos_permissions;
 mod models;
 mod openai;
+mod quick_add;
 mod state;
 
 use std::time::Duration;
@@ -43,12 +44,17 @@ pub fn run() {
                 api_key_cache: std::sync::Mutex::new(None),
             });
 
+            quick_add::setup(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            quick_add::quick_add_hide_window,
+            quick_add::quick_add_show_main_window,
             commands::settings_get_status,
             commands::settings_set_openai_key,
             commands::settings_set_openai_model,
+            commands::settings_set_timeline_preferences,
             commands::settings_set_transcription_model,
             commands::summary_layout_state_get,
             commands::summary_layout_state_set,

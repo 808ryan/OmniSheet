@@ -470,6 +470,22 @@
   max-width: 28rem;
 }
 
+.settings-toggle-group {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.settings-toggle-group input[type='checkbox'] {
+  width: 1.15rem;
+  height: 1.15rem;
+  accent-color: #2563eb;
+}
+
+.settings-toggle-group input[type='checkbox']:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .settings-save-button {
   flex: 0 0 auto;
   min-width: 5.5rem;
@@ -1047,6 +1063,11 @@ button.danger:hover:not(:disabled) {
   color: var(--ink);
 }
 
+.timeline-range-total-secondary {
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
 .timeline-controls {
   display: flex;
   gap: 0.4rem;
@@ -1227,10 +1248,19 @@ button.danger:hover:not(:disabled) {
 }
 
 .week-timeline-day-total {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.05rem;
   font-size: 0.72rem;
   font-weight: 600;
   color: rgba(97, 113, 138, 0.9);
   line-height: 1.1;
+}
+
+.week-timeline-day-uncategorized-total {
+  font-weight: 500;
+  color: rgba(97, 113, 138, 0.78);
 }
 
 .week-timeline-day-header.is-selected {
@@ -2928,6 +2958,10 @@ button.danger:hover:not(:disabled) {
   .settings-control-group {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .settings-toggle-group {
+    justify-content: flex-start;
   }
 
   .settings-control-group input,

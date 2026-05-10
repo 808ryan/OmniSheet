@@ -1,0 +1,188 @@
+html.quick-add-document,
+body.quick-add-window {
+  width: 100vw;
+  height: 100vh;
+  min-width: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+html.quick-add-document #root {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.quick-add-shell {
+  width: 100vw;
+  height: 100vh;
+  min-height: 0;
+  padding: 0.62rem;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.52rem;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.92);
+  background:
+    linear-gradient(180deg, rgba(68, 70, 76, 0.78), rgba(34, 36, 42, 0.86)),
+    rgba(28, 30, 34, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(28px) saturate(1.35);
+  -webkit-backdrop-filter: blur(28px) saturate(1.35);
+}
+
+.quick-add-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  align-items: start;
+  min-height: 0;
+}
+
+.quick-add-header h1 {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.15;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.quick-add-close {
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.06);
+  display: grid;
+  place-items: center;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.quick-add-close:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.quick-add-form {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 4.7rem auto auto;
+  gap: 0.46rem;
+  overflow: hidden;
+}
+
+.quick-add-form textarea {
+  width: 100%;
+  height: 4.7rem;
+  min-height: 0;
+  resize: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 0.55rem 0.62rem;
+  color: rgba(255, 255, 255, 0.94);
+  background: rgba(8, 10, 14, 0.34);
+  outline: none;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.quick-add-form textarea::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.quick-add-form textarea:focus {
+  border-color: rgba(110, 168, 255, 0.68);
+  box-shadow: 0 0 0 2px rgba(80, 145, 255, 0.2);
+}
+
+.quick-add-status {
+  min-height: 0.95rem;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 0.7rem;
+  line-height: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quick-add-status.success {
+  color: rgba(127, 221, 170, 0.92);
+  font-weight: 650;
+}
+
+.quick-add-status.error,
+.quick-add-status.recording {
+  color: rgba(255, 151, 140, 0.94);
+  font-weight: 650;
+}
+
+.quick-add-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.quick-add-actions button {
+  height: 2.12rem;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 8px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.quick-add-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.quick-add-mic-button {
+  width: 2.12rem;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+.quick-add-mic-button:hover:not(:disabled),
+.quick-add-open-app:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.quick-add-mic-button.recording {
+  border-color: rgba(255, 151, 140, 0.42);
+  background: rgba(180, 35, 24, 0.22);
+}
+
+.quick-add-mic-button img {
+  width: 0.98rem;
+  height: 0.98rem;
+  filter: invert(1) opacity(0.82);
+}
+
+.quick-add-send {
+  padding: 0 0.82rem;
+  color: #ffffff;
+  background: rgba(55, 128, 255, 0.84);
+  border-color: rgba(116, 169, 255, 0.55);
+  font-weight: 700;
+}
+
+.quick-add-send:hover:not(:disabled) {
+  background: rgba(73, 145, 255, 0.92);
+}
+
+.quick-add-open-app {
+  padding: 0 0.7rem;
+  font-size: 0.78rem;
+}

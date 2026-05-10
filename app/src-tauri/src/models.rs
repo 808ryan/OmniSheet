@@ -141,6 +141,13 @@ pub struct SettingsSetTranscriptionModelInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SettingsSetTimelinePreferencesInput {
+    pub timeline_exclude_uncategorized_from_daily_totals: bool,
+    pub timeline_show_uncategorized_daily_total: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsStatus {
     pub has_open_ai_key: bool,
     pub storage_health: StorageHealth,
@@ -151,6 +158,8 @@ pub struct SettingsStatus {
     pub available_open_ai_models: Vec<OpenAiModelOption>,
     pub selected_transcription_model: TranscriptionModelId,
     pub available_transcription_models: Vec<TranscriptionModelOption>,
+    pub timeline_exclude_uncategorized_from_daily_totals: bool,
+    pub timeline_show_uncategorized_daily_total: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

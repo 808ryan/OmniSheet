@@ -1565,6 +1565,7 @@ pub fn list_diagnostics_events(
             'settings_get_status',
             'settings_set_openai_key',
             'settings_set_openai_model',
+            'settings_set_timeline_preferences',
             'settings_set_transcription_model'
           ) OR event_type = 'key_save_verify'
           ORDER BY timestamp DESC
