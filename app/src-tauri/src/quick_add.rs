@@ -21,7 +21,6 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
     let tray_icon = TrayIconBuilder::with_id("quick-add-tray")
         .icon(build_circle_plus_icon())
         .icon_as_template(true)
-        .title("+")
         .tooltip("Add timesheet entry")
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
@@ -119,12 +118,12 @@ fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::
 }
 
 fn build_circle_plus_icon() -> Image<'static> {
-    const SIZE: u32 = 32;
-    const CENTER: f32 = 15.5;
-    const RADIUS: f32 = 11.8;
-    const CIRCLE_STROKE: f32 = 2.1;
-    const PLUS_HALF_LENGTH: f32 = 6.6;
-    const PLUS_STROKE: f32 = 2.3;
+    const SIZE: u32 = 64;
+    const CENTER: f32 = 31.5;
+    const RADIUS: f32 = 24.0;
+    const CIRCLE_STROKE: f32 = 6.5;
+    const PLUS_HALF_LENGTH: f32 = 14.0;
+    const PLUS_STROKE: f32 = 7.0;
 
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
 
@@ -133,18 +132,34 @@ fn build_circle_plus_icon() -> Image<'static> {
             let dx = x as f32 - CENTER;
             let dy = y as f32 - CENTER;
             let distance = (dx * dx + dy * dy).sqrt();
-            let on_circle = (distance - RADIUS).abs() <= CIRCLE_STROKE / 2.0;
-            let on_horizontal = dy.abs() <= PLUS_STROKE / 2.0 && dx.abs() <= PLUS_HALF_LENGTH;
-            let on_vertical = dx.abs() <= PLUS_STROKE / 2.0 && dy.abs() <= PLUS_HALF_LENGTH;
-            let alpha = if on_circle || on_horizontal || on_vertical {
-                255
-            } else {
-                0
-            };
+            let circle_alpha = antialias(CIRCLE_STROKE / 2.0 - (distance - RADIUS).abs());
+            let horizontal_alpha = antialias(rect_signed_distance(
+                dx,
+                dy,
+                PLUS_HALF_LENGTH,
+                PLUS_STROKE / 2.0,
+            ));
+            let vertical_alpha = antialias(rect_signed_distance(
+                dx,
+                dy,
+                PLUS_STROKE / 2.0,
+                PLUS_HALF_LENGTH,
+            ));
+            let alpha = circle_alpha.max(horizontal_alpha).max(vertical_alpha);
 
-            rgba.extend_from_slice(&[0, 0, 0, alpha]);
+            rgba.extend_from_slice(&[0, 0, 0, (alpha * 255.0).round() as u8]);
         }
     }
 
     Image::new_owned(rgba, SIZE, SIZE)
+}
+
+fn antialias(signed_distance: f32) -> f32 {
+    const EDGE_WIDTH: f32 = 1.25;
+
+    ((signed_distance + EDGE_WIDTH) / (EDGE_WIDTH * 2.0)).clamp(0.0, 1.0)
+}
+
+fn rect_signed_distance(dx: f32, dy: f32, half_width: f32, half_height: f32) -> f32 {
+    (half_width - dx.abs()).min(half_height - dy.abs())
 }
