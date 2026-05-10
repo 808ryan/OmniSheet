@@ -1,5 +1,5 @@
 use tauri::image::Image;
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     App, AppHandle, LogicalPosition, Manager, Rect, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
@@ -9,13 +9,19 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const QUICK_ADD_WIDTH: f64 = 360.0;
 const QUICK_ADD_HEIGHT: f64 = 250.0;
 
+pub struct QuickAddTrayState {
+    #[allow(dead_code)]
+    tray_icon: TrayIcon,
+}
+
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let app_handle = app.handle().clone();
     create_quick_add_window(&app_handle)?;
 
-    TrayIconBuilder::with_id("quick-add-tray")
+    let tray_icon = TrayIconBuilder::with_id("quick-add-tray")
         .icon(build_circle_plus_icon())
         .icon_as_template(true)
+        .title("+")
         .tooltip("Add timesheet entry")
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
@@ -32,6 +38,8 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
             }
         })
         .build(app.handle())?;
+
+    app.manage(QuickAddTrayState { tray_icon });
 
     Ok(())
 }
