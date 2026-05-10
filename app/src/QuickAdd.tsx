@@ -336,6 +336,14 @@ function QuickAdd() {
   }, [stopVoiceCaptureStream])
 
   useEffect(() => {
+    document.body.classList.add('quick-add-window')
+
+    return () => {
+      document.body.classList.remove('quick-add-window')
+    }
+  }, [])
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         void quickAddHideWindow()
