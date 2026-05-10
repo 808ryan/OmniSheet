@@ -6,6 +6,7 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from 'react'
 import { createPortal } from 'react-dom'
+import { listen } from '@tauri-apps/api/event'
 
 import {
   activityDelete,
@@ -36,6 +37,7 @@ import {
   voiceRequestMicrophonePermission,
 } from './lib/api'
 import { isTauriRuntime } from './lib/runtime'
+import { QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
 import {
   buildDefaultSummaryLayoutState,
   cloneSummaryLayoutPreset,
@@ -1351,6 +1353,52 @@ function App() {
     })
     setDiagnosticsEvents(events)
   }, [])
+
+  useEffect(() => {
+    if (!tauriRuntime) {
+      return
+    }
+
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+
+    void listen<{ touchedMonthKeys?: string[] }>(
+      QUICK_ADD_SUBMITTED_EVENT,
+      (event) => {
+        const refreshDate = selectedDateRef.current
+        const touchedMonthKeys = event.payload?.touchedMonthKeys
+        invalidateMonthSummaries(
+          touchedMonthKeys && touchedMonthKeys.length > 0
+            ? touchedMonthKeys
+            : [monthKeyFromDate(refreshDate)],
+        )
+
+        void Promise.allSettled([
+          loadTimeline(refreshDate),
+          loadWeekTimeline(refreshDate),
+          loadWeeklySummary(refreshDate),
+        ])
+      },
+    ).then((nextUnlisten) => {
+      if (cancelled) {
+        nextUnlisten()
+        return
+      }
+
+      unlisten = nextUnlisten
+    })
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [
+    invalidateMonthSummaries,
+    loadTimeline,
+    loadWeekTimeline,
+    loadWeeklySummary,
+    tauriRuntime,
+  ])
 
   useEffect(() => {
     if (!tauriRuntime) {

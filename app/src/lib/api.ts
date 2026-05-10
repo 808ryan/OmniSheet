@@ -238,6 +238,14 @@ export function voiceRequestMicrophonePermission(): Promise<MicrophonePermission
   return invokeCommand<MicrophonePermissionResult>('voice_request_microphone_permission')
 }
 
+export function quickAddHideWindow(): Promise<void> {
+  return invokeCommand<void>('quick_add_hide_window')
+}
+
+export function quickAddShowMainWindow(): Promise<void> {
+  return invokeCommand<void>('quick_add_show_main_window')
+}
+
 export function timelineListForDate(input: DateInput): Promise<TimelineEntry[]> {
   return invokeCommand<TimelineEntry[]>('timeline_list_for_date', { input })
 }
