@@ -3698,7 +3698,7 @@ function App() {
   }
 
   const timelineEditorPanel = (
-    <aside className="timeline-editor">
+    <aside className={`timeline-editor ${entryDraft ? '' : 'is-empty'}`}>
       <div className="timeline-editor-header">
         <h3>Edit Entry</h3>
         {entryDraft ? (
@@ -3782,40 +3782,46 @@ function App() {
           </label>
           <label>
             Start
-            <input
-              type="time"
-              step={60}
-              value={entryDraft.startTime}
-              onChange={(event) =>
-                setEntryDraft((previous) =>
-                  previous
-                    ? {
-                        ...previous,
-                        startTime: event.target.value,
-                      }
-                    : previous,
-                )
-              }
-            />
+            <span className="time-input-shell">
+              <input
+                type="time"
+                step={60}
+                value={entryDraft.startTime}
+                onChange={(event) =>
+                  setEntryDraft((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          startTime: event.target.value,
+                        }
+                      : previous,
+                  )
+                }
+              />
+              <span className="control-icon clock-icon" aria-hidden="true" />
+            </span>
           </label>
           <label>
             End
-            <input
-              type="time"
-              step={60}
-              value={entryDraft.endTime}
-              onChange={(event) =>
-                setEntryDraft((previous) =>
-                  previous
-                    ? {
-                        ...previous,
-                        endTime: event.target.value,
-                        preserveEndOfDay: false,
-                      }
-                    : previous,
-                )
-              }
-            />
+            <span className="time-input-shell">
+              <input
+                type="time"
+                step={60}
+                value={entryDraft.endTime}
+                onChange={(event) =>
+                  setEntryDraft((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          endTime: event.target.value,
+                          preserveEndOfDay: false,
+                        }
+                      : previous,
+                  )
+                }
+              />
+              <span className="control-icon clock-icon" aria-hidden="true" />
+            </span>
           </label>
           <label>
             Description
@@ -3851,7 +3857,9 @@ function App() {
           </div>
         </form>
       ) : (
-        <p>Select a timeline block to edit engagement, activity, and timing.</p>
+        <p className="timeline-editor-empty">
+          Select a timeline block to edit engagement, activity, and timing.
+        </p>
       )}
 
       {selectedEntry ? (

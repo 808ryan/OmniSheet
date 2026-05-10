@@ -721,6 +721,26 @@ button.danger:hover:not(:disabled) {
   transform: rotate(45deg);
 }
 
+.clock-icon::before {
+  content: '';
+  position: absolute;
+  inset: 0.13rem;
+  border: 1.8px solid currentColor;
+  border-radius: 999px;
+}
+
+.clock-icon::after {
+  content: '';
+  position: absolute;
+  left: 0.48rem;
+  top: 0.28rem;
+  width: 0.24rem;
+  height: 0.32rem;
+  border-left: 1.8px solid currentColor;
+  border-bottom: 1.8px solid currentColor;
+  border-radius: 0 0 0 0.08rem;
+}
+
 .alert {
   border-radius: 10px;
   padding: 0.6rem 0.75rem;
@@ -799,26 +819,25 @@ button.danger:hover:not(:disabled) {
 
 .mini-calendar-arrow {
   padding: 0;
-  border-radius: 999px;
+  border: none;
+  border-radius: 8px;
   height: 1.7rem;
   width: 1.7rem;
   display: grid;
   place-items: center;
-  background: var(--control-fill);
-  border-color: var(--control-border);
+  background: transparent;
   color: var(--ink-soft);
-  box-shadow: var(--glass-inset);
+  box-shadow: none;
 }
 
 .mini-calendar-arrow:hover:not(:disabled) {
-  background: var(--control-fill-hover);
-  border-color: rgba(31, 122, 255, 0.26);
+  background: rgba(31, 122, 255, 0.08);
   color: var(--ink);
 }
 
 .mini-calendar-arrow .control-icon {
-  width: 0.82rem;
-  height: 0.82rem;
+  width: 1rem;
+  height: 1rem;
 }
 
 .mini-calendar-weekdays {
@@ -1480,6 +1499,11 @@ button.danger:hover:not(:disabled) {
   overflow: auto;
 }
 
+.timeline-editor.is-empty {
+  align-content: start;
+  gap: 0.45rem;
+}
+
 .timeline-editor-header {
   display: flex;
   align-items: center;
@@ -1530,7 +1554,8 @@ button.danger:hover:not(:disabled) {
 }
 
 .timeline-editor .stack,
-.timeline-editor label {
+.timeline-editor label,
+.time-input-shell {
   min-width: 0;
 }
 
@@ -1539,16 +1564,49 @@ button.danger:hover:not(:disabled) {
 }
 
 .timeline-entry-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.55rem;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
+  align-items: stretch;
+  width: 100%;
 }
 
 .timeline-entry-actions button {
-  flex: 0 0 auto;
-  min-width: 7.2rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.time-input-shell {
+  position: relative;
+  display: block;
+}
+
+.time-input-shell input {
+  width: 100%;
+  padding-right: 2rem;
+}
+
+.time-input-shell input::-webkit-calendar-picker-indicator {
+  opacity: 0;
+  cursor: pointer;
+}
+
+.time-input-shell .clock-icon {
+  position: absolute;
+  right: 0.62rem;
+  top: 50%;
+  width: 0.95rem;
+  height: 0.95rem;
+  color: rgba(80, 98, 125, 0.72);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.timeline-editor-empty {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  line-height: 1.38;
 }
 
 .entry-metadata {
