@@ -3710,7 +3710,7 @@ function App() {
             onClick={clearTimelineSelection}
             disabled={isBusy || isTimelineDeleteBusy}
           >
-            <span aria-hidden="true">×</span>
+            <span className="control-icon close-icon" aria-hidden="true" />
           </button>
         ) : null}
       </div>
@@ -3835,15 +3835,17 @@ function App() {
             />
           </label>
           <div className="timeline-entry-actions">
-            <button type="submit" disabled={isBusy}>
+            <button type="submit" className="button-soft-primary" disabled={isBusy}>
+              <span className="control-icon save-icon" aria-hidden="true" />
               Save Entry
             </button>
             <button
               type="button"
-              className="danger"
+              className="button-soft-danger"
               onClick={() => onDeleteTimelineEntry(entryDraft.id)}
               disabled={isBusy || isTimelineDeleteBusy}
             >
+              <span className="control-icon trash-icon" aria-hidden="true" />
               Delete Entry
             </button>
           </div>
@@ -4112,18 +4114,20 @@ function App() {
                   </span>
                 </p>
               </div>
-              <div className="timeline-controls">
+              <div className="timeline-controls timeline-stepper" aria-label="Day navigation">
                 <button
                   type="button"
-                  className="timeline-arrow-button"
+                  className="timeline-arrow-button stepper-button stepper-prev"
                   aria-label="Previous day"
+                  title="Previous day"
                   onClick={() => onSetDate(shiftDate(selectedDate, -1))}
                   disabled={isBusy || isTimelineLoading}
                 >
-                  {'<'}
+                  <span className="control-icon chevron-left" aria-hidden="true" />
                 </button>
                 <button
                   type="button"
+                  className="stepper-button stepper-center"
                   onClick={onJumpToToday}
                   disabled={isBusy || isTimelineLoading}
                 >
@@ -4131,12 +4135,13 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  className="timeline-arrow-button"
+                  className="timeline-arrow-button stepper-button stepper-next"
                   aria-label="Next day"
+                  title="Next day"
                   onClick={() => onSetDate(shiftDate(selectedDate, 1))}
                   disabled={isBusy || isTimelineLoading}
                 >
-                  {'>'}
+                  <span className="control-icon chevron-right" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -4307,18 +4312,20 @@ function App() {
                 </h2>
                 <p className="timeline-range">Sunday - Saturday</p>
               </div>
-              <div className="timeline-controls">
+              <div className="timeline-controls timeline-stepper" aria-label="Week navigation">
                 <button
                   type="button"
-                  className="timeline-arrow-button"
+                  className="timeline-arrow-button stepper-button stepper-prev"
                   aria-label="Previous week"
+                  title="Previous week"
                   onClick={() => onSetDate(shiftDate(selectedDate, -7))}
                   disabled={isBusy || isWeekTimelineLoading}
                 >
-                  {'<'}
+                  <span className="control-icon chevron-left" aria-hidden="true" />
                 </button>
                 <button
                   type="button"
+                  className="stepper-button stepper-center"
                   onClick={onJumpToThisWeek}
                   disabled={isBusy || isWeekTimelineLoading}
                 >
@@ -4326,12 +4333,13 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  className="timeline-arrow-button"
+                  className="timeline-arrow-button stepper-button stepper-next"
                   aria-label="Next week"
+                  title="Next week"
                   onClick={() => onSetDate(shiftDate(selectedDate, 7))}
                   disabled={isBusy || isWeekTimelineLoading}
                 >
-                  {'>'}
+                  <span className="control-icon chevron-right" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -5049,110 +5057,164 @@ function App() {
 
         {activeView === 'settings' ? (
           <section className="panel settings-panel">
-            <h2>Settings</h2>
-            <form className="stack" onSubmit={onSaveApiKey}>
-              <label>
-                OpenAI API Key
-                <input
-                  type="password"
-                  value={openAiKey}
-                  onChange={(event) => setOpenAiKey(event.target.value)}
-                  placeholder="sk-..."
-                  required
-                />
-              </label>
-              <button type="submit" disabled={isBusy || openAiKey.trim().length === 0}>
-                Save Key to Secure Storage
-              </button>
-            </form>
-            <form className="stack" onSubmit={onSaveOpenAiModel}>
-              <label>
-                Interpretation Model
-                <select
-                  value={selectedOpenAiModelDraft}
-                  onChange={(event) =>
-                    setSelectedOpenAiModelDraft(event.target.value as OpenAiModelId)
-                  }
-                  disabled={isBusy || settingsStatus === null}
-                >
-                  {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="submit"
-                disabled={
-                  isBusy ||
-                  settingsStatus === null ||
-                  selectedOpenAiModelDraft === settingsStatus.selectedOpenAiModel
-                }
-              >
-                Save Model Preference
-              </button>
-            </form>
-            <form className="stack" onSubmit={onSaveTranscriptionModel}>
-              <label>
-                Speech-to-Text Model
-                <select
-                  value={selectedTranscriptionModelDraft}
-                  onChange={(event) =>
-                    setSelectedTranscriptionModelDraft(event.target.value as TranscriptionModelId)
-                  }
-                  disabled={isBusy || settingsStatus === null}
-                >
-                  {(settingsStatus?.availableTranscriptionModels ?? []).map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="submit"
-                disabled={
-                  isBusy ||
-                  settingsStatus === null ||
-                  selectedTranscriptionModelDraft === settingsStatus.selectedTranscriptionModel
-                }
-              >
-                Save Transcription Model
-              </button>
-            </form>
-            <p>
-              Key configured: <strong>{settingsStatus?.hasOpenAiKey ? 'Yes' : 'No'}</strong>
-            </p>
-            <p>
-              Selected interpretation model:{' '}
-              <strong>
-                {settingsStatus
-                  ? settingsStatus.availableOpenAiModels.find(
-                      (model) => model.id === settingsStatus.selectedOpenAiModel,
-                    )?.label ?? 'unknown'
-                  : 'unknown'}
-              </strong>
-            </p>
-            <p>
-              Selected speech-to-text model:{' '}
-              <strong>
-                {settingsStatus
-                  ? settingsStatus.availableTranscriptionModels.find(
-                      (model) => model.id === settingsStatus.selectedTranscriptionModel,
-                    )?.label ?? 'unknown'
-                  : 'unknown'}
-              </strong>
-            </p>
-            <p>
-              Storage health:{' '}
-              <strong>{settingsStatus?.storageHealth ?? 'unknown'}</strong>
-            </p>
-            <p>
-              Key source: <strong>{formatKeySource(settingsStatus?.keySource)}</strong>
-            </p>
+            <div className="settings-header">
+              <h2>Settings</h2>
+            </div>
+
+            <div className="settings-layout">
+              <section className="settings-card">
+                <div className="settings-card-header">
+                  <h3>Credentials</h3>
+                </div>
+                <form className="settings-preference-row" onSubmit={onSaveApiKey}>
+                  <label htmlFor="settings-openai-key">OpenAI API Key</label>
+                  <div className="settings-control-group">
+                    <input
+                      id="settings-openai-key"
+                      type="password"
+                      value={openAiKey}
+                      onChange={(event) => setOpenAiKey(event.target.value)}
+                      placeholder="sk-..."
+                      required
+                    />
+                    <button
+                      type="submit"
+                      className="settings-save-button button-soft-primary"
+                      disabled={isBusy || openAiKey.trim().length === 0}
+                    >
+                      Save Key
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-header">
+                  <h3>Models</h3>
+                </div>
+                <form className="settings-preference-row" onSubmit={onSaveOpenAiModel}>
+                  <label htmlFor="settings-openai-model">Interpretation</label>
+                  <div className="settings-control-group">
+                    <select
+                      id="settings-openai-model"
+                      value={selectedOpenAiModelDraft}
+                      onChange={(event) =>
+                        setSelectedOpenAiModelDraft(event.target.value as OpenAiModelId)
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    >
+                      {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="submit"
+                      className="settings-save-button button-soft-primary"
+                      disabled={
+                        isBusy ||
+                        settingsStatus === null ||
+                        selectedOpenAiModelDraft === settingsStatus.selectedOpenAiModel
+                      }
+                    >
+                      Save
+                    </button>
+                  </div>
+                </form>
+                <form className="settings-preference-row" onSubmit={onSaveTranscriptionModel}>
+                  <label htmlFor="settings-transcription-model">Speech-to-Text</label>
+                  <div className="settings-control-group">
+                    <select
+                      id="settings-transcription-model"
+                      value={selectedTranscriptionModelDraft}
+                      onChange={(event) =>
+                        setSelectedTranscriptionModelDraft(
+                          event.target.value as TranscriptionModelId,
+                        )
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    >
+                      {(settingsStatus?.availableTranscriptionModels ?? []).map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="submit"
+                      className="settings-save-button button-soft-primary"
+                      disabled={
+                        isBusy ||
+                        settingsStatus === null ||
+                        selectedTranscriptionModelDraft ===
+                          settingsStatus.selectedTranscriptionModel
+                      }
+                    >
+                      Save
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-header">
+                  <h3>Status</h3>
+                </div>
+                <div className="settings-status-grid">
+                  <div className="settings-status-item">
+                    <span>Key configured</span>
+                    <strong
+                      className={`settings-status-pill ${
+                        settingsStatus?.hasOpenAiKey ? 'is-success' : 'is-warning'
+                      }`}
+                    >
+                      {settingsStatus?.hasOpenAiKey ? 'Yes' : 'No'}
+                    </strong>
+                  </div>
+                  <div className="settings-status-item">
+                    <span>Interpretation</span>
+                    <strong>
+                      {settingsStatus
+                        ? settingsStatus.availableOpenAiModels.find(
+                            (model) => model.id === settingsStatus.selectedOpenAiModel,
+                          )?.label ?? 'unknown'
+                        : 'unknown'}
+                    </strong>
+                  </div>
+                  <div className="settings-status-item">
+                    <span>Speech-to-Text</span>
+                    <strong>
+                      {settingsStatus
+                        ? settingsStatus.availableTranscriptionModels.find(
+                            (model) => model.id === settingsStatus.selectedTranscriptionModel,
+                          )?.label ?? 'unknown'
+                        : 'unknown'}
+                    </strong>
+                  </div>
+                  <div className="settings-status-item">
+                    <span>Storage health</span>
+                    <strong
+                      className={`settings-status-pill ${
+                        settingsStatus?.statusLevel === 'error'
+                          ? 'is-danger'
+                          : settingsStatus?.statusLevel === 'warning'
+                            ? 'is-warning'
+                            : 'is-success'
+                      }`}
+                    >
+                      {settingsStatus?.storageHealth ?? 'unknown'}
+                    </strong>
+                  </div>
+                  <div className="settings-status-item">
+                    <span>Key source</span>
+                    <strong>{formatKeySource(settingsStatus?.keySource)}</strong>
+                  </div>
+                </div>
+              </section>
+            </div>
             {settingsStatus?.lastError ? (
-              <p className={`alert ${settingsStatus?.statusLevel === 'error' ? 'error' : 'warning'}`}>
+              <p className={`settings-alert alert ${settingsStatus?.statusLevel === 'error' ? 'error' : 'warning'}`}>
                 Last key status: {settingsStatus.lastError}
               </p>
             ) : null}
@@ -5423,16 +5485,18 @@ function App() {
             onClick={onCreateTimelineEntryFromContextMenu}
             disabled={isBusy || isTimelineDeleteBusy}
           >
+            <span className="control-icon plus-icon" aria-hidden="true" />
             Create new entry
           </button>
           {timelineContextMenu.kind === 'entry' && timelineContextMenu.entryId ? (
             <button
               type="button"
-              className="timeline-context-menu-item danger"
+              className="timeline-context-menu-item is-danger"
               role="menuitem"
               onClick={() => onDeleteTimelineEntry(timelineContextMenu.entryId)}
               disabled={isBusy || isTimelineDeleteBusy}
             >
+              <span className="control-icon trash-icon" aria-hidden="true" />
               Delete entry
             </button>
           ) : null}
@@ -5730,8 +5794,9 @@ function MiniCalendar({
           className="ghost mini-calendar-arrow"
           onClick={() => onVisibleMonthChange(shiftMonthKey(visibleMonth, -1))}
           aria-label={`Show ${formatMonthHeading(shiftMonthKey(visibleMonth, -1))}`}
+          title={`Show ${formatMonthHeading(shiftMonthKey(visibleMonth, -1))}`}
         >
-          &#8249;
+          <span className="control-icon chevron-left" aria-hidden="true" />
         </button>
         <p className="mini-calendar-title" aria-live="polite">
           {monthLabel}
@@ -5741,8 +5806,9 @@ function MiniCalendar({
           className="ghost mini-calendar-arrow"
           onClick={() => onVisibleMonthChange(shiftMonthKey(visibleMonth, 1))}
           aria-label={`Show ${formatMonthHeading(shiftMonthKey(visibleMonth, 1))}`}
+          title={`Show ${formatMonthHeading(shiftMonthKey(visibleMonth, 1))}`}
         >
-          &#8250;
+          <span className="control-icon chevron-right" aria-hidden="true" />
         </button>
       </div>
 
