@@ -22,6 +22,7 @@ import {
   settingsGetStatus,
   settingsSetOpenAiKey,
   settingsSetOpenAiModel,
+  settingsSetTimelinePreferences,
   settingsSetTranscriptionModel,
   summaryExportWeeklyExcel,
   summaryLayoutStateGet,
@@ -231,6 +232,12 @@ interface TimelineLabel {
   label: string
   fullLabel: string
   tier: TimelineLabelTier
+}
+
+interface TimelineTotalBreakdown {
+  primaryMinutes: number
+  categorizedMinutes: number
+  uncategorizedMinutes: number
 }
 
 interface MiniCalendarProps {
@@ -942,6 +949,13 @@ function App() {
     setIsSubmissionQueueOpen(true)
   }, [settingsStatus])
 
+  const timelineExcludeUncategorizedFromDailyTotals =
+    settingsStatus?.timelineExcludeUncategorizedFromDailyTotals ?? true
+  const timelineShowUncategorizedDailyTotal =
+    settingsStatus?.timelineShowUncategorizedDailyTotal ?? true
+  const shouldShowTimelineUncategorizedDailyTotal =
+    timelineExcludeUncategorizedFromDailyTotals && timelineShowUncategorizedDailyTotal
+
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
   const timelineHeaderDate = useMemo(
     () => formatTimelineHeaderDate(selectedDate),
@@ -973,9 +987,12 @@ function App() {
     () => applyDragPreviewToTimelineEntries(timelineEntries, timelineDragState),
     [timelineDragState, timelineEntries],
   )
-  const timelineDayTotalMinutes = useMemo(
-    () => sumTimelineEntryDurations(timelineEntriesForLayout),
-    [timelineEntriesForLayout],
+  const timelineDayTotalBreakdown = useMemo(
+    () => buildTimelineTotalBreakdown(
+      timelineEntriesForLayout,
+      timelineExcludeUncategorizedFromDailyTotals,
+    ),
+    [timelineEntriesForLayout, timelineExcludeUncategorizedFromDailyTotals],
   )
   const previewPositionedTimelineEntries = useMemo(
     () => positionTimelineEntries(
@@ -1019,9 +1036,17 @@ function App() {
     () => applyDragPreviewToTimelineEntries(weekTimelineEntries, timelineDragState),
     [timelineDragState, weekTimelineEntries],
   )
-  const weekTimelineDayTotalMinutes = useMemo(
-    () => buildTimelineDayTotals(weekTimelineEntriesForLayout, weekTimelineDays),
-    [weekTimelineDays, weekTimelineEntriesForLayout],
+  const weekTimelineDayTotalBreakdowns = useMemo(
+    () => buildTimelineDayTotalBreakdowns(
+      weekTimelineEntriesForLayout,
+      weekTimelineDays,
+      timelineExcludeUncategorizedFromDailyTotals,
+    ),
+    [
+      timelineExcludeUncategorizedFromDailyTotals,
+      weekTimelineDays,
+      weekTimelineEntriesForLayout,
+    ],
   )
   const baselinePositionedWeekTimelineEntries = useMemo(
     () => positionWeekTimelineEntries(
@@ -3356,6 +3381,39 @@ function App() {
     })
   }
 
+  const onSaveTimelinePreferences = (
+    timelineExcludeUncategorizedFromDailyTotals: boolean,
+    timelineShowUncategorizedDailyTotal: boolean,
+  ) => {
+    const previousStatus = settingsStatus
+    if (!previousStatus) {
+      return
+    }
+
+    setSettingsStatus({
+      ...previousStatus,
+      timelineExcludeUncategorizedFromDailyTotals,
+      timelineShowUncategorizedDailyTotal,
+    })
+
+    void runAction(async () => {
+      try {
+        await settingsSetTimelinePreferences({
+          timelineExcludeUncategorizedFromDailyTotals,
+          timelineShowUncategorizedDailyTotal,
+        })
+        const status = await settingsGetStatus()
+        setSettingsStatus(status)
+        setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+        setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
+        setSuccessMessage('Timeline preferences saved.')
+      } catch (error) {
+        setSettingsStatus(previousStatus)
+        throw error
+      }
+    })
+  }
+
   const onRefreshDiagnostics = () => {
     void runAction(async () => {
       await loadDiagnostics(diagnosticsFilter)
@@ -4166,8 +4224,16 @@ function App() {
                   {timelineHeaderDate.weekday}
                   <span className="timeline-range-separator" aria-hidden="true">•</span>
                   <span className="timeline-range-total">
-                    {formatTimelineHoursCompact(timelineDayTotalMinutes)} total
+                    {formatTimelineHoursCompact(timelineDayTotalBreakdown.primaryMinutes)} total
                   </span>
+                  {shouldShowTimelineUncategorizedDailyTotal ? (
+                    <>
+                      <span className="timeline-range-separator" aria-hidden="true">•</span>
+                      <span className="timeline-range-total timeline-range-total-secondary">
+                        {formatTimelineHoursCompact(timelineDayTotalBreakdown.uncategorizedMinutes)} uncategorized
+                      </span>
+                    </>
+                  ) : null}
                 </p>
               </div>
               <div className="timeline-controls timeline-stepper" aria-label="Day navigation">
@@ -4429,6 +4495,9 @@ function App() {
                     {weekTimelineDays.map((day) => {
                       const isSelectedDay = day.date === selectedDate
                       const isToday = day.date === todayDate
+                      const dayTotalBreakdown =
+                        weekTimelineDayTotalBreakdowns.get(day.date)
+                        ?? createEmptyTimelineTotalBreakdown()
                       const headerClassName = [
                         'week-timeline-day-header',
                         isSelectedDay ? 'is-selected' : '',
@@ -4443,7 +4512,15 @@ function App() {
                             {formatWeekTimelineDayLabel(day.date)}
                           </span>
                           <span className="week-timeline-day-total">
-                            {formatTimelineHoursCompact(weekTimelineDayTotalMinutes.get(day.date) ?? 0)}
+                            <span>
+                              {formatTimelineHoursCompact(dayTotalBreakdown.primaryMinutes)}
+                              {shouldShowTimelineUncategorizedDailyTotal ? ' total' : ''}
+                            </span>
+                            {shouldShowTimelineUncategorizedDailyTotal ? (
+                              <span className="week-timeline-day-uncategorized-total">
+                                {formatTimelineHoursCompact(dayTotalBreakdown.uncategorizedMinutes)} uncategorized
+                              </span>
+                            ) : null}
                           </span>
                         </div>
                       )
@@ -5211,6 +5288,54 @@ function App() {
                     </button>
                   </div>
                 </form>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-header">
+                  <h3>Timeline</h3>
+                </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-timeline-exclude-uncategorized">
+                    Exclude uncategorized time from daily totals
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-timeline-exclude-uncategorized"
+                      type="checkbox"
+                      checked={timelineExcludeUncategorizedFromDailyTotals}
+                      onChange={(event) =>
+                        onSaveTimelinePreferences(
+                          event.target.checked,
+                          timelineShowUncategorizedDailyTotal,
+                        )
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    />
+                  </div>
+                </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-timeline-show-uncategorized">
+                    Display uncategorized time alongside categorized time in daily totals
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-timeline-show-uncategorized"
+                      type="checkbox"
+                      checked={timelineShowUncategorizedDailyTotal}
+                      onChange={(event) =>
+                        onSaveTimelinePreferences(
+                          timelineExcludeUncategorizedFromDailyTotals,
+                          event.target.checked,
+                        )
+                      }
+                      disabled={
+                        isBusy ||
+                        settingsStatus === null ||
+                        !timelineExcludeUncategorizedFromDailyTotals
+                      }
+                    />
+                  </div>
+                </div>
               </section>
 
               <section className="settings-card">
@@ -6611,18 +6736,72 @@ function applyDragPreviewToTimelineEntries(
   )
 }
 
-function sumTimelineEntryDurations(entries: TimelineEntry[]): number {
-  return entries.reduce((total, entry) => total + entry.durationMinutes, 0)
+function createEmptyTimelineTotalBreakdown(): TimelineTotalBreakdown {
+  return {
+    primaryMinutes: 0,
+    categorizedMinutes: 0,
+    uncategorizedMinutes: 0,
+  }
 }
 
-function buildTimelineDayTotals(
+function finalizeTimelineTotalBreakdown(
+  breakdown: TimelineTotalBreakdown,
+  excludeUncategorized: boolean,
+): TimelineTotalBreakdown {
+  return {
+    ...breakdown,
+    primaryMinutes: excludeUncategorized
+      ? breakdown.categorizedMinutes
+      : breakdown.categorizedMinutes + breakdown.uncategorizedMinutes,
+  }
+}
+
+function addEntryToTimelineTotalBreakdown(
+  breakdown: TimelineTotalBreakdown,
+  entry: TimelineEntry,
+): void {
+  if (isTimelineEntryUncategorized(entry)) {
+    breakdown.uncategorizedMinutes += entry.durationMinutes
+    return
+  }
+
+  breakdown.categorizedMinutes += entry.durationMinutes
+}
+
+function buildTimelineTotalBreakdown(
   entries: TimelineEntry[],
-  days: TimelineWeekView['days'],
-): Map<string, number> {
-  const totalsByDate = new Map(days.map((day) => [day.date, 0]))
+  excludeUncategorized: boolean,
+): TimelineTotalBreakdown {
+  const breakdown = createEmptyTimelineTotalBreakdown()
 
   for (const entry of entries) {
-    totalsByDate.set(entry.date, (totalsByDate.get(entry.date) ?? 0) + entry.durationMinutes)
+    addEntryToTimelineTotalBreakdown(breakdown, entry)
+  }
+
+  return finalizeTimelineTotalBreakdown(breakdown, excludeUncategorized)
+}
+
+function buildTimelineDayTotalBreakdowns(
+  entries: TimelineEntry[],
+  days: TimelineWeekView['days'],
+  excludeUncategorized: boolean,
+): Map<string, TimelineTotalBreakdown> {
+  const totalsByDate = new Map(
+    days.map((day) => [day.date, createEmptyTimelineTotalBreakdown()] as const),
+  )
+
+  for (const entry of entries) {
+    let breakdown = totalsByDate.get(entry.date)
+    if (!breakdown) {
+      breakdown = createEmptyTimelineTotalBreakdown()
+      totalsByDate.set(entry.date, breakdown)
+    }
+
+    addEntryToTimelineTotalBreakdown(breakdown, entry)
+  }
+
+  for (const [date, breakdown] of totalsByDate) {
+    totalsByDate.set(date, finalizeTimelineTotalBreakdown(breakdown, excludeUncategorized))
   }
 
   return totalsByDate
@@ -7123,11 +7302,42 @@ function buildTimelineBlockAriaLabel(
   return `${fullLabel}. ${description}.${reviewSentence}`
 }
 
+function isTimelineEntryUncategorized(entry: TimelineEntry): boolean {
+  return !entry.engagementId || !entry.activityId
+}
+
+function resolveTimelineLabelTier(
+  widthPercent: number,
+  blockHeight: number,
+): TimelineLabelTier {
+  if (widthPercent < 36 || blockHeight < 28) {
+    return 3
+  }
+
+  if (widthPercent < 58 || blockHeight < 38) {
+    return 2
+  }
+
+  return 1
+}
+
 function buildTimelineBlockLabel(
   entry: TimelineEntry,
   widthPercent: number,
   blockHeight: number,
 ): TimelineLabel {
+  const tier = resolveTimelineLabelTier(widthPercent, blockHeight)
+
+  if (isTimelineEntryUncategorized(entry)) {
+    const description = normalizeDisplayText(entry.description)
+
+    return {
+      label: description ? `Uncategorized | ${description}` : 'Uncategorized',
+      fullLabel: 'Uncategorized',
+      tier,
+    }
+  }
+
   const engagementPrimary = formatEntityPrimaryLabel(
     entry.engagementName,
     entry.engagementCode,
@@ -7140,26 +7350,26 @@ function buildTimelineBlockLabel(
   )
   const fullLabelBase = `${formatEntityDisplayLabel(entry.engagementName, entry.engagementCode)} | ${formatEntityDisplayLabel(entry.activityName, entry.activityCode)}`
 
-  if (widthPercent < 36 || blockHeight < 28) {
+  if (tier === 3) {
     return {
       label: activityPrimary,
       fullLabel: fullLabelBase,
-      tier: 3,
+      tier,
     }
   }
 
-  if (widthPercent < 58 || blockHeight < 38) {
+  if (tier === 2) {
     return {
       label: `${engagementPrimary} | ${activityPrimary}`,
       fullLabel: fullLabelBase,
-      tier: 2,
+      tier,
     }
   }
 
   return {
     label: fullLabelBase,
     fullLabel: fullLabelBase,
-    tier: 1,
+    tier,
   }
 }
 

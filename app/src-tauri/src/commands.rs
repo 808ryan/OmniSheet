@@ -21,8 +21,8 @@ use crate::models::{
     DiagnosticsRecordInput, Engagement, EngagementUpsertInput, IdInput, IdResult, InterpretResult,
     InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
     MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId, SettingsSetOpenAiModelInput,
-    SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
-    SummaryExportResult, SummaryExportWeeklyExcelInput, SummaryLayoutColumn,
+    SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel,
+    StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput, SummaryLayoutColumn,
     SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput,
     TimelineDaySummary, TimelineEntry,
     TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
@@ -42,6 +42,10 @@ const GLOBAL_ACTIVITY_FALLBACK_MIN_MARGIN: f64 = 0.75;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
 const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
 const APP_SETTING_TRANSCRIPTION_MODEL: &str = "openai_transcription_model";
+const APP_SETTING_TIMELINE_EXCLUDE_UNCATEGORIZED_FROM_DAILY_TOTALS: &str =
+    "timeline_exclude_uncategorized_from_daily_totals";
+const APP_SETTING_TIMELINE_SHOW_UNCATEGORIZED_DAILY_TOTAL: &str =
+    "timeline_show_uncategorized_daily_total";
 const APP_SETTING_SUMMARY_LAYOUT_STATE: &str = "summary_layout_state";
 const SUMMARY_LAYOUT_STATE_VERSION: i64 = 2;
 const SUMMARY_LAYOUT_MAX_NAME_LENGTH: usize = 40;
@@ -144,6 +148,41 @@ fn read_saved_transcription_model(
 ) -> AppResult<(TranscriptionModelId, Option<String>)> {
     let saved_value = db::get_app_setting(connection, APP_SETTING_TRANSCRIPTION_MODEL)?;
     Ok(resolve_saved_transcription_model_value(saved_value))
+}
+
+fn bool_app_setting_value(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+fn resolve_saved_bool_setting_value(saved_value: Option<String>, default_value: bool) -> bool {
+    match saved_value.as_deref().map(str::trim) {
+        Some("true") | Some("1") => true,
+        Some("false") | Some("0") => false,
+        _ => default_value,
+    }
+}
+
+fn read_saved_timeline_preferences(connection: &Connection) -> AppResult<(bool, bool)> {
+    let exclude_uncategorized = resolve_saved_bool_setting_value(
+        db::get_app_setting(
+            connection,
+            APP_SETTING_TIMELINE_EXCLUDE_UNCATEGORIZED_FROM_DAILY_TOTALS,
+        )?,
+        true,
+    );
+    let show_uncategorized_total = resolve_saved_bool_setting_value(
+        db::get_app_setting(
+            connection,
+            APP_SETTING_TIMELINE_SHOW_UNCATEGORIZED_DAILY_TOTAL,
+        )?,
+        true,
+    );
+
+    Ok((exclude_uncategorized, show_uncategorized_total))
 }
 
 fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
@@ -1913,6 +1952,8 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         invalid_saved_model,
         selected_transcription_model,
         invalid_saved_transcription_model,
+        timeline_exclude_uncategorized_from_daily_totals,
+        timeline_show_uncategorized_daily_total,
     ) = {
         let connection = state.connection.lock().map_err(|_| {
             let message = state_lock_error();
@@ -1969,11 +2010,35 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
                 }
             };
 
+        let (
+            timeline_exclude_uncategorized_from_daily_totals,
+            timeline_show_uncategorized_daily_total,
+        ) = match read_saved_timeline_preferences(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "read_timeline_preferences_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
+
         (
             selected_open_ai_model,
             invalid_saved_model,
             selected_transcription_model,
             invalid_saved_transcription_model,
+            timeline_exclude_uncategorized_from_daily_totals,
+            timeline_show_uncategorized_daily_total,
         )
     };
 
@@ -1995,6 +2060,8 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         available_open_ai_models: openai_model_options(),
         selected_transcription_model,
         available_transcription_models: transcription_model_options(),
+        timeline_exclude_uncategorized_from_daily_totals,
+        timeline_show_uncategorized_daily_total,
     };
 
     record_backend_event_with_state(
@@ -2018,6 +2085,8 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "selectedTranscriptionModel": status.selected_transcription_model.api_name(),
           "selectedTranscriptionModelLabel": status.selected_transcription_model.display_label(),
           "availableTranscriptionModelCount": status.available_transcription_models.len(),
+          "timelineExcludeUncategorizedFromDailyTotals": status.timeline_exclude_uncategorized_from_daily_totals,
+          "timelineShowUncategorizedDailyTotal": status.timeline_show_uncategorized_daily_total,
         }),
     );
 
@@ -2280,6 +2349,96 @@ pub fn settings_set_transcription_model(
                   "message": message,
                   "selectedTranscriptionModel": selected_model.api_name(),
                   "selectedTranscriptionModelLabel": selected_model.display_label(),
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn settings_set_timeline_preferences(
+    state: State<'_, AppState>,
+    input: SettingsSetTimelinePreferencesInput,
+) -> Result<(), String> {
+    let command = "settings_set_timeline_preferences";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let exclude_uncategorized = input.timeline_exclude_uncategorized_from_daily_totals;
+    let show_uncategorized_total = input.timeline_show_uncategorized_daily_total;
+    let save_result: Result<(), String> = (|| {
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_TIMELINE_EXCLUDE_UNCATEGORIZED_FROM_DAILY_TOTALS,
+            bool_app_setting_value(exclude_uncategorized),
+        )
+        .map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_TIMELINE_SHOW_UNCATEGORIZED_DAILY_TOTAL,
+            bool_app_setting_value(show_uncategorized_total),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified =
+            read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
+        if verified != (exclude_uncategorized, show_uncategorized_total) {
+            return Err("Timeline preferences verification failed".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "timelineExcludeUncategorizedFromDailyTotals": exclude_uncategorized,
+                  "timelineShowUncategorizedDailyTotal": show_uncategorized_total,
+                  "verified": true,
+                }),
+            );
+            Ok(())
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_timeline_preferences_setting",
+                  "message": message,
+                  "timelineExcludeUncategorizedFromDailyTotals": exclude_uncategorized,
+                  "timelineShowUncategorizedDailyTotal": show_uncategorized_total,
                 }),
             );
             Err(format_command_error(&correlation_id, message))

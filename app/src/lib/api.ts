@@ -17,6 +17,7 @@ import type {
   MicrophonePermissionResult,
   OpenAiModelId,
   SettingsStatus,
+  SettingsTimelinePreferencesInput,
   SummaryExportResult,
   SummaryExportWeeklyExcelInput,
   SummaryLayoutState,
@@ -190,6 +191,12 @@ export function settingsSetTranscriptionModel(model: TranscriptionModelId): Prom
   return invokeCommand<void>('settings_set_transcription_model', {
     input: { model },
   })
+}
+
+export function settingsSetTimelinePreferences(
+  input: SettingsTimelinePreferencesInput,
+): Promise<void> {
+  return invokeCommand<void>('settings_set_timeline_preferences', { input })
 }
 
 export function summaryLayoutStateGet(): Promise<SummaryLayoutState> {

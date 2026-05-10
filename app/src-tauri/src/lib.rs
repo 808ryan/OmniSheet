@@ -54,6 +54,7 @@ pub fn run() {
             commands::settings_get_status,
             commands::settings_set_openai_key,
             commands::settings_set_openai_model,
+            commands::settings_set_timeline_preferences,
             commands::settings_set_transcription_model,
             commands::summary_layout_state_get,
             commands::summary_layout_state_set,
