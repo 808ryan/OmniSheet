@@ -305,6 +305,13 @@ export interface SettingsStatus {
   availableOpenAiModels: OpenAiModelOption[]
   selectedTranscriptionModel: TranscriptionModelId
   availableTranscriptionModels: TranscriptionModelOption[]
+  timelineExcludeUncategorizedFromDailyTotals: boolean
+  timelineShowUncategorizedDailyTotal: boolean
+}
+
+export interface SettingsTimelinePreferencesInput {
+  timelineExcludeUncategorizedFromDailyTotals: boolean
+  timelineShowUncategorizedDailyTotal: boolean
 }
 
 export interface DiagnosticsListInput {
