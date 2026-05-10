@@ -1,3 +1,4 @@
+html.quick-add-document,
 body.quick-add-window {
   width: 100vw;
   height: 100vh;
@@ -6,7 +7,7 @@ body.quick-add-window {
   background: transparent;
 }
 
-body.quick-add-window #root {
+html.quick-add-document #root {
   height: 100vh;
   min-height: 0;
   overflow: hidden;
@@ -49,12 +50,6 @@ body.quick-add-window #root {
   line-height: 1.15;
   font-weight: 650;
   letter-spacing: 0;
-}
-
-.quick-add-header p {
-  margin: 0.12rem 0 0;
-  color: rgba(255, 255, 255, 0.56);
-  font-size: 0.7rem;
 }
 
 .quick-add-close {

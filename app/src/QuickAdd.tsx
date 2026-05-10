@@ -336,14 +336,6 @@ function QuickAdd() {
   }, [stopVoiceCaptureStream])
 
   useEffect(() => {
-    document.body.classList.add('quick-add-window')
-
-    return () => {
-      document.body.classList.remove('quick-add-window')
-    }
-  }, [])
-
-  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         void quickAddHideWindow()
@@ -372,8 +364,7 @@ function QuickAdd() {
     <main className="quick-add-shell">
       <header className="quick-add-header">
         <div>
-          <h1>Quick Add</h1>
-          <p>New timesheet entry</p>
+          <h1>Add timesheet entry</h1>
         </div>
         <button
           type="button"
