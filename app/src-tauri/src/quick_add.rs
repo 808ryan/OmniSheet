@@ -1,13 +1,14 @@
 use tauri::image::Image;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri::{
     App, AppHandle, LogicalPosition, Manager, Rect, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
 const QUICK_ADD_LABEL: &str = "quick-add";
 const MAIN_WINDOW_LABEL: &str = "main";
-const QUICK_ADD_WIDTH: f64 = 360.0;
-const QUICK_ADD_HEIGHT: f64 = 250.0;
+const QUICK_ADD_WIDTH: f64 = 340.0;
+const QUICK_ADD_HEIGHT: f64 = 228.0;
 
 pub struct QuickAddTrayState {
     #[allow(dead_code)]
@@ -80,6 +81,13 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .resizable(false)
     .decorations(false)
     .shadow(true)
+    .effects(
+        EffectsBuilder::new()
+            .effect(Effect::HudWindow)
+            .state(EffectState::Active)
+            .radius(14.0)
+            .build(),
+    )
     .always_on_top(true)
     .skip_taskbar(true)
     .visible(false)
