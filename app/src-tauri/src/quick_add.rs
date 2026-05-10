@@ -1,6 +1,6 @@
 use tauri::image::Image;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::window::{Effect, EffectState, EffectsBuilder};
+use tauri::window::{Color, Effect, EffectState, EffectsBuilder};
 use tauri::{
     App, AppHandle, LogicalPosition, Manager, Rect, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
@@ -9,6 +9,8 @@ const QUICK_ADD_LABEL: &str = "quick-add";
 const MAIN_WINDOW_LABEL: &str = "main";
 const QUICK_ADD_WIDTH: f64 = 340.0;
 const QUICK_ADD_HEIGHT: f64 = 228.0;
+const QUICK_ADD_TRAY_GAP: f64 = 8.0;
+const QUICK_ADD_SCREEN_MARGIN: f64 = 8.0;
 
 pub struct QuickAddTrayState {
     #[allow(dead_code)]
@@ -80,6 +82,8 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .max_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
     .resizable(false)
     .decorations(false)
+    .transparent(true)
+    .background_color(Color(0, 0, 0, 0))
     .shadow(true)
     .effects(
         EffectsBuilder::new()
@@ -115,14 +119,67 @@ fn toggle_quick_add_window(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()
 }
 
 fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::Result<()> {
-    let scale_factor = window.scale_factor().unwrap_or(1.0);
+    let fallback_scale_factor = window.scale_factor().unwrap_or(1.0);
+    let tray_physical_position = tray_rect.position.to_physical::<f64>(fallback_scale_factor);
+    let tray_physical_size = tray_rect.size.to_physical::<f64>(fallback_scale_factor);
+    let tray_center_x = tray_physical_position.x + tray_physical_size.width / 2.0;
+    let tray_center_y = tray_physical_position.y + tray_physical_size.height / 2.0;
+    let monitor = window.available_monitors().ok().and_then(|monitors| {
+        monitors.into_iter().find(|monitor| {
+            let work_area = monitor.work_area();
+            let left = work_area.position.x as f64;
+            let top = work_area.position.y as f64;
+            let right = left + work_area.size.width as f64;
+            let bottom = top + work_area.size.height as f64;
+
+            tray_center_x >= left
+                && tray_center_x <= right
+                && tray_center_y >= top
+                && tray_center_y <= bottom
+        })
+    });
+    let scale_factor = monitor
+        .as_ref()
+        .map(|monitor| monitor.scale_factor())
+        .unwrap_or(fallback_scale_factor);
     let rect_position = tray_rect.position.to_logical::<f64>(scale_factor);
     let rect_size = tray_rect.size.to_logical::<f64>(scale_factor);
-    let x = rect_position.x + rect_size.width - QUICK_ADD_WIDTH - 8.0;
-    let y = rect_position.y + rect_size.height + 8.0;
-    let position = LogicalPosition::new(x.max(8.0), y.max(8.0));
+    let preferred_x = rect_position.x + rect_size.width + QUICK_ADD_TRAY_GAP;
+    let preferred_y = rect_position.y + rect_size.height + QUICK_ADD_TRAY_GAP;
+    let (min_x, max_x, min_y, max_y) = monitor
+        .as_ref()
+        .map(|monitor| {
+            let work_area = monitor.work_area();
+            let work_area_position = work_area.position.to_logical::<f64>(scale_factor);
+            let work_area_size = work_area.size.to_logical::<f64>(scale_factor);
+
+            (
+                work_area_position.x + QUICK_ADD_SCREEN_MARGIN,
+                work_area_position.x + work_area_size.width
+                    - QUICK_ADD_WIDTH
+                    - QUICK_ADD_SCREEN_MARGIN,
+                work_area_position.y + QUICK_ADD_SCREEN_MARGIN,
+                work_area_position.y + work_area_size.height
+                    - QUICK_ADD_HEIGHT
+                    - QUICK_ADD_SCREEN_MARGIN,
+            )
+        })
+        .unwrap_or((
+            QUICK_ADD_SCREEN_MARGIN,
+            f64::INFINITY,
+            QUICK_ADD_SCREEN_MARGIN,
+            f64::INFINITY,
+        ));
+    let position = LogicalPosition::new(
+        clamp_to_window_bounds(preferred_x, min_x, max_x),
+        clamp_to_window_bounds(preferred_y, min_y, max_y),
+    );
 
     window.set_position(position)
+}
+
+fn clamp_to_window_bounds(value: f64, min: f64, max: f64) -> f64 {
+    value.clamp(min, max.max(min))
 }
 
 fn build_circle_plus_icon() -> Image<'static> {
