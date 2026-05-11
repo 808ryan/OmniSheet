@@ -1,7 +1,7 @@
 export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
-export type OpenAiModelId = 'gpt-5-nano' | 'gpt-4.1-nano'
+export type OpenAiModelId = 'gpt-5.4' | 'gpt-5-nano' | 'gpt-4.1-nano'
 export type TranscriptionModelId = 'gpt-4o-mini-transcribe' | 'whisper-1'
-export type CaptureSourceId = 'text' | 'voice'
+export type CaptureSourceId = 'text' | 'voice' | 'calendar'
 
 export interface OpenAiModelOption {
   id: OpenAiModelId
@@ -303,15 +303,99 @@ export interface SettingsStatus {
   lastError: string | null
   selectedOpenAiModel: OpenAiModelId
   availableOpenAiModels: OpenAiModelOption[]
+  selectedCalendarBulkModel: OpenAiModelId
   selectedTranscriptionModel: TranscriptionModelId
   availableTranscriptionModels: TranscriptionModelOption[]
   timelineExcludeUncategorizedFromDailyTotals: boolean
   timelineShowUncategorizedDailyTotal: boolean
+  calendarBulkIgnoredKeywords: string[]
+  calendarBulkIgnoreAllDayEvents: boolean
 }
 
 export interface SettingsTimelinePreferencesInput {
   timelineExcludeUncategorizedFromDailyTotals: boolean
   timelineShowUncategorizedDailyTotal: boolean
+}
+
+export interface SettingsCalendarBulkPreferencesInput {
+  calendarBulkIgnoredKeywords: string[]
+  calendarBulkIgnoreAllDayEvents: boolean
+}
+
+export interface CalendarExtractInput {
+  imageBase64: string
+  mimeType: string
+  clientTimestampIso: string
+  timezone: string
+  clientLocalDate: string
+  clientLocalTime: string
+  clientUtcOffsetMinutes: number
+  selectedDate: string
+  openAiModel?: OpenAiModelId
+  ignoredKeywords: string[]
+  ignoreAllDayEvents: boolean
+}
+
+export interface CalendarExtractResult {
+  correlationId: string
+  candidates: CalendarExtractCandidate[]
+  ignoredCandidateCount: number
+  modelUsed: OpenAiModelId
+  modelUsedLabel: string
+  llmDurationMs: number
+}
+
+export interface CalendarExtractCandidate {
+  id: string
+  date: string
+  startMinute: number
+  endMinute: number
+  durationMinutes: number
+  timeEvidence: string | null
+  description: string
+  extractedText: string
+  sourceText: string
+  confidence: number
+  engagementId: string | null
+  activityId: string | null
+  engagementCode: string | null
+  engagementName: string | null
+  activityCode: string | null
+  activityName: string | null
+  warningFlags: WarningType[]
+  isAllDay: boolean
+  isIgnored: boolean
+  ignoredReason: string | null
+  needsDateConfirmation: boolean
+  needsTimeConfirmation: boolean
+}
+
+export interface CalendarImportInput {
+  clientTimestampIso: string
+  timezone: string
+  clientLocalDate: string
+  clientLocalTime: string
+  clientUtcOffsetMinutes: number
+  entries: CalendarImportEntryInput[]
+}
+
+export interface CalendarImportEntryInput {
+  date: string
+  startMinute: number
+  endMinute: number
+  description: string
+  extractedText: string
+  engagementId: string | null
+  activityId: string | null
+  confidence: number
+}
+
+export interface CalendarImportResult {
+  correlationId: string
+  rawMessageId: string
+  createdEntryIds: string[]
+  touchedMonthKeys: string[]
+  warnings: Warning[]
 }
 
 export interface DiagnosticsListInput {

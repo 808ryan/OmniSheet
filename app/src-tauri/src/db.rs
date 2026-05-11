@@ -2050,9 +2050,8 @@ mod tests {
         insert_manual_timeline_entry(&connection, "2026-04-01", 480, 510, 30, "Wednesday task")
             .expect("third entry should save");
 
-        let entries =
-            list_timeline_entries_for_date_range(&connection, "2026-03-29", "2026-04-05")
-                .expect("range entries should load");
+        let entries = list_timeline_entries_for_date_range(&connection, "2026-03-29", "2026-04-05")
+            .expect("range entries should load");
 
         let ordered_descriptions = entries
             .iter()
