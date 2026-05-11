@@ -4,9 +4,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{CodeContext, LlmResponse, OpenAiModelId, TranscriptionModelId};
+use crate::models::{
+    CalendarVisionResponse, CodeContext, LlmResponse, OpenAiModelId, TranscriptionModelId,
+};
 
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const OPENAI_AUDIO_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MAX_ATTEMPTS: usize = 3;
 const OPENAI_RETRY_BASE_DELAY_MS: u64 = 700;
@@ -178,6 +181,163 @@ fn build_request_body(
     })
 }
 
+fn build_calendar_extraction_system_prompt() -> &'static str {
+    r#"
+You are OmniSheet's calendar screenshot extraction assistant.
+Return strict JSON matching the provided schema.
+
+Task:
+- Read a screenshot from any calendar application.
+- Identify every visible timed calendar event block, including short 15-minute and 30-minute blocks, partially visible/cropped blocks, and thin blocks near the edge of the screenshot.
+- Ignore decorative UI, toolbar text, current weather, account names, navigation, empty grid space, and recurring/meeting icons.
+- Include all-day events only as events with isAllDay=true; do not invent times for all-day rows.
+- For timed events, infer the visible date and start/end time from the grid position, visible day headers, and the block's top/bottom edges relative to time labels and horizontal grid lines.
+- Derive durationMinutes from the visual block height against the calendar time grid. Do not assume one-hour duration when the block height indicates 15, 30, 45, 90, or another visible duration.
+- If start/end text inside the block conflicts with the visual height, return the best visual startTime/endTime/durationMinutes and explain the conflict in timeEvidence.
+- Use timeEvidence to briefly describe how the time was read, such as "top aligns with 16:00, block height spans one 30-minute grid interval."
+- Preserve the event title text as closely as possible. Put extra visible details such as meeting URLs or attendees in details.
+- Use null for unknown date/time fields rather than guessing.
+- If a screenshot includes a date range such as "May 4 - May 8, 2026", use it to resolve every day column to YYYY-MM-DD.
+- If only weekday/day-of-month are visible, provide weekday and dayOfMonth even when date is null.
+- Classify each event using the supplied engagementActivityContext when there is a reasonable work match.
+- engagementRef must come from engagementActivityContext.engagements[].engagementRef only.
+- activityRef must come from the chosen engagement's activities[].activityRef only.
+- If no specific work match is reasonable, set engagementRef/activityRef to null.
+- Confidence is 0.0 to 1.0 and should be lower for cropped, truncated, ambiguous, or visually crowded blocks.
+
+Never include text outside JSON.
+"#
+}
+
+fn calendar_event_schema() -> Value {
+    let nullable_string = json!({
+        "anyOf": [
+            { "type": "string" },
+            { "type": "null" }
+        ]
+    });
+    let nullable_integer = json!({
+        "anyOf": [
+            { "type": "integer" },
+            { "type": "null" }
+        ]
+    });
+    let nullable_number = json!({
+        "anyOf": [
+            { "type": "number" },
+            { "type": "null" }
+        ]
+    });
+
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "events": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "title": { "type": "string" },
+                        "details": nullable_string,
+                        "date": nullable_string,
+                        "weekday": nullable_string,
+                        "dayOfMonth": nullable_integer,
+                        "startTime": nullable_string,
+                        "endTime": nullable_string,
+                        "durationMinutes": nullable_integer,
+                        "timeEvidence": nullable_string,
+                        "isAllDay": { "type": "boolean" },
+                        "engagementRef": nullable_string,
+                        "activityRef": nullable_string,
+                        "confidence": nullable_number,
+                        "visualNotes": nullable_string
+                    },
+                    "required": [
+                        "title",
+                        "details",
+                        "date",
+                        "weekday",
+                        "dayOfMonth",
+                        "startTime",
+                        "endTime",
+                        "durationMinutes",
+                        "timeEvidence",
+                        "isAllDay",
+                        "engagementRef",
+                        "activityRef",
+                        "confidence",
+                        "visualNotes"
+                    ]
+                }
+            }
+        },
+        "required": ["events"]
+    })
+}
+
+fn build_calendar_extraction_request_body(
+    model: OpenAiModelId,
+    image_base64: &str,
+    mime_type: &str,
+    client_timestamp_iso: &str,
+    client_local_date: &str,
+    client_local_time: &str,
+    client_utc_offset_minutes: i64,
+    timezone: &str,
+    selected_date: &str,
+    code_context: &CodeContext,
+) -> Value {
+    let image_url = format!("data:{};base64,{}", mime_type.trim(), image_base64.trim());
+    let user_prompt = json!({
+        "clientTimestampIso": client_timestamp_iso,
+        "clientLocalDate": client_local_date,
+        "clientLocalTime": client_local_time,
+        "clientUtcOffsetMinutes": client_utc_offset_minutes,
+        "timezone": timezone,
+        "selectedOmniSheetDate": selected_date,
+        "engagementActivityContext": code_context,
+    });
+
+    json!({
+        "model": model.api_name(),
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": build_calendar_extraction_system_prompt()
+                    }
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": user_prompt.to_string()
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": image_url,
+                        "detail": "high"
+                    }
+                ]
+            }
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "calendar_events",
+                "strict": true,
+                "schema": calendar_event_schema()
+            }
+        }
+    })
+}
+
 fn audio_filename_for_mime_type(mime_type: &str) -> &'static str {
     let normalized = mime_type.trim().to_ascii_lowercase();
 
@@ -218,6 +378,39 @@ fn build_transcription_form(
         .text("model", model.api_name().to_string())
         .text("response_format", "json".to_string())
         .part("file", file_part))
+}
+
+fn extract_responses_output_text(response_json: &Value) -> Option<String> {
+    if let Some(value) = response_json.get("output_text").and_then(Value::as_str) {
+        return Some(value.to_string());
+    }
+
+    let output = response_json.get("output")?.as_array()?;
+    let mut parts = Vec::<String>::new();
+
+    for item in output {
+        let Some(content) = item.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for content_item in content {
+            if content_item
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "output_text")
+            {
+                if let Some(text) = content_item.get("text").and_then(Value::as_str) {
+                    parts.push(text.to_string());
+                }
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(""))
+    }
 }
 
 pub async fn interpret_message(
@@ -427,6 +620,202 @@ pub async fn interpret_message(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn extract_calendar_events(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: OpenAiModelId,
+    image_base64: &str,
+    mime_type: &str,
+    client_timestamp_iso: &str,
+    client_local_date: &str,
+    client_local_time: &str,
+    client_utc_offset_minutes: i64,
+    timezone: &str,
+    selected_date: &str,
+    code_context: &CodeContext,
+    attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
+) -> AppResult<CalendarVisionResponse> {
+    let request_body = build_calendar_extraction_request_body(
+        model,
+        image_base64,
+        mime_type,
+        client_timestamp_iso,
+        client_local_date,
+        client_local_time,
+        client_utc_offset_minutes,
+        timezone,
+        selected_date,
+        code_context,
+    );
+
+    for attempt in 0..OPENAI_MAX_ATTEMPTS {
+        let attempt_number = attempt + 1;
+        let attempt_started_at = Instant::now();
+
+        let response = client
+            .post(OPENAI_RESPONSES_URL)
+            .bearer_auth(api_key)
+            .json(&request_body)
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(value) => value,
+            Err(error) => {
+                let retryable =
+                    attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_transport_error(&error);
+                let delay_ms =
+                    retryable.then_some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64);
+
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "transport_error",
+                    http_status: None,
+                    retryable,
+                    retry_delay_ms: delay_ms,
+                    error_class: Some(transport_error_class(&error)),
+                    error_message: Some(error.to_string()),
+                });
+
+                if let Some(delay_ms) = delay_ms {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    continue;
+                }
+                return Err(AppError::Network(error));
+            }
+        };
+
+        let status = response.status();
+        let response_text = match response.text().await {
+            Ok(value) => value,
+            Err(error) => {
+                let retryable =
+                    attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_transport_error(&error);
+                let delay_ms =
+                    retryable.then_some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64);
+
+                attempt_telemetry.push(LlmAttemptTelemetry {
+                    attempt: attempt_number,
+                    max_attempts: OPENAI_MAX_ATTEMPTS,
+                    duration_ms: attempt_duration_ms(attempt_started_at),
+                    outcome: "transport_error",
+                    http_status: Some(status.as_u16()),
+                    retryable,
+                    retry_delay_ms: delay_ms,
+                    error_class: Some(transport_error_class(&error)),
+                    error_message: Some(error.to_string()),
+                });
+
+                if let Some(delay_ms) = delay_ms {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                    continue;
+                }
+
+                return Err(AppError::Network(error));
+            }
+        };
+
+        if !status.is_success() {
+            let retryable =
+                attempt_number < OPENAI_MAX_ATTEMPTS && is_retryable_status(status.as_u16());
+            let delay_ms = retryable.then_some(OPENAI_RETRY_BASE_DELAY_MS * attempt_number as u64);
+
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "http_error",
+                http_status: Some(status.as_u16()),
+                retryable,
+                retry_delay_ms: delay_ms,
+                error_class: None,
+                error_message: Some(format!("OpenAI Responses API error ({status})")),
+            });
+
+            if let Some(delay_ms) = delay_ms {
+                thread::sleep(Duration::from_millis(delay_ms));
+                continue;
+            }
+
+            return Err(AppError::Service(format!(
+                "OpenAI Responses API error ({status}): {response_text}"
+            )));
+        }
+
+        let response_json: Value = serde_json::from_str(&response_text).map_err(|error| {
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "parse_error",
+                http_status: Some(status.as_u16()),
+                retryable: false,
+                retry_delay_ms: None,
+                error_class: None,
+                error_message: Some(error.to_string()),
+            });
+
+            AppError::Service(format!(
+                "Failed to parse OpenAI Responses JSON: {error}. Raw response: {response_text}"
+            ))
+        })?;
+
+        let content = extract_responses_output_text(&response_json).ok_or_else(|| {
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "parse_error",
+                http_status: Some(status.as_u16()),
+                retryable: false,
+                retry_delay_ms: None,
+                error_class: None,
+                error_message: Some("OpenAI Responses output missing text".to_string()),
+            });
+            AppError::Service("OpenAI Responses output missing text".to_string())
+        })?;
+
+        let parsed = serde_json::from_str::<CalendarVisionResponse>(&content).map_err(|error| {
+            attempt_telemetry.push(LlmAttemptTelemetry {
+                attempt: attempt_number,
+                max_attempts: OPENAI_MAX_ATTEMPTS,
+                duration_ms: attempt_duration_ms(attempt_started_at),
+                outcome: "parse_error",
+                http_status: Some(status.as_u16()),
+                retryable: false,
+                retry_delay_ms: None,
+                error_class: None,
+                error_message: Some(error.to_string()),
+            });
+
+            AppError::Service(format!(
+                "Failed to parse calendar extraction response: {error}. Raw content: {content}"
+            ))
+        })?;
+
+        attempt_telemetry.push(LlmAttemptTelemetry {
+            attempt: attempt_number,
+            max_attempts: OPENAI_MAX_ATTEMPTS,
+            duration_ms: attempt_duration_ms(attempt_started_at),
+            outcome: "success",
+            http_status: Some(status.as_u16()),
+            retryable: false,
+            retry_delay_ms: None,
+            error_class: None,
+            error_message: None,
+        });
+
+        return Ok(parsed);
+    }
+
+    Err(AppError::Service(
+        "OpenAI calendar extraction request exhausted retry attempts".to_string(),
+    ))
+}
+
 pub async fn transcribe_audio(
     client: &reqwest::Client,
     api_key: &str,
@@ -630,7 +1019,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        audio_filename_for_mime_type, build_request_body, build_system_prompt, is_retryable_status,
+        audio_filename_for_mime_type, build_calendar_extraction_system_prompt, build_request_body,
+        build_system_prompt, calendar_event_schema, is_retryable_status,
     };
     use crate::models::{CodeContext, OpenAiModelId};
 
@@ -761,6 +1151,43 @@ mod tests {
         assert!(prompt.contains("Do not invent time gaps after \"then\" or \"after that\""));
         assert!(prompt.contains("About to spend 30 minutes with PT on FF ITGCs"));
         assert!(prompt.contains("Then at 3pm"));
+    }
+
+    #[test]
+    fn calendar_prompt_includes_short_block_visual_height_guidance() {
+        let prompt = build_calendar_extraction_system_prompt();
+        assert!(prompt.contains("15-minute and 30-minute blocks"));
+        assert!(prompt.contains("block's top/bottom edges"));
+        assert!(prompt.contains("visual block height"));
+        assert!(prompt.contains("Do not assume one-hour duration"));
+        assert!(prompt.contains("timeEvidence"));
+    }
+
+    #[test]
+    fn calendar_schema_requires_duration_and_time_evidence_fields() {
+        let schema = calendar_event_schema();
+        let event_schema = schema
+            .get("properties")
+            .and_then(|value| value.get("events"))
+            .and_then(|value| value.get("items"))
+            .expect("events item schema should exist");
+        let properties = event_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("event properties should exist");
+        assert!(properties.contains_key("durationMinutes"));
+        assert!(properties.contains_key("timeEvidence"));
+
+        let required = event_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("event required fields should exist");
+        assert!(required
+            .iter()
+            .any(|value| value.as_str() == Some("durationMinutes")));
+        assert!(required
+            .iter()
+            .any(|value| value.as_str() == Some("timeEvidence")));
     }
 
     #[test]

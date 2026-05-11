@@ -16,18 +16,21 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::macos_permissions;
 use crate::models::{
-    Activity, ActivityUpsertInput, ApiKeyInput, CaptureSourceId, CodeContext, ContextActivity,
-    ContextEngagement, DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput,
-    DiagnosticsRecordInput, Engagement, EngagementUpsertInput, IdInput, IdResult, InterpretResult,
-    InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
-    MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId, SettingsSetOpenAiModelInput,
-    SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel,
-    StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput, SummaryLayoutColumn,
-    SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput,
-    TimelineDaySummary, TimelineEntry,
-    TimelineMonthSummaryInput, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
-    TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput,
-    TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
+    Activity, ActivityUpsertInput, ApiKeyInput, CalendarExtractCandidate, CalendarExtractInput,
+    CalendarExtractResult, CalendarImportEntryInput, CalendarImportInput, CalendarImportResult,
+    CalendarVisionEvent, CaptureSourceId, CodeContext, ContextActivity, ContextEngagement,
+    DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput,
+    Engagement, EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput,
+    KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
+    MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId, SettingsSetCalendarBulkModelInput,
+    SettingsSetCalendarBulkPreferencesInput, SettingsSetOpenAiModelInput,
+    SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
+    StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
+    SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
+    TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
+    TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView, TimelineWeekViewDay,
+    TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult,
+    TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -41,11 +44,14 @@ const GLOBAL_ACTIVITY_FALLBACK_MIN_SCORE: f64 = 2.5;
 const GLOBAL_ACTIVITY_FALLBACK_MIN_MARGIN: f64 = 0.75;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
 const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
+const APP_SETTING_CALENDAR_BULK_OPENAI_MODEL: &str = "calendar_bulk_openai_model";
 const APP_SETTING_TRANSCRIPTION_MODEL: &str = "openai_transcription_model";
 const APP_SETTING_TIMELINE_EXCLUDE_UNCATEGORIZED_FROM_DAILY_TOTALS: &str =
     "timeline_exclude_uncategorized_from_daily_totals";
 const APP_SETTING_TIMELINE_SHOW_UNCATEGORIZED_DAILY_TOTAL: &str =
     "timeline_show_uncategorized_daily_total";
+const APP_SETTING_CALENDAR_BULK_IGNORED_KEYWORDS: &str = "calendar_bulk_ignored_keywords";
+const APP_SETTING_CALENDAR_BULK_IGNORE_ALL_DAY_EVENTS: &str = "calendar_bulk_ignore_all_day_events";
 const APP_SETTING_SUMMARY_LAYOUT_STATE: &str = "summary_layout_state";
 const SUMMARY_LAYOUT_STATE_VERSION: i64 = 2;
 const SUMMARY_LAYOUT_MAX_NAME_LENGTH: usize = 40;
@@ -131,6 +137,25 @@ fn read_saved_openai_model(connection: &Connection) -> AppResult<(OpenAiModelId,
     Ok(resolve_saved_openai_model_value(saved_value))
 }
 
+fn resolve_saved_calendar_bulk_model_value(
+    saved_value: Option<String>,
+) -> (OpenAiModelId, Option<String>) {
+    match saved_value {
+        Some(value) => match OpenAiModelId::from_api_name(&value) {
+            Some(model) => (model, None),
+            None => (OpenAiModelId::default_calendar_bulk_model(), Some(value)),
+        },
+        None => (OpenAiModelId::default_calendar_bulk_model(), None),
+    }
+}
+
+fn read_saved_calendar_bulk_model(
+    connection: &Connection,
+) -> AppResult<(OpenAiModelId, Option<String>)> {
+    let saved_value = db::get_app_setting(connection, APP_SETTING_CALENDAR_BULK_OPENAI_MODEL)?;
+    Ok(resolve_saved_calendar_bulk_model_value(saved_value))
+}
+
 fn resolve_saved_transcription_model_value(
     saved_value: Option<String>,
 ) -> (TranscriptionModelId, Option<String>) {
@@ -183,6 +208,39 @@ fn read_saved_timeline_preferences(connection: &Connection) -> AppResult<(bool, 
     );
 
     Ok((exclude_uncategorized, show_uncategorized_total))
+}
+
+fn normalize_calendar_bulk_ignored_keywords(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut normalized = Vec::<String>::new();
+
+    for value in values {
+        for candidate in value.split([',', '\n', ';']) {
+            let keyword = candidate.trim().to_lowercase();
+            if keyword.is_empty() || !seen.insert(keyword.clone()) {
+                continue;
+            }
+            normalized.push(keyword);
+        }
+    }
+
+    normalized
+}
+
+fn read_saved_calendar_bulk_preferences(connection: &Connection) -> AppResult<(Vec<String>, bool)> {
+    let saved_keywords =
+        db::get_app_setting(connection, APP_SETTING_CALENDAR_BULK_IGNORED_KEYWORDS)?;
+    let parsed_keywords = saved_keywords
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .unwrap_or_else(|| vec!["lunch".to_string()]);
+    let ignored_keywords = normalize_calendar_bulk_ignored_keywords(&parsed_keywords);
+    let ignore_all_day_events = resolve_saved_bool_setting_value(
+        db::get_app_setting(connection, APP_SETTING_CALENDAR_BULK_IGNORE_ALL_DAY_EVENTS)?,
+        true,
+    );
+
+    Ok((ignored_keywords, ignore_all_day_events))
 }
 
 fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
@@ -258,10 +316,7 @@ fn next_summary_layout_row_total_column_id(existing_ids: &HashSet<String>) -> St
 
     let mut suffix = 1usize;
     loop {
-        let candidate = format!(
-            "{}-{suffix}",
-            DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID
-        );
+        let candidate = format!("{}-{suffix}", DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID);
         if !existing_ids.contains(&candidate) {
             return candidate;
         }
@@ -320,9 +375,7 @@ fn normalize_summary_layout_state(
                 SummaryLayoutColumn::Field { id, field_key } => {
                     *id = id.trim().to_string();
                     if id.is_empty() {
-                        return Err(
-                            "Summary layout field column IDs cannot be empty.".to_string(),
-                        );
+                        return Err("Summary layout field column IDs cannot be empty.".to_string());
                     }
                     if !column_ids.insert(id.clone()) {
                         return Err("Summary layout column IDs must be unique.".to_string());
@@ -343,12 +396,13 @@ fn normalize_summary_layout_state(
                         return Err("Summary layout column IDs must be unique.".to_string());
                     }
                     if *day_index > 6 {
-                        return Err("Summary layout day indexes must be between 0 and 6.".to_string());
+                        return Err(
+                            "Summary layout day indexes must be between 0 and 6.".to_string()
+                        );
                     }
                     if !day_indexes.insert(*day_index) {
-                        return Err(
-                            "A summary layout preset cannot include the same day twice.".to_string(),
-                        );
+                        return Err("A summary layout preset cannot include the same day twice."
+                            .to_string());
                     }
                 }
                 SummaryLayoutColumn::FreeText { id, label } => {
@@ -356,7 +410,7 @@ fn normalize_summary_layout_state(
                     *label = label.trim().to_string();
                     if id.is_empty() {
                         return Err(
-                            "Summary layout free-text column IDs cannot be empty.".to_string(),
+                            "Summary layout free-text column IDs cannot be empty.".to_string()
                         );
                     }
                     if !column_ids.insert(id.clone()) {
@@ -364,7 +418,7 @@ fn normalize_summary_layout_state(
                     }
                     if label.is_empty() {
                         return Err(
-                            "Summary layout free-text column labels cannot be empty.".to_string(),
+                            "Summary layout free-text column labels cannot be empty.".to_string()
                         );
                     }
                 }
@@ -372,7 +426,7 @@ fn normalize_summary_layout_state(
                     *id = id.trim().to_string();
                     if id.is_empty() {
                         return Err(
-                            "Summary layout Row Total column IDs cannot be empty.".to_string(),
+                            "Summary layout Row Total column IDs cannot be empty.".to_string()
                         );
                     }
                     if !column_ids.insert(id.clone()) {
@@ -451,6 +505,7 @@ fn capture_source_label(value: CaptureSourceId) -> &'static str {
     match value {
         CaptureSourceId::Text => "text",
         CaptureSourceId::Voice => "voice",
+        CaptureSourceId::Calendar => "calendar",
     }
 }
 
@@ -483,6 +538,31 @@ fn record_invalid_saved_openai_model(
           "invalidValue": invalid_value,
           "fallbackModel": OpenAiModelId::default().api_name(),
           "fallbackModelLabel": OpenAiModelId::default().display_label(),
+        }),
+    );
+}
+
+fn record_invalid_saved_calendar_bulk_model(
+    state: &State<'_, AppState>,
+    correlation_id: &str,
+    command: &str,
+    invalid_value: &str,
+) {
+    let fallback_model = OpenAiModelId::default_calendar_bulk_model();
+    record_backend_event_with_state(
+        state,
+        correlation_id,
+        "settings_model_fallback",
+        command,
+        "warning",
+        None,
+        None,
+        json!({
+          "message": "Invalid saved calendar bulk model; defaulted to GPT-5.4.",
+          "setting": APP_SETTING_CALENDAR_BULK_OPENAI_MODEL,
+          "invalidValue": invalid_value,
+          "fallbackModel": fallback_model.api_name(),
+          "fallbackModelLabel": fallback_model.display_label(),
         }),
     );
 }
@@ -741,12 +821,14 @@ fn build_summary_export_hours_sheet_columns(
 
     for column in &preset.columns {
         match column {
-            SummaryLayoutColumn::Field { field_key, .. } => columns.push(SummaryExportSheetColumn {
-                header: summary_layout_field_label(*field_key).to_string(),
-                kind: SummaryExportSheetColumnKind::Field(*field_key),
-                width: summary_layout_field_width(*field_key),
-                wrap_text: summary_layout_field_wraps(*field_key),
-            }),
+            SummaryLayoutColumn::Field { field_key, .. } => {
+                columns.push(SummaryExportSheetColumn {
+                    header: summary_layout_field_label(*field_key).to_string(),
+                    kind: SummaryExportSheetColumnKind::Field(*field_key),
+                    width: summary_layout_field_width(*field_key),
+                    wrap_text: summary_layout_field_wraps(*field_key),
+                })
+            }
             SummaryLayoutColumn::Day { day_index, .. } => {
                 let resolved_day_index = *day_index as usize;
                 columns.push(SummaryExportSheetColumn {
@@ -878,9 +960,10 @@ fn resolve_summary_export_field_value(
         .and_then(|activity_id| activity_by_id.get(activity_id));
 
     match field_key {
-        SummaryLayoutFieldKey::EngagementCode => {
-            format_summary_code_value_for_export(row.engagement_code.as_deref(), row.is_uncategorized)
-        }
+        SummaryLayoutFieldKey::EngagementCode => format_summary_code_value_for_export(
+            row.engagement_code.as_deref(),
+            row.is_uncategorized,
+        ),
         SummaryLayoutFieldKey::EngagementName => row.engagement_name.clone(),
         SummaryLayoutFieldKey::ClientName => {
             normalize_export_display_text(Some(row.client_name.as_str()))
@@ -926,9 +1009,7 @@ fn build_export_metadata_maps(
     (engagement_by_id, activity_by_id)
 }
 
-fn summary_export_footer_label_column_index(
-    columns: &[SummaryExportSheetColumn],
-) -> Option<usize> {
+fn summary_export_footer_label_column_index(columns: &[SummaryExportSheetColumn]) -> Option<usize> {
     columns.iter().position(|column| {
         !matches!(
             column.kind,
@@ -1046,13 +1127,22 @@ fn write_layout_driven_summary_sheet(
                         &header_format,
                     )?;
                 } else if column.wrap_text {
-                    worksheet.write_with_format(row_index, excel_column, "", &wrapped_text_format)?;
+                    worksheet.write_with_format(
+                        row_index,
+                        excel_column,
+                        "",
+                        &wrapped_text_format,
+                    )?;
                 } else {
                     worksheet.write_with_format(row_index, excel_column, "", &plain_text_format)?;
                 }
             }
             SummaryExportSheetColumnKind::DayHours(day_index) => {
-                let total_minutes = summary.day_total_minutes.get(day_index).copied().unwrap_or(0);
+                let total_minutes = summary
+                    .day_total_minutes
+                    .get(day_index)
+                    .copied()
+                    .unwrap_or(0);
                 worksheet.write_with_format(
                     row_index,
                     excel_column,
@@ -1183,6 +1273,20 @@ struct PreparedEntry {
     used_temporal_fallback: bool,
     duration_defaulted: bool,
     fallback_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedCalendarImportEntry {
+    date: String,
+    start_minute: i64,
+    end_minute: i64,
+    duration_minutes: i64,
+    description: String,
+    extracted_text: String,
+    engagement_id: Option<String>,
+    activity_id: Option<String>,
+    confidence: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1950,10 +2054,14 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
     let (
         selected_open_ai_model,
         invalid_saved_model,
+        selected_calendar_bulk_model,
+        invalid_saved_calendar_bulk_model,
         selected_transcription_model,
         invalid_saved_transcription_model,
         timeline_exclude_uncategorized_from_daily_totals,
         timeline_show_uncategorized_daily_total,
+        calendar_bulk_ignored_keywords,
+        calendar_bulk_ignore_all_day_events,
     ) = {
         let connection = state.connection.lock().map_err(|_| {
             let message = state_lock_error();
@@ -1985,6 +2093,26 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
                         Some(duration_ms(started_at)),
                         None,
                         json!({ "stage": "read_model_setting", "message": message }),
+                    );
+                    return Err(format_command_error(&correlation_id, message));
+                }
+            };
+
+        let (selected_calendar_bulk_model, invalid_saved_calendar_bulk_model) =
+            match read_saved_calendar_bulk_model(&connection) {
+                Ok(value) => value,
+                Err(error) => {
+                    let message = error.to_string();
+                    record_backend_event(
+                        &connection,
+                        state.inner(),
+                        &correlation_id,
+                        "command_error",
+                        command,
+                        "error",
+                        Some(duration_ms(started_at)),
+                        None,
+                        json!({ "stage": "read_calendar_bulk_model_setting", "message": message }),
                     );
                     return Err(format_command_error(&correlation_id, message));
                 }
@@ -2032,18 +2160,46 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             }
         };
 
+        let (calendar_bulk_ignored_keywords, calendar_bulk_ignore_all_day_events) =
+            match read_saved_calendar_bulk_preferences(&connection) {
+                Ok(value) => value,
+                Err(error) => {
+                    let message = error.to_string();
+                    record_backend_event(
+                        &connection,
+                        state.inner(),
+                        &correlation_id,
+                        "command_error",
+                        command,
+                        "error",
+                        Some(duration_ms(started_at)),
+                        None,
+                        json!({ "stage": "read_calendar_bulk_preferences_setting", "message": message }),
+                    );
+                    return Err(format_command_error(&correlation_id, message));
+                }
+            };
+
         (
             selected_open_ai_model,
             invalid_saved_model,
+            selected_calendar_bulk_model,
+            invalid_saved_calendar_bulk_model,
             selected_transcription_model,
             invalid_saved_transcription_model,
             timeline_exclude_uncategorized_from_daily_totals,
             timeline_show_uncategorized_daily_total,
+            calendar_bulk_ignored_keywords,
+            calendar_bulk_ignore_all_day_events,
         )
     };
 
     if let Some(invalid_value) = invalid_saved_model.as_deref() {
         record_invalid_saved_openai_model(&state, &correlation_id, command, invalid_value);
+    }
+
+    if let Some(invalid_value) = invalid_saved_calendar_bulk_model.as_deref() {
+        record_invalid_saved_calendar_bulk_model(&state, &correlation_id, command, invalid_value);
     }
 
     if let Some(invalid_value) = invalid_saved_transcription_model.as_deref() {
@@ -2058,10 +2214,13 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         last_error: key_status.last_error.clone(),
         selected_open_ai_model,
         available_open_ai_models: openai_model_options(),
+        selected_calendar_bulk_model,
         selected_transcription_model,
         available_transcription_models: transcription_model_options(),
         timeline_exclude_uncategorized_from_daily_totals,
         timeline_show_uncategorized_daily_total,
+        calendar_bulk_ignored_keywords,
+        calendar_bulk_ignore_all_day_events,
     };
 
     record_backend_event_with_state(
@@ -2082,11 +2241,15 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "selectedOpenAiModel": status.selected_open_ai_model.api_name(),
           "selectedOpenAiModelLabel": status.selected_open_ai_model.display_label(),
           "availableOpenAiModelCount": status.available_open_ai_models.len(),
+          "selectedCalendarBulkModel": status.selected_calendar_bulk_model.api_name(),
+          "selectedCalendarBulkModelLabel": status.selected_calendar_bulk_model.display_label(),
           "selectedTranscriptionModel": status.selected_transcription_model.api_name(),
           "selectedTranscriptionModelLabel": status.selected_transcription_model.display_label(),
           "availableTranscriptionModelCount": status.available_transcription_models.len(),
           "timelineExcludeUncategorizedFromDailyTotals": status.timeline_exclude_uncategorized_from_daily_totals,
           "timelineShowUncategorizedDailyTotal": status.timeline_show_uncategorized_daily_total,
+          "calendarBulkIgnoredKeywords": status.calendar_bulk_ignored_keywords,
+          "calendarBulkIgnoreAllDayEvents": status.calendar_bulk_ignore_all_day_events,
         }),
     );
 
@@ -2273,6 +2436,90 @@ pub fn settings_set_openai_model(
 }
 
 #[tauri::command]
+pub fn settings_set_calendar_bulk_model(
+    state: State<'_, AppState>,
+    input: SettingsSetCalendarBulkModelInput,
+) -> Result<(), String> {
+    let command = "settings_set_calendar_bulk_model";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+    let selected_model = input.model;
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let save_result: Result<(), String> = (|| {
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_CALENDAR_BULK_OPENAI_MODEL,
+            selected_model.api_name(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified = db::get_app_setting(&connection, APP_SETTING_CALENDAR_BULK_OPENAI_MODEL)
+            .map_err(|error| error.to_string())?;
+
+        if verified.as_deref() != Some(selected_model.api_name()) {
+            return Err("Calendar bulk add model setting verification failed".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "selectedCalendarBulkModel": selected_model.api_name(),
+                  "selectedCalendarBulkModelLabel": selected_model.display_label(),
+                  "verified": true,
+                }),
+            );
+            Ok(())
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_calendar_bulk_model_setting",
+                  "message": message,
+                  "selectedCalendarBulkModel": selected_model.api_name(),
+                  "selectedCalendarBulkModelLabel": selected_model.display_label(),
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
 pub fn settings_set_transcription_model(
     state: State<'_, AppState>,
     input: SettingsSetTranscriptionModelInput,
@@ -2439,6 +2686,98 @@ pub fn settings_set_timeline_preferences(
                   "message": message,
                   "timelineExcludeUncategorizedFromDailyTotals": exclude_uncategorized,
                   "timelineShowUncategorizedDailyTotal": show_uncategorized_total,
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn settings_set_calendar_bulk_preferences(
+    state: State<'_, AppState>,
+    input: SettingsSetCalendarBulkPreferencesInput,
+) -> Result<(), String> {
+    let command = "settings_set_calendar_bulk_preferences";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let ignored_keywords =
+        normalize_calendar_bulk_ignored_keywords(&input.calendar_bulk_ignored_keywords);
+    let ignore_all_day_events = input.calendar_bulk_ignore_all_day_events;
+    let save_result: Result<(), String> = (|| {
+        let serialized_keywords =
+            serde_json::to_string(&ignored_keywords).map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_CALENDAR_BULK_IGNORED_KEYWORDS,
+            &serialized_keywords,
+        )
+        .map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_CALENDAR_BULK_IGNORE_ALL_DAY_EVENTS,
+            bool_app_setting_value(ignore_all_day_events),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified =
+            read_saved_calendar_bulk_preferences(&connection).map_err(|error| error.to_string())?;
+        if verified != (ignored_keywords.clone(), ignore_all_day_events) {
+            return Err("Calendar bulk preferences verification failed".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "calendarBulkIgnoredKeywords": ignored_keywords,
+                  "calendarBulkIgnoreAllDayEvents": ignore_all_day_events,
+                  "verified": true,
+                }),
+            );
+            Ok(())
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_calendar_bulk_preferences_setting",
+                  "message": message,
+                  "calendarBulkIgnoreAllDayEvents": ignore_all_day_events,
                 }),
             );
             Err(format_command_error(&correlation_id, message))
@@ -2669,11 +3008,14 @@ pub fn timeline_list_for_week_view(
     let (start_date, end_date_exclusive) = timeline_week_view_bounds(&input.date)?;
     let week_start = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
         .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
-    let entries = db::list_timeline_entries_for_date_range(&connection, &start_date, &end_date_exclusive)
-        .map_err(|error| error.to_string())?;
+    let entries =
+        db::list_timeline_entries_for_date_range(&connection, &start_date, &end_date_exclusive)
+            .map_err(|error| error.to_string())?;
     let days = (0..7)
         .map(|index| TimelineWeekViewDay {
-            date: (week_start + Duration::days(index)).format("%Y-%m-%d").to_string(),
+            date: (week_start + Duration::days(index))
+                .format("%Y-%m-%d")
+                .to_string(),
         })
         .collect::<Vec<_>>();
     let week_end_date = days
@@ -2699,8 +3041,9 @@ pub fn summary_export_weekly_excel(
     let (start_date, end_date_exclusive) = timeline_week_bounds(&input.date)?;
     let (summary, engagements) = {
         let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-        let summary = db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
-            .map_err(|error| error.to_string())?;
+        let summary =
+            db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
+                .map_err(|error| error.to_string())?;
         let engagements = db::list_engagements(&connection).map_err(|error| error.to_string())?;
         (summary, engagements)
     };
@@ -2722,7 +3065,7 @@ pub fn summary_export_weekly_excel(
         &engagement_by_id,
         &activity_by_id,
     )
-        .map_err(|error| format!("failed to build Weekly Hours sheet: {error}"))?;
+    .map_err(|error| format!("failed to build Weekly Hours sheet: {error}"))?;
     write_weekly_hours_and_notes_sheet(
         &mut workbook,
         &summary,
@@ -2730,7 +3073,7 @@ pub fn summary_export_weekly_excel(
         &engagement_by_id,
         &activity_by_id,
     )
-        .map_err(|error| format!("failed to build Weekly Hours + Notes sheet: {error}"))?;
+    .map_err(|error| format!("failed to build Weekly Hours + Notes sheet: {error}"))?;
     workbook
         .save(&file_path)
         .map_err(|error| format!("failed to write workbook: {error}"))?;
@@ -2869,6 +3212,506 @@ pub fn timeline_delete_entry(state: State<'_, AppState>, input: IdInput) -> Resu
         .map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn calendar_extract_events(
+    state: State<'_, AppState>,
+    input: CalendarExtractInput,
+) -> Result<CalendarExtractResult, String> {
+    let command = "calendar_extract_events";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    record_backend_event_with_state(
+        &state,
+        &correlation_id,
+        "command_start",
+        command,
+        "ok",
+        None,
+        None,
+        json!({
+          "mimeType": input.mime_type,
+          "timezone": input.timezone,
+          "clientTimestampIso": input.client_timestamp_iso,
+          "clientLocalDate": input.client_local_date,
+          "clientLocalTime": input.client_local_time,
+          "selectedDate": input.selected_date,
+          "requestedOpenAiModel": input.open_ai_model.map(|model| model.api_name()),
+          "ignoredKeywordCount": input.ignored_keywords.len(),
+          "ignoreAllDayEvents": input.ignore_all_day_events,
+        }),
+    );
+
+    let image_base64 = normalize_image_base64(&input.image_base64).map_err(|message| {
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "validate_image", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+    let mime_type = normalize_calendar_image_mime_type(&input.mime_type).map_err(|message| {
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "validate_image", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+    let ignored_keywords = normalize_calendar_bulk_ignored_keywords(&input.ignored_keywords);
+
+    let api_key = match get_openai_api_key(&state) {
+        Ok(value) => value,
+        Err(error) => {
+            let message = error.to_string();
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({ "stage": "read_key", "message": message }),
+            );
+            return Err(format_command_error(&correlation_id, message));
+        }
+    };
+
+    let (saved_calendar_bulk_model, invalid_saved_calendar_bulk_model, code_context) = {
+        let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+        let (saved_calendar_bulk_model, invalid_saved_calendar_bulk_model) =
+            match read_saved_calendar_bulk_model(&connection) {
+                Ok(value) => value,
+                Err(error) => {
+                    let message = error.to_string();
+                    record_backend_event(
+                        &connection,
+                        state.inner(),
+                        &correlation_id,
+                        "command_error",
+                        command,
+                        "error",
+                        Some(duration_ms(started_at)),
+                        None,
+                        json!({ "stage": "read_calendar_bulk_model_setting", "message": message }),
+                    );
+                    return Err(format_command_error(&correlation_id, message));
+                }
+            };
+
+        let code_context = match db::load_code_context(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "load_code_context", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
+
+        (
+            saved_calendar_bulk_model,
+            invalid_saved_calendar_bulk_model,
+            code_context,
+        )
+    };
+
+    if let Some(invalid_value) = invalid_saved_calendar_bulk_model.as_deref() {
+        record_invalid_saved_calendar_bulk_model(&state, &correlation_id, command, invalid_value);
+    }
+
+    let selected_openai_model =
+        resolve_requested_openai_model(input.open_ai_model, saved_calendar_bulk_model);
+    let llm_started_at = Instant::now();
+    let mut llm_attempts = Vec::<openai::LlmAttemptTelemetry>::new();
+    let vision_result = openai::extract_calendar_events(
+        &state.http_client,
+        &api_key,
+        selected_openai_model,
+        &image_base64,
+        &mime_type,
+        &input.client_timestamp_iso,
+        &input.client_local_date,
+        &input.client_local_time,
+        input.client_utc_offset_minutes,
+        &input.timezone,
+        &input.selected_date,
+        &code_context,
+        &mut llm_attempts,
+    )
+    .await;
+
+    record_llm_attempt_events(
+        &state,
+        &correlation_id,
+        command,
+        selected_openai_model,
+        &llm_attempts,
+    );
+    let llm_duration_ms = duration_ms(llm_started_at);
+    let llm_summary = llm_attempt_summary(&llm_attempts);
+
+    let vision_response = match vision_result {
+        Ok(response) => {
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "llm_response",
+                command,
+                "ok",
+                Some(llm_duration_ms),
+                None,
+                json!({
+                  "eventCount": response.events.len(),
+                  "model": selected_openai_model.api_name(),
+                  "modelLabel": selected_openai_model.display_label(),
+                  "totalLlmDurationMs": llm_duration_ms,
+                  "attemptSummary": llm_summary,
+                }),
+            );
+            response
+        }
+        Err(error) => {
+            let message = error.to_string();
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "llm_response",
+                command,
+                "error",
+                Some(llm_duration_ms),
+                None,
+                json!({
+                  "message": message,
+                  "model": selected_openai_model.api_name(),
+                  "modelLabel": selected_openai_model.display_label(),
+                  "totalLlmDurationMs": llm_duration_ms,
+                  "attemptSummary": llm_summary,
+                }),
+            );
+            return Err(format_command_error(&correlation_id, message));
+        }
+    };
+
+    let selected_date = parse_date(&input.selected_date)
+        .or_else(|| parse_date(input.client_local_date.trim()))
+        .unwrap_or_else(|| Local::now().date_naive());
+    let mut candidates = vision_response
+        .events
+        .iter()
+        .filter_map(|event| {
+            build_calendar_extract_candidate(
+                event,
+                &code_context,
+                selected_date,
+                &ignored_keywords,
+                input.ignore_all_day_events,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    apply_calendar_candidate_overlap_warnings(&mut candidates);
+    let ignored_candidate_count = candidates
+        .iter()
+        .filter(|candidate| candidate.is_ignored)
+        .count() as i64;
+
+    record_backend_event_with_state(
+        &state,
+        &correlation_id,
+        "command_success",
+        command,
+        "ok",
+        Some(duration_ms(started_at)),
+        None,
+        json!({
+          "candidateCount": candidates.len(),
+          "ignoredCandidateCount": ignored_candidate_count,
+          "model": selected_openai_model.api_name(),
+          "modelLabel": selected_openai_model.display_label(),
+          "llmDurationMs": llm_duration_ms,
+        }),
+    );
+
+    Ok(CalendarExtractResult {
+        correlation_id,
+        candidates,
+        ignored_candidate_count,
+        model_used: selected_openai_model,
+        model_used_label: selected_openai_model.display_label().to_string(),
+        llm_duration_ms,
+    })
+}
+
+#[tauri::command]
+pub fn calendar_import_entries(
+    state: State<'_, AppState>,
+    input: CalendarImportInput,
+) -> Result<CalendarImportResult, String> {
+    let command = "calendar_import_entries";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    record_backend_event_with_state(
+        &state,
+        &correlation_id,
+        "command_start",
+        command,
+        "ok",
+        None,
+        None,
+        json!({
+          "entryCount": input.entries.len(),
+          "clientTimestampIso": input.client_timestamp_iso,
+          "clientLocalDate": input.client_local_date,
+          "clientLocalTime": input.client_local_time,
+          "timezone": input.timezone,
+          "clientUtcOffsetMinutes": input.client_utc_offset_minutes,
+        }),
+    );
+
+    if input.entries.is_empty() {
+        let message = "no calendar entries selected for import";
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "message": message }),
+        );
+        return Err(format_command_error(&correlation_id, message));
+    }
+
+    let prepared_entries = input
+        .entries
+        .iter()
+        .map(validate_calendar_import_entry)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|message| {
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({ "stage": "validate_entries", "message": message }),
+            );
+            format_command_error(&correlation_id, message)
+        })?;
+
+    let parsed_timestamp = parse_client_timestamp(&input.client_timestamp_iso);
+    let interpreted_entries_json = serde_json::to_string(&prepared_entries)
+        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+    let confidence_average = prepared_entries
+        .iter()
+        .map(|entry| entry.confidence)
+        .sum::<f64>()
+        / prepared_entries.len() as f64;
+    let raw_message_id = Uuid::new_v4().to_string();
+    let raw_text = format!("Calendar bulk import ({} events)", prepared_entries.len());
+
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    let (saved_openai_model, invalid_saved_model) =
+        match read_saved_calendar_bulk_model(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "read_calendar_bulk_model_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
+
+    if let Some(invalid_value) = invalid_saved_model.as_deref() {
+        record_invalid_saved_calendar_bulk_model(&state, &correlation_id, command, invalid_value);
+    }
+
+    connection
+        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+    let write_result: Result<(Vec<String>, Vec<String>, Vec<Warning>), String> = (|| {
+        db::insert_raw_message(
+            &connection,
+            &raw_message_id,
+            &raw_text,
+            &interpreted_entries_json,
+            saved_openai_model.api_name(),
+            "calendar",
+            None,
+            None,
+            confidence_average,
+            parsed_timestamp.timestamp(),
+            prepared_entries.len() as i64,
+            prepared_entries.len() as i64,
+            prepared_entries.len() as i64,
+            0,
+            prepared_entries.len() > 1,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut created_entry_ids = Vec::<String>::new();
+        let mut warnings = Vec::<Warning>::new();
+        let mut touched_dates = HashSet::<String>::new();
+
+        for (index, entry) in prepared_entries.iter().enumerate() {
+            let normalized_entry = NormalizedEntry {
+                date: entry.date.clone(),
+                start_minute: entry.start_minute,
+                end_minute: entry.end_minute,
+                duration_minutes: entry.duration_minutes,
+                description: entry.description.clone(),
+                user_submission_text: entry.extracted_text.clone(),
+                confidence: entry.confidence,
+                engagement_ref: None,
+                activity_ref: None,
+            };
+            let entry_id = db::insert_timesheet_entry(
+                &connection,
+                &raw_message_id,
+                &normalized_entry,
+                entry.engagement_id.as_deref(),
+                entry.activity_id.as_deref(),
+                false,
+                false,
+                false,
+                None,
+                Some(index as i64 + 1),
+                Some(prepared_entries.len() as i64),
+                "calendar",
+            )
+            .map_err(|error| error.to_string())?;
+
+            touched_dates.insert(entry.date.clone());
+            created_entry_ids.push(entry_id.clone());
+
+            if entry.confidence < db::LOW_CONFIDENCE_THRESHOLD {
+                warnings.push(
+                    db::add_warning(
+                        &connection,
+                        &entry_id,
+                        WarningType::LowConfidence,
+                        Some(
+                            "Calendar extraction confidence is below review threshold".to_string(),
+                        ),
+                    )
+                    .map_err(|error| error.to_string())?,
+                );
+            }
+
+            if entry.engagement_id.is_none() || entry.activity_id.is_none() {
+                warnings.push(
+                    db::add_warning(
+                        &connection,
+                        &entry_id,
+                        WarningType::Unmatched,
+                        Some("Entry is uncategorized".to_string()),
+                    )
+                    .map_err(|error| error.to_string())?,
+                );
+            }
+        }
+
+        let mut touched_month_keys = touched_dates
+            .iter()
+            .filter_map(|date| month_key_from_iso_date(date))
+            .collect::<Vec<_>>();
+        touched_month_keys.sort();
+        touched_month_keys.dedup();
+
+        for date in &touched_dates {
+            let overlap_warnings = db::recompute_overlap_warnings(&connection, date)
+                .map_err(|error| error.to_string())?;
+            warnings.extend(overlap_warnings);
+        }
+
+        Ok((created_entry_ids, touched_month_keys, warnings))
+    })();
+
+    let (created_entry_ids, touched_month_keys, warnings) = match write_result {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({ "message": message }),
+            );
+            return Err(format_command_error(&correlation_id, message));
+        }
+    };
+
+    connection
+        .execute_batch("COMMIT")
+        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+    record_backend_event(
+        &connection,
+        state.inner(),
+        &correlation_id,
+        "command_success",
+        command,
+        "ok",
+        Some(duration_ms(started_at)),
+        None,
+        json!({
+          "rawMessageId": raw_message_id,
+          "createdEntryCount": created_entry_ids.len(),
+          "touchedMonthKeys": touched_month_keys,
+          "warningCount": warnings.len(),
+          "captureSource": "calendar",
+        }),
+    );
+
+    Ok(CalendarImportResult {
+        correlation_id,
+        raw_message_id,
+        created_entry_ids,
+        touched_month_keys,
+        warnings,
+    })
 }
 
 #[tauri::command]
@@ -4121,6 +4964,346 @@ pub fn diagnostics_copy_bundle(state: State<'_, AppState>) -> Result<Diagnostics
     })
 }
 
+fn normalize_image_base64(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("calendar image cannot be empty".to_string());
+    }
+
+    let base64 = trimmed
+        .split_once(',')
+        .filter(|(prefix, _)| prefix.trim_start().starts_with("data:"))
+        .map(|(_, payload)| payload)
+        .unwrap_or(trimmed)
+        .trim();
+
+    if base64.is_empty() {
+        return Err("calendar image data is empty".to_string());
+    }
+
+    BASE64_STANDARD
+        .decode(base64)
+        .map_err(|_| "calendar image data must be valid base64".to_string())?;
+
+    Ok(base64.to_string())
+}
+
+fn normalize_calendar_image_mime_type(value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "image/png" | "image/jpeg" | "image/jpg" | "image/webp" | "image/gif" => {
+            Ok(if normalized == "image/jpg" {
+                "image/jpeg".to_string()
+            } else {
+                normalized
+            })
+        }
+        _ => Err("calendar image must be PNG, JPEG, WEBP, or GIF".to_string()),
+    }
+}
+
+fn build_calendar_extract_candidate(
+    event: &CalendarVisionEvent,
+    code_context: &CodeContext,
+    selected_date: NaiveDate,
+    ignored_keywords: &[String],
+    ignore_all_day_events: bool,
+) -> Option<CalendarExtractCandidate> {
+    let title = event.title.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    let details = event.details.as_deref().map(str::trim).unwrap_or("");
+    let extracted_text = if details.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}\n{details}")
+    };
+    let (date, needs_date_confirmation) = resolve_calendar_event_date(event, selected_date);
+    let (start_minute, end_minute, duration_minutes, needs_time_confirmation) =
+        resolve_calendar_event_time(event);
+
+    let mut normalized_entry = NormalizedEntry {
+        date: date.clone(),
+        start_minute,
+        end_minute,
+        duration_minutes,
+        description: title.to_string(),
+        user_submission_text: extracted_text.clone(),
+        confidence: normalize_confidence(event.confidence),
+        engagement_ref: normalize_optional_ref(event.engagement_ref.clone()),
+        activity_ref: normalize_optional_ref(event.activity_ref.clone()),
+    };
+
+    let ref_resolution = reconcile_context_refs(&mut normalized_entry, code_context);
+    let activity_fallback =
+        apply_activity_fallback_if_needed(&mut normalized_entry, &extracted_text, code_context);
+    let global_activity_fallback = apply_global_activity_fallback_if_needed(
+        &mut normalized_entry,
+        &extracted_text,
+        code_context,
+    );
+
+    if ref_resolution.applied || activity_fallback.applied || global_activity_fallback.applied {
+        normalized_entry.confidence = normalized_entry
+            .confidence
+            .min(ACTIVITY_FALLBACK_CONFIDENCE_CAP);
+    }
+
+    let (engagement_id, activity_id) = resolve_ref_ids(&normalized_entry, code_context);
+    let (engagement_code, engagement_name, activity_code, activity_name) =
+        resolve_calendar_candidate_labels(&normalized_entry, code_context);
+    let (is_ignored, ignored_reason) = resolve_calendar_candidate_ignored_state(
+        &extracted_text,
+        event.is_all_day,
+        ignored_keywords,
+        ignore_all_day_events,
+    );
+
+    let mut warning_flags = Vec::<WarningType>::new();
+    if normalized_entry.confidence < db::LOW_CONFIDENCE_THRESHOLD {
+        warning_flags.push(WarningType::LowConfidence);
+    }
+    if engagement_id.is_none() || activity_id.is_none() {
+        warning_flags.push(WarningType::Unmatched);
+    }
+
+    Some(CalendarExtractCandidate {
+        id: Uuid::new_v4().to_string(),
+        date,
+        start_minute,
+        end_minute,
+        duration_minutes,
+        time_evidence: event
+            .time_evidence
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        description: normalized_entry.description,
+        extracted_text: extracted_text.clone(),
+        source_text: extracted_text,
+        confidence: normalized_entry.confidence,
+        engagement_id,
+        activity_id,
+        engagement_code,
+        engagement_name,
+        activity_code,
+        activity_name,
+        warning_flags,
+        is_all_day: event.is_all_day,
+        is_ignored,
+        ignored_reason,
+        needs_date_confirmation,
+        needs_time_confirmation,
+    })
+}
+
+fn resolve_calendar_event_date(
+    event: &CalendarVisionEvent,
+    selected_date: NaiveDate,
+) -> (String, bool) {
+    if let Some(date) = event
+        .date
+        .as_deref()
+        .and_then(|value| parse_date(value.trim()))
+    {
+        return (date.format("%Y-%m-%d").to_string(), false);
+    }
+
+    let selected_matches_day = event
+        .day_of_month
+        .is_some_and(|day| day == selected_date.day() as i64);
+    let selected_matches_weekday = event
+        .weekday
+        .as_deref()
+        .is_none_or(|weekday| weekday_matches_date(weekday, selected_date));
+
+    (
+        selected_date.format("%Y-%m-%d").to_string(),
+        !(selected_matches_day && selected_matches_weekday),
+    )
+}
+
+fn weekday_matches_date(value: &str, date: NaiveDate) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    let expected = match date.weekday().num_days_from_sunday() {
+        0 => ["sun", "sunday"].as_slice(),
+        1 => ["mon", "monday"].as_slice(),
+        2 => ["tue", "tues", "tuesday"].as_slice(),
+        3 => ["wed", "wednesday"].as_slice(),
+        4 => ["thu", "thur", "thurs", "thursday"].as_slice(),
+        5 => ["fri", "friday"].as_slice(),
+        _ => ["sat", "saturday"].as_slice(),
+    };
+
+    expected.iter().any(|candidate| normalized == *candidate)
+}
+
+fn resolve_calendar_event_time(event: &CalendarVisionEvent) -> (i64, i64, i64, bool) {
+    if event.is_all_day {
+        return (0, TIME_INCREMENT_MINUTES, TIME_INCREMENT_MINUTES, false);
+    }
+
+    let extracted_duration = event
+        .duration_minutes
+        .and_then(normalize_calendar_duration_minutes);
+    let parsed_start = event
+        .start_time
+        .as_deref()
+        .and_then(|value| parse_time_to_minutes(value.trim()));
+    let parsed_end = event
+        .end_time
+        .as_deref()
+        .and_then(|value| parse_time_to_minutes(value.trim()));
+
+    match (parsed_start, parsed_end) {
+        (Some(start), Some(end)) => {
+            let (start, end, duration) = normalize_snapped_update_window(start, end);
+            let needs_time_confirmation =
+                extracted_duration.is_some_and(|duration_minutes| duration_minutes != duration);
+            (start, end, duration, needs_time_confirmation)
+        }
+        (Some(start), None) => {
+            let inferred_duration = extracted_duration.unwrap_or(DEFAULT_FALLBACK_DURATION_MINUTES);
+            let (start, end, duration) =
+                normalize_snapped_update_window(start, start + inferred_duration);
+            let needs_time_confirmation = extracted_duration.is_none_or(|value| value != duration);
+            (start, end, duration, needs_time_confirmation)
+        }
+        (None, Some(end)) => {
+            let inferred_duration = extracted_duration.unwrap_or(DEFAULT_FALLBACK_DURATION_MINUTES);
+            let (start, end, duration) =
+                normalize_snapped_update_window(end - inferred_duration, end);
+            let needs_time_confirmation = extracted_duration.is_none_or(|value| value != duration);
+            (start, end, duration, needs_time_confirmation)
+        }
+        (None, None) => {
+            let inferred_duration = extracted_duration.unwrap_or(DEFAULT_FALLBACK_DURATION_MINUTES);
+            let (start, end, duration) =
+                normalize_snapped_update_window(9 * 60, 9 * 60 + inferred_duration);
+            (start, end, duration, true)
+        }
+    }
+}
+
+fn normalize_calendar_duration_minutes(value: i64) -> Option<i64> {
+    (value > 0).then(|| normalize_duration(value))
+}
+
+fn resolve_calendar_candidate_labels(
+    entry: &NormalizedEntry,
+    code_context: &CodeContext,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let engagement = entry
+        .engagement_ref
+        .as_deref()
+        .and_then(|engagement_ref| find_engagement_by_ref(code_context, engagement_ref));
+    let activity = engagement.and_then(|engagement| {
+        entry.activity_ref.as_deref().and_then(|activity_ref| {
+            engagement
+                .activities
+                .iter()
+                .find(|candidate| candidate.activity_ref.eq_ignore_ascii_case(activity_ref))
+        })
+    });
+
+    (
+        engagement.and_then(|value| value.code.clone()),
+        engagement.map(|value| value.name.clone()),
+        activity.and_then(|value| value.code.clone()),
+        activity.map(|value| value.name.clone()),
+    )
+}
+
+fn resolve_calendar_candidate_ignored_state(
+    text: &str,
+    is_all_day: bool,
+    ignored_keywords: &[String],
+    ignore_all_day_events: bool,
+) -> (bool, Option<String>) {
+    if is_all_day && ignore_all_day_events {
+        return (true, Some("All-day event".to_string()));
+    }
+
+    let normalized_text = text.to_lowercase();
+    if let Some(keyword) = ignored_keywords
+        .iter()
+        .find(|keyword| !keyword.is_empty() && normalized_text.contains(keyword.as_str()))
+    {
+        return (true, Some(format!("Matched ignored keyword: {keyword}")));
+    }
+
+    (false, None)
+}
+
+fn apply_calendar_candidate_overlap_warnings(candidates: &mut [CalendarExtractCandidate]) {
+    for index in 0..candidates.len() {
+        if candidates[index].is_ignored {
+            continue;
+        }
+
+        let overlaps = candidates.iter().enumerate().any(|(other_index, other)| {
+            index != other_index
+                && !other.is_ignored
+                && other.date == candidates[index].date
+                && other.start_minute < candidates[index].end_minute
+                && candidates[index].start_minute < other.end_minute
+        });
+
+        if overlaps
+            && !candidates[index]
+                .warning_flags
+                .iter()
+                .any(|warning| matches!(warning, WarningType::Overlap))
+        {
+            candidates[index].warning_flags.push(WarningType::Overlap);
+        }
+    }
+}
+
+fn validate_calendar_import_entry(
+    entry: &CalendarImportEntryInput,
+) -> Result<PreparedCalendarImportEntry, String> {
+    let date = entry.date.trim();
+    if parse_date(date).is_none() {
+        return Err("calendar import entry date must be YYYY-MM-DD".to_string());
+    }
+
+    let (start_minute, end_minute, duration_minutes) =
+        validate_manual_update_window(entry.start_minute, entry.end_minute)?;
+    let description = entry.description.trim();
+    if description.is_empty() {
+        return Err("calendar import entry description cannot be empty".to_string());
+    }
+
+    Ok(PreparedCalendarImportEntry {
+        date: date.to_string(),
+        start_minute,
+        end_minute,
+        duration_minutes,
+        description: description.to_string(),
+        extracted_text: entry.extracted_text.trim().to_string(),
+        engagement_id: entry
+            .engagement_id
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        activity_id: entry
+            .activity_id
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        confidence: normalize_confidence(Some(entry.confidence)),
+    })
+}
+
 fn parse_client_timestamp(timestamp: &str) -> DateTime<Local> {
     DateTime::parse_from_rfc3339(timestamp)
         .map(|value| value.with_timezone(&Local))
@@ -5341,8 +6524,9 @@ mod tests {
     use chrono::{Local, NaiveDate};
 
     use crate::models::{
-        Activity, CodeContext, ContextActivity, ContextEngagement, Engagement, KeySource, LlmEntry,
-        NormalizedEntry, OpenAiModelId, StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey,
+        Activity, CalendarImportEntryInput, CalendarVisionEvent, CaptureSourceId, CodeContext,
+        ContextActivity, ContextEngagement, Engagement, KeySource, LlmEntry, NormalizedEntry,
+        OpenAiModelId, StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey,
         SummaryLayoutPreset, SummaryLayoutState, TimelineWeeklySummary, TimelineWeeklySummaryCell,
         TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
         TranscriptionModelId,
@@ -5353,18 +6537,21 @@ mod tests {
         apply_activity_fallback_if_needed, apply_global_activity_fallback_if_needed,
         apply_multi_event_sequence_adjustments, build_export_metadata_maps,
         build_summary_export_hours_and_notes_sheet_columns,
-        build_summary_export_hours_sheet_columns, dedupe_prepared_entries,
+        build_summary_export_hours_sheet_columns, capture_source_label, dedupe_prepared_entries,
         default_summary_layout_state, derive_key_status_level, llm_attempt_event_status,
         message_has_contextual_day_or_date_cue, message_has_explicit_clock_time_cue,
         message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
-        normalize_confidence, normalize_llm_entry, normalize_snapped_update_window,
-        normalize_summary_layout_preset_for_export, normalize_summary_layout_state,
-        reconcile_context_refs, resolve_requested_openai_model, resolve_saved_openai_model_value,
+        normalize_calendar_bulk_ignored_keywords, normalize_confidence, normalize_llm_entry,
+        normalize_snapped_update_window, normalize_summary_layout_preset_for_export,
+        normalize_summary_layout_state, reconcile_context_refs,
+        resolve_calendar_candidate_ignored_state, resolve_calendar_event_date,
+        resolve_calendar_event_time, resolve_requested_openai_model,
+        resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
         round_to_nearest_15, summary_day_notes_header, timeline_week_bounds,
-        timeline_week_view_bounds, validate_manual_update_window, PreparedEntry,
-        SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType, TemporalReference,
-        MINUTES_IN_DAY,
+        timeline_week_view_bounds, validate_calendar_import_entry, validate_manual_update_window,
+        PreparedEntry, SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType,
+        TemporalReference, MINUTES_IN_DAY,
     };
 
     fn prepared_entry_for_test(
@@ -5389,6 +6576,161 @@ mod tests {
             duration_defaulted: false,
             fallback_summary: None,
         }
+    }
+
+    fn calendar_event_for_test() -> CalendarVisionEvent {
+        CalendarVisionEvent {
+            title: "Client planning".to_string(),
+            details: None,
+            date: None,
+            weekday: None,
+            day_of_month: None,
+            start_time: Some("09:00".to_string()),
+            end_time: Some("10:00".to_string()),
+            duration_minutes: Some(60),
+            time_evidence: None,
+            is_all_day: false,
+            engagement_ref: None,
+            activity_ref: None,
+            confidence: Some(0.9),
+            visual_notes: None,
+        }
+    }
+
+    #[test]
+    fn calendar_ignored_keywords_normalize_case_split_and_dedupe() {
+        let values = vec![
+            " Lunch ; Personal ".to_string(),
+            "lunch\nFocus".to_string(),
+            "  ".to_string(),
+        ];
+
+        let normalized = normalize_calendar_bulk_ignored_keywords(&values);
+
+        assert_eq!(normalized, vec!["lunch", "personal", "focus"]);
+    }
+
+    #[test]
+    fn calendar_ignore_matching_uses_case_insensitive_substrings_and_all_day_flag() {
+        let keywords = vec!["lunch".to_string()];
+
+        let (is_ignored, reason) = resolve_calendar_candidate_ignored_state(
+            "Client Lunch and prep",
+            false,
+            &keywords,
+            true,
+        );
+        assert!(is_ignored);
+        assert_eq!(reason.as_deref(), Some("Matched ignored keyword: lunch"));
+
+        let (is_ignored, reason) = resolve_calendar_candidate_ignored_state("OOO", true, &[], true);
+        assert!(is_ignored);
+        assert_eq!(reason.as_deref(), Some("All-day event"));
+
+        let (is_ignored, reason) =
+            resolve_calendar_candidate_ignored_state("OOO", true, &[], false);
+        assert!(!is_ignored);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn calendar_ambiguous_date_uses_selected_date_only_when_day_matches() {
+        let selected_date = NaiveDate::from_ymd_opt(2026, 5, 12).expect("valid selected date");
+        let mut event = calendar_event_for_test();
+        event.weekday = Some("Tuesday".to_string());
+        event.day_of_month = Some(12);
+
+        let (date, needs_confirmation) = resolve_calendar_event_date(&event, selected_date);
+        assert_eq!(date, "2026-05-12");
+        assert!(!needs_confirmation);
+
+        event.weekday = Some("Wednesday".to_string());
+        let (date, needs_confirmation) = resolve_calendar_event_date(&event, selected_date);
+        assert_eq!(date, "2026-05-12");
+        assert!(needs_confirmation);
+    }
+
+    #[test]
+    fn calendar_time_resolution_uses_visual_duration_for_short_blocks() {
+        let mut event = calendar_event_for_test();
+        event.start_time = Some("16:00".to_string());
+        event.end_time = None;
+        event.duration_minutes = Some(30);
+
+        let (start, end, duration, needs_confirmation) = resolve_calendar_event_time(&event);
+
+        assert_eq!(start, 16 * 60);
+        assert_eq!(end, 16 * 60 + 30);
+        assert_eq!(duration, 30);
+        assert!(!needs_confirmation);
+    }
+
+    #[test]
+    fn calendar_time_resolution_flags_conflicting_duration_evidence() {
+        let mut event = calendar_event_for_test();
+        event.start_time = Some("16:00".to_string());
+        event.end_time = Some("17:00".to_string());
+        event.duration_minutes = Some(30);
+
+        let (start, end, duration, needs_confirmation) = resolve_calendar_event_time(&event);
+
+        assert_eq!(start, 16 * 60);
+        assert_eq!(end, 17 * 60);
+        assert_eq!(duration, 60);
+        assert!(needs_confirmation);
+    }
+
+    #[test]
+    fn calendar_time_resolution_keeps_consistent_duration_evidence_ready() {
+        let mut event = calendar_event_for_test();
+        event.start_time = Some("16:00".to_string());
+        event.end_time = Some("16:30".to_string());
+        event.duration_minutes = Some(30);
+
+        let (start, end, duration, needs_confirmation) = resolve_calendar_event_time(&event);
+
+        assert_eq!(start, 16 * 60);
+        assert_eq!(end, 16 * 60 + 30);
+        assert_eq!(duration, 30);
+        assert!(!needs_confirmation);
+    }
+
+    #[test]
+    fn calendar_source_serializes_as_calendar() {
+        assert_eq!(capture_source_label(CaptureSourceId::Calendar), "calendar");
+        assert_eq!(
+            serde_json::to_string(&CaptureSourceId::Calendar).expect("serializes"),
+            "\"calendar\"",
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureSourceId>("\"calendar\"").expect("deserializes"),
+            CaptureSourceId::Calendar,
+        );
+    }
+
+    #[test]
+    fn calendar_import_entry_validation_trims_values_and_rejects_empty_descriptions() {
+        let entry = CalendarImportEntryInput {
+            date: "2026-05-12".to_string(),
+            start_minute: 9 * 60,
+            end_minute: 10 * 60,
+            description: "  Client planning  ".to_string(),
+            extracted_text: "  Client planning from Outlook  ".to_string(),
+            engagement_id: None,
+            activity_id: None,
+            confidence: 0.88,
+        };
+
+        let prepared = validate_calendar_import_entry(&entry).expect("valid entry");
+        assert_eq!(prepared.description, "Client planning");
+        assert_eq!(prepared.extracted_text, "Client planning from Outlook");
+        assert_eq!(prepared.duration_minutes, 60);
+
+        let invalid = CalendarImportEntryInput {
+            description: "   ".to_string(),
+            ..entry
+        };
+        assert!(validate_calendar_import_entry(&invalid).is_err());
     }
 
     #[test]
@@ -5498,6 +6840,23 @@ mod tests {
             resolve_saved_openai_model_value(Some("legacy-model".to_string()));
         assert_eq!(invalid_model, OpenAiModelId::Gpt5Nano);
         assert_eq!(invalid_value.as_deref(), Some("legacy-model"));
+    }
+
+    #[test]
+    fn saved_calendar_bulk_model_defaults_to_gpt54_when_missing_or_invalid() {
+        let (missing_model, missing_invalid_value) = resolve_saved_calendar_bulk_model_value(None);
+        assert_eq!(missing_model, OpenAiModelId::Gpt54);
+        assert!(missing_invalid_value.is_none());
+
+        let (saved_model, saved_invalid_value) =
+            resolve_saved_calendar_bulk_model_value(Some("gpt-4.1-nano".to_string()));
+        assert_eq!(saved_model, OpenAiModelId::Gpt41Nano);
+        assert!(saved_invalid_value.is_none());
+
+        let (invalid_model, invalid_value) =
+            resolve_saved_calendar_bulk_model_value(Some("legacy-calendar-model".to_string()));
+        assert_eq!(invalid_model, OpenAiModelId::Gpt54);
+        assert_eq!(invalid_value.as_deref(), Some("legacy-calendar-model"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
+  ClipboardEvent as ReactClipboardEvent,
   CSSProperties,
   FormEvent,
   MouseEvent as ReactMouseEvent,
@@ -11,6 +12,8 @@ import { listen } from '@tauri-apps/api/event'
 import {
   activityDelete,
   activityUpsert,
+  calendarExtractEvents,
+  calendarImportEntries,
   diagnosticsCopyBundle,
   diagnosticsRecordFrontendEvent,
   diagnosticsList,
@@ -20,6 +23,8 @@ import {
   interpretTextMessage,
   isAppCommandError,
   settingsGetStatus,
+  settingsSetCalendarBulkModel,
+  settingsSetCalendarBulkPreferences,
   settingsSetOpenAiKey,
   settingsSetOpenAiModel,
   settingsSetTimelinePreferences,
@@ -59,6 +64,7 @@ import {
 } from './lib/time'
 import type {
   Activity,
+  CalendarExtractCandidate,
   CaptureSourceId,
   DiagnosticsEvent,
   Engagement,
@@ -79,6 +85,7 @@ import type {
 } from './lib/types'
 import deleteIcon from './assets/icons/delete.svg'
 import editIcon from './assets/icons/edit.svg'
+import calendarIcon from './assets/icons/calendar.svg'
 import microphoneIcon from './assets/icons/microphone.svg'
 import './App.css'
 
@@ -165,6 +172,13 @@ interface EntryDraft {
   startTime: string
   endTime: string
   preserveEndOfDay: boolean
+}
+
+type CalendarBulkTab = 'submission' | 'review'
+type CalendarCandidateReviewState = 'pending' | 'accepted' | 'rejected' | 'ignored'
+
+interface CalendarReviewCandidate extends CalendarExtractCandidate {
+  reviewState: CalendarCandidateReviewState
 }
 
 interface TimelineWindow {
@@ -420,7 +434,9 @@ const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
 const END_OF_DAY_INPUT_SENTINEL = '23:59'
 const MAX_CONCURRENT_SUBMISSIONS = 5
 const MAX_FINISHED_QUEUE_HISTORY = 10
+const CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD = 0.75
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5-nano'
+const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-5.4'
 const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-4o-mini-transcribe'
 const MAX_VOICE_RECORDING_DURATION_MS = 120_000
 const PREFERRED_VOICE_MIME_TYPES = [
@@ -614,6 +630,8 @@ function App() {
   const [openAiKey, setOpenAiKey] = useState('')
   const [selectedOpenAiModelDraft, setSelectedOpenAiModelDraft] =
     useState<OpenAiModelId>(DEFAULT_OPENAI_MODEL)
+  const [selectedCalendarBulkModelDraft, setSelectedCalendarBulkModelDraft] =
+    useState<OpenAiModelId>(DEFAULT_CALENDAR_BULK_MODEL)
   const [selectedTranscriptionModelDraft, setSelectedTranscriptionModelDraft] =
     useState<TranscriptionModelId>(DEFAULT_TRANSCRIPTION_MODEL)
 
@@ -631,6 +649,17 @@ function App() {
   const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
   const [isSubmissionQueueOpen, setIsSubmissionQueueOpen] = useState(false)
+  const [isCalendarBulkModalOpen, setIsCalendarBulkModalOpen] = useState(false)
+  const [calendarBulkTab, setCalendarBulkTab] = useState<CalendarBulkTab>('submission')
+  const [calendarSelectedFileName, setCalendarSelectedFileName] = useState<string | null>(null)
+  const [calendarImagePreviewUrl, setCalendarImagePreviewUrl] = useState<string | null>(null)
+  const [calendarUploadStatusMessage, setCalendarUploadStatusMessage] = useState<string | null>(null)
+  const [calendarUploadErrorMessage, setCalendarUploadErrorMessage] = useState<string | null>(null)
+  const [calendarIsExtracting, setCalendarIsExtracting] = useState(false)
+  const [calendarIsImporting, setCalendarIsImporting] = useState(false)
+  const [calendarReviewCandidates, setCalendarReviewCandidates] = useState<CalendarReviewCandidate[]>([])
+  const [selectedCalendarCandidateId, setSelectedCalendarCandidateId] = useState<string | null>(null)
+  const [calendarIgnoredKeywordDraft, setCalendarIgnoredKeywordDraft] = useState('lunch')
 
   const [selectedDate, setSelectedDate] = useState(todayDate)
   const [visibleMonth, setVisibleMonth] = useState(() => monthKeyFromDate(todayDate))
@@ -656,6 +685,8 @@ function App() {
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
   const weekTimelineGridRef = useRef<HTMLDivElement | null>(null)
   const timelineContextMenuRef = useRef<HTMLDivElement | null>(null)
+  const calendarFileInputRef = useRef<HTMLInputElement | null>(null)
+  const calendarDropZoneRef = useRef<HTMLDivElement | null>(null)
   const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
@@ -1142,6 +1173,67 @@ function App() {
     return values
   }, [engagements])
 
+  const calendarVisibleCandidates = useMemo(
+    () => calendarReviewCandidates.filter((candidate) => candidate.reviewState === 'pending'),
+    [calendarReviewCandidates],
+  )
+  const calendarAcceptedCandidates = useMemo(
+    () => calendarReviewCandidates.filter((candidate) => candidate.reviewState === 'accepted'),
+    [calendarReviewCandidates],
+  )
+  const calendarIgnoredCandidates = useMemo(
+    () =>
+      calendarReviewCandidates.filter((candidate) =>
+        candidate.reviewState === 'ignored' || candidate.reviewState === 'rejected',
+      ),
+    [calendarReviewCandidates],
+  )
+  const selectedCalendarCandidate = useMemo(
+    () =>
+      calendarVisibleCandidates.find((candidate) => candidate.id === selectedCalendarCandidateId)
+      ?? calendarVisibleCandidates[0]
+      ?? null,
+    [calendarVisibleCandidates, selectedCalendarCandidateId],
+  )
+  const selectedCalendarCandidateIndex = useMemo(
+    () =>
+      selectedCalendarCandidate
+        ? calendarVisibleCandidates.findIndex((candidate) => candidate.id === selectedCalendarCandidate.id)
+        : -1,
+    [calendarVisibleCandidates, selectedCalendarCandidate],
+  )
+  const calendarSelectedDate = selectedCalendarCandidate?.date ?? selectedDate
+  const calendarCandidatesForSelectedDate = useMemo(
+    () =>
+      calendarVisibleCandidates.filter((candidate) => candidate.date === calendarSelectedDate),
+    [calendarSelectedDate, calendarVisibleCandidates],
+  )
+  const calendarReviewTimelineEntries = useMemo(
+    () => calendarCandidatesForSelectedDate.map((candidate) =>
+      calendarCandidateToTimelineEntry(candidate),
+    ),
+    [calendarCandidatesForSelectedDate],
+  )
+  const positionedCalendarReviewEntries = useMemo(
+    () => positionTimelineEntries(calendarReviewTimelineEntries, timelineWindow),
+    [calendarReviewTimelineEntries, timelineWindow],
+  )
+  const selectedCalendarCandidateActivities = useMemo(() => {
+    if (!selectedCalendarCandidate?.engagementId) {
+      return [] as Activity[]
+    }
+
+    return engagements.find(
+      (engagement) => engagement.id === selectedCalendarCandidate.engagementId,
+    )?.activities ?? []
+  }, [engagements, selectedCalendarCandidate])
+  const selectedCalendarCandidateHasBlockingIssue =
+    selectedCalendarCandidate
+      ? selectedCalendarCandidate.needsDateConfirmation
+        || selectedCalendarCandidate.needsTimeConfirmation
+        || selectedCalendarCandidate.description.trim().length === 0
+      : false
+
   const selectedActivityEngagement = useMemo(
     () => engagements.find((engagement) => engagement.id === activityForm.engagementId) ?? null,
     [activityForm.engagementId, engagements],
@@ -1321,7 +1413,9 @@ function App() {
     const status = await settingsGetStatus()
     setSettingsStatus(status)
     setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+    setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
     setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
+    setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
   }, [])
 
   const loadSummaryLayoutState = useCallback(async () => {
@@ -1510,6 +1604,12 @@ function App() {
       }
     })()
   }, [loadTimeline, selectedDate, tauriRuntime])
+
+  useEffect(() => () => {
+    if (calendarImagePreviewUrl) {
+      URL.revokeObjectURL(calendarImagePreviewUrl)
+    }
+  }, [calendarImagePreviewUrl])
 
   useEffect(() => {
     if (!tauriRuntime) {
@@ -2777,6 +2877,301 @@ function App() {
     }
   }, [processSubmissionQueueItem, submissionQueue])
 
+  const openCalendarBulkModal = () => {
+    setIsCalendarBulkModalOpen(true)
+    setCalendarBulkTab(calendarVisibleCandidates.length > 0 ? 'review' : 'submission')
+    setCalendarUploadErrorMessage(null)
+    setCalendarUploadStatusMessage(null)
+  }
+
+  const resetCalendarBulkModal = useCallback(() => {
+    if (calendarImagePreviewUrl) {
+      URL.revokeObjectURL(calendarImagePreviewUrl)
+    }
+    setIsCalendarBulkModalOpen(false)
+    setCalendarBulkTab('submission')
+    setCalendarSelectedFileName(null)
+    setCalendarImagePreviewUrl(null)
+    setCalendarUploadStatusMessage(null)
+    setCalendarUploadErrorMessage(null)
+    setCalendarIsExtracting(false)
+    setCalendarIsImporting(false)
+    setCalendarReviewCandidates([])
+    setSelectedCalendarCandidateId(null)
+  }, [calendarImagePreviewUrl])
+
+  useEffect(() => {
+    if (!isCalendarBulkModalOpen) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        resetCalendarBulkModal()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isCalendarBulkModalOpen, resetCalendarBulkModal])
+
+  const updateCalendarCandidate = (
+    id: string,
+    updater: (candidate: CalendarReviewCandidate) => CalendarReviewCandidate,
+  ) => {
+    setCalendarReviewCandidates((previous) =>
+      previous.map((candidate) => (candidate.id === id ? updater(candidate) : candidate)),
+    )
+  }
+
+  const handleCalendarImageFile = async (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      setCalendarUploadErrorMessage('Choose an image file for calendar bulk add.')
+      return
+    }
+
+    try {
+      setCalendarIsExtracting(true)
+      setCalendarUploadErrorMessage(null)
+      setCalendarUploadStatusMessage('Reading calendar screenshot...')
+      const imageBase64 = await blobToBase64(file)
+      const previewUrl = URL.createObjectURL(file)
+      if (calendarImagePreviewUrl) {
+        URL.revokeObjectURL(calendarImagePreviewUrl)
+      }
+      setCalendarImagePreviewUrl(previewUrl)
+      setCalendarSelectedFileName(file.name)
+
+      const submittedAt = new Date()
+      setCalendarUploadStatusMessage('Extracting events from screenshot...')
+      const result = await calendarExtractEvents({
+        imageBase64,
+        mimeType: file.type || 'image/png',
+        clientTimestampIso: submittedAt.toISOString(),
+        clientLocalDate: formatDate(submittedAt),
+        clientLocalTime: formatLocalTime(submittedAt),
+        clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        selectedDate,
+        openAiModel: settingsStatus?.selectedCalendarBulkModel ?? DEFAULT_CALENDAR_BULK_MODEL,
+        ignoredKeywords: parseCalendarIgnoredKeywordDraft(calendarIgnoredKeywordDraft),
+        ignoreAllDayEvents: settingsStatus?.calendarBulkIgnoreAllDayEvents ?? true,
+      })
+      const nextCandidates = result.candidates.map((candidate): CalendarReviewCandidate => ({
+        ...candidate,
+        reviewState: candidate.isIgnored ? 'ignored' : 'pending',
+      }))
+      const firstVisibleCandidate = nextCandidates.find((candidate) => candidate.reviewState !== 'ignored')
+      setCalendarReviewCandidates(nextCandidates)
+      setSelectedCalendarCandidateId(firstVisibleCandidate?.id ?? null)
+      setCalendarBulkTab('review')
+      setCalendarUploadStatusMessage(
+        `Found ${nextCandidates.length - result.ignoredCandidateCount} review event${
+          nextCandidates.length - result.ignoredCandidateCount === 1 ? '' : 's'
+        } using ${result.modelUsedLabel}.`,
+      )
+    } catch (error) {
+      setCalendarUploadErrorMessage(extractErrorMessage(error))
+    } finally {
+      setCalendarIsExtracting(false)
+    }
+  }
+
+  const handleCalendarFileList = (files: FileList | File[]) => {
+    const [file] = Array.from(files)
+    if (!file) {
+      return
+    }
+
+    void handleCalendarImageFile(file)
+  }
+
+  const onCalendarPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
+    const imageItem = Array.from(event.clipboardData.items).find((item) =>
+      item.type.startsWith('image/'),
+    )
+    const file = imageItem?.getAsFile()
+    if (!file) {
+      setCalendarUploadStatusMessage('No image found in the clipboard.')
+      return
+    }
+
+    event.preventDefault()
+    void handleCalendarImageFile(file)
+  }
+
+  const onReadCalendarImageFromClipboard = async () => {
+    const clipboard = navigator.clipboard as Clipboard & {
+      read?: () => Promise<ClipboardItem[]>
+    }
+
+    if (!clipboard?.read) {
+      calendarDropZoneRef.current?.focus()
+      setCalendarUploadStatusMessage('Focus is ready. Press Ctrl+V to paste a screenshot.')
+      return
+    }
+
+    try {
+      const items = await clipboard.read()
+      for (const item of items) {
+        const imageType = item.types.find((type) => type.startsWith('image/'))
+        if (!imageType) {
+          continue
+        }
+
+        const blob = await item.getType(imageType)
+        const file = new File([blob], 'calendar-screenshot.png', { type: imageType })
+        await handleCalendarImageFile(file)
+        return
+      }
+
+      setCalendarUploadStatusMessage('No image found in the clipboard.')
+    } catch (error) {
+      calendarDropZoneRef.current?.focus()
+      setCalendarUploadStatusMessage(
+        `Clipboard image access was unavailable. Press Ctrl+V in the upload area. ${extractErrorMessage(error)}`,
+      )
+    }
+  }
+
+  const onCalendarCandidateEngagementChange = (candidateId: string, engagementId: string) => {
+    const engagement = engagements.find((candidate) => candidate.id === engagementId) ?? null
+    updateCalendarCandidate(candidateId, (candidate) => {
+      const nextCandidate = {
+        ...candidate,
+        engagementId: engagement?.id ?? null,
+        engagementCode: engagement?.code ?? null,
+        engagementName: engagement?.name ?? null,
+        activityId: null,
+        activityCode: null,
+        activityName: null,
+      }
+      return {
+        ...nextCandidate,
+        warningFlags: refreshCalendarCandidateWarnings(nextCandidate),
+      }
+    })
+  }
+
+  const onCalendarCandidateActivityChange = (candidateId: string, activityId: string) => {
+    const currentCandidate = calendarReviewCandidates.find((candidate) => candidate.id === candidateId)
+    const engagement = engagements.find(
+      (candidate) => candidate.id === currentCandidate?.engagementId,
+    ) ?? null
+    const activity = engagement?.activities.find((candidate) => candidate.id === activityId) ?? null
+    updateCalendarCandidate(candidateId, (candidate) => {
+      const nextCandidate = {
+        ...candidate,
+        activityId: activity?.id ?? null,
+        activityCode: activity?.code ?? null,
+        activityName: activity?.name ?? null,
+      }
+      return {
+        ...nextCandidate,
+        warningFlags: refreshCalendarCandidateWarnings(nextCandidate),
+      }
+    })
+  }
+
+  const onSelectAdjacentCalendarCandidate = (direction: -1 | 1) => {
+    if (calendarVisibleCandidates.length === 0 || selectedCalendarCandidateIndex < 0) {
+      return
+    }
+
+    const nextIndex = Math.min(
+      calendarVisibleCandidates.length - 1,
+      Math.max(0, selectedCalendarCandidateIndex + direction),
+    )
+    setSelectedCalendarCandidateId(calendarVisibleCandidates[nextIndex]?.id ?? null)
+  }
+
+  const resolveNextCalendarCandidateId = (currentCandidateId: string) => {
+    const currentIndex = calendarVisibleCandidates.findIndex(
+      (candidate) => candidate.id === currentCandidateId,
+    )
+    if (currentIndex < 0) {
+      return calendarVisibleCandidates[0]?.id ?? null
+    }
+
+    return (
+      calendarVisibleCandidates[currentIndex + 1]?.id
+      ?? calendarVisibleCandidates[currentIndex - 1]?.id
+      ?? null
+    )
+  }
+
+  const onSaveSelectedCalendarCandidate = () => {
+    if (!selectedCalendarCandidate || selectedCalendarCandidateHasBlockingIssue || calendarIsImporting) {
+      return
+    }
+
+    const candidateToSave = selectedCalendarCandidate
+    const nextCandidateId = resolveNextCalendarCandidateId(candidateToSave.id)
+
+    void runAction(async () => {
+      setCalendarIsImporting(true)
+      setCalendarUploadErrorMessage(null)
+      const submittedAt = new Date()
+      const result = await calendarImportEntries({
+        clientTimestampIso: submittedAt.toISOString(),
+        clientLocalDate: formatDate(submittedAt),
+        clientLocalTime: formatLocalTime(submittedAt),
+        clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        entries: [
+          {
+            date: candidateToSave.date,
+            startMinute: candidateToSave.startMinute,
+            endMinute: candidateToSave.endMinute,
+            description: candidateToSave.description,
+            extractedText:
+              candidateToSave.extractedText
+              || candidateToSave.sourceText
+              || candidateToSave.description,
+            engagementId: candidateToSave.engagementId,
+            activityId: candidateToSave.activityId,
+            confidence: candidateToSave.confidence,
+          },
+        ],
+      })
+
+      invalidateMonthSummaries(result.touchedMonthKeys)
+      await Promise.all([
+        loadTimeline(selectedDateRef.current),
+        loadWeekTimeline(selectedDateRef.current),
+        loadWeeklySummary(selectedDateRef.current),
+      ])
+      setCalendarReviewCandidates((previous) =>
+        previous.map((candidate) =>
+          candidate.id === candidateToSave.id
+            ? { ...candidate, reviewState: 'accepted' }
+            : candidate,
+        ),
+      )
+      setSelectedCalendarCandidateId(nextCandidateId)
+      setCalendarUploadStatusMessage('Saved calendar event to the timeline.')
+    }).finally(() => {
+      setCalendarIsImporting(false)
+    })
+  }
+
+  const onDeleteSelectedCalendarCandidate = () => {
+    if (!selectedCalendarCandidate || calendarIsImporting) {
+      return
+    }
+
+    const candidateToDelete = selectedCalendarCandidate
+    const nextCandidateId = resolveNextCalendarCandidateId(candidateToDelete.id)
+    updateCalendarCandidate(candidateToDelete.id, (candidate) => ({
+      ...candidate,
+      reviewState: 'rejected',
+    }))
+    setSelectedCalendarCandidateId(nextCandidateId)
+    setCalendarUploadStatusMessage('Deleted staged calendar event.')
+  }
+
   const onSubmitCapture = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (voiceCaptureState === 'recording') {
@@ -3343,6 +3738,9 @@ function App() {
       setOpenAiKey('')
       const status = await settingsGetStatus()
       setSettingsStatus(status)
+      setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+      setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
 
       if (!status.hasOpenAiKey) {
         throw new Error(
@@ -3368,7 +3766,20 @@ function App() {
       const status = await settingsGetStatus()
       setSettingsStatus(status)
       setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
       setSuccessMessage('Interpretation model preference saved.')
+    })
+  }
+
+  const onSaveCalendarBulkModel = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    void runAction(async () => {
+      await settingsSetCalendarBulkModel(selectedCalendarBulkModelDraft)
+      const status = await settingsGetStatus()
+      setSettingsStatus(status)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+      setSuccessMessage('Calendar bulk add model preference saved.')
     })
   }
 
@@ -3379,6 +3790,7 @@ function App() {
       await settingsSetTranscriptionModel(selectedTranscriptionModelDraft)
       const status = await settingsGetStatus()
       setSettingsStatus(status)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
       setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
       setSuccessMessage('Speech-to-text model preference saved.')
     })
@@ -3408,8 +3820,57 @@ function App() {
         const status = await settingsGetStatus()
         setSettingsStatus(status)
         setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+        setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
         setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
         setSuccessMessage('Timeline preferences saved.')
+      } catch (error) {
+        setSettingsStatus(previousStatus)
+        throw error
+      }
+    })
+  }
+
+  const onSaveCalendarBulkPreferences = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    void runAction(async () => {
+      const calendarBulkIgnoredKeywords = parseCalendarIgnoredKeywordDraft(calendarIgnoredKeywordDraft)
+      await settingsSetCalendarBulkPreferences({
+        calendarBulkIgnoredKeywords,
+        calendarBulkIgnoreAllDayEvents: settingsStatus?.calendarBulkIgnoreAllDayEvents ?? true,
+      })
+      const status = await settingsGetStatus()
+      setSettingsStatus(status)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+      setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
+      setSuccessMessage('Calendar bulk add preferences saved.')
+    })
+  }
+
+  const onSaveCalendarIgnoreAllDayPreference = (calendarBulkIgnoreAllDayEvents: boolean) => {
+    const previousStatus = settingsStatus
+    if (!previousStatus) {
+      return
+    }
+
+    const calendarBulkIgnoredKeywords = parseCalendarIgnoredKeywordDraft(calendarIgnoredKeywordDraft)
+    setSettingsStatus({
+      ...previousStatus,
+      calendarBulkIgnoredKeywords,
+      calendarBulkIgnoreAllDayEvents,
+    })
+
+    void runAction(async () => {
+      try {
+        await settingsSetCalendarBulkPreferences({
+          calendarBulkIgnoredKeywords,
+          calendarBulkIgnoreAllDayEvents,
+        })
+        const status = await settingsGetStatus()
+        setSettingsStatus(status)
+        setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+        setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
+        setSuccessMessage('Calendar bulk add preferences saved.')
       } catch (error) {
         setSettingsStatus(previousStatus)
         throw error
@@ -4017,6 +4478,519 @@ function App() {
     </aside>
   )
 
+  const calendarBulkModal = isCalendarBulkModalOpen ? createPortal(
+    <div
+      className="calendar-bulk-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !calendarIsExtracting && !calendarIsImporting) {
+          resetCalendarBulkModal()
+        }
+      }}
+    >
+      <section
+        className="calendar-bulk-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="calendar-bulk-title"
+      >
+        <header className="calendar-bulk-header">
+          <div>
+            <h3 id="calendar-bulk-title">Calendar Bulk Add</h3>
+            <p>
+              Stage calendar screenshots as reviewable time entries before importing them.
+            </p>
+          </div>
+          <div className="calendar-bulk-header-actions">
+            <p className="calendar-bulk-counter" aria-live="polite">
+              {calendarVisibleCandidates.length} reviewable
+              {' '}| {calendarAcceptedCandidates.length} accepted
+              {' '}| {calendarIgnoredCandidates.length} ignored
+            </p>
+            <button
+              type="button"
+              className="timeline-editor-close"
+              aria-label="Close calendar bulk add"
+              title="Close"
+              onClick={resetCalendarBulkModal}
+              disabled={calendarIsExtracting || calendarIsImporting}
+            >
+              <span className="control-icon close-icon" aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+
+        <div className="calendar-bulk-top-row">
+          <div className="segmented-control calendar-bulk-tabs" role="tablist" aria-label="Calendar bulk workflows">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={calendarBulkTab === 'submission'}
+              className={calendarBulkTab === 'submission' ? 'active' : ''}
+              onClick={() => setCalendarBulkTab('submission')}
+            >
+              Calendar Submission
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={calendarBulkTab === 'review'}
+              className={calendarBulkTab === 'review' ? 'active' : ''}
+              onClick={() => setCalendarBulkTab('review')}
+            >
+              Review Events
+            </button>
+          </div>
+
+          {calendarBulkTab === 'review' ? (
+            <div className="calendar-review-toolbar">
+              <div className="calendar-review-context">
+                <strong>
+                  {calendarSelectedDate
+                    ? formatTimelineHeaderDate(calendarSelectedDate).monthDay
+                    : 'No event selected'}
+                </strong>
+                <span>
+                  {selectedCalendarCandidate
+                    ? `${minuteToLabel(selectedCalendarCandidate.startMinute)} - ${minuteToLabel(selectedCalendarCandidate.endMinute)}`
+                    : 'Upload a screenshot to review events'}
+                </span>
+              </div>
+              <div className="calendar-review-stepper">
+                <button
+                  type="button"
+                  className="timeline-arrow-button stepper-button"
+                  aria-label="Previous calendar event"
+                  title="Previous"
+                  onClick={() => onSelectAdjacentCalendarCandidate(-1)}
+                  disabled={selectedCalendarCandidateIndex <= 0}
+                >
+                  <span className="control-icon chevron-left" aria-hidden="true" />
+                </button>
+                <span>
+                  {selectedCalendarCandidateIndex >= 0
+                    ? `Event ${selectedCalendarCandidateIndex + 1} of ${calendarVisibleCandidates.length}`
+                    : 'Event 0 of 0'}
+                </span>
+                <button
+                  type="button"
+                  className="timeline-arrow-button stepper-button"
+                  aria-label="Next calendar event"
+                  title="Next"
+                  onClick={() => onSelectAdjacentCalendarCandidate(1)}
+                  disabled={
+                    selectedCalendarCandidateIndex < 0
+                    || selectedCalendarCandidateIndex >= calendarVisibleCandidates.length - 1
+                  }
+                >
+                  <span className="control-icon chevron-right" aria-hidden="true" />
+                </button>
+              </div>
+              <div className="calendar-review-actions">
+                <button
+                  type="button"
+                  className="button-soft-primary"
+                  onClick={onSaveSelectedCalendarCandidate}
+                  disabled={
+                    !selectedCalendarCandidate
+                    || selectedCalendarCandidateHasBlockingIssue
+                    || calendarIsImporting
+                  }
+                >
+                  <span className="control-icon save-icon" aria-hidden="true" />
+                  {calendarIsImporting ? 'Saving...' : 'Save'}
+                </button>
+                <button
+                  type="button"
+                  className="button-soft-danger"
+                  onClick={onDeleteSelectedCalendarCandidate}
+                  disabled={!selectedCalendarCandidate || calendarIsImporting}
+                >
+                  <span className="control-icon trash-icon" aria-hidden="true" />
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {calendarBulkTab === 'submission' ? (
+          <div className="calendar-submission-layout">
+            <input
+              ref={calendarFileInputRef}
+              type="file"
+              accept="image/*"
+              className="calendar-file-input"
+              onChange={(event) => {
+                if (event.target.files) {
+                  handleCalendarFileList(event.target.files)
+                }
+                event.currentTarget.value = ''
+              }}
+            />
+            <div
+              ref={calendarDropZoneRef}
+              className="calendar-drop-zone"
+              tabIndex={0}
+              role="group"
+              aria-label="Calendar screenshot upload area"
+              onClick={() => calendarFileInputRef.current?.click()}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  calendarFileInputRef.current?.click()
+                }
+              }}
+              onPaste={onCalendarPaste}
+              onDragOver={(event) => {
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'copy'
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                handleCalendarFileList(event.dataTransfer.files)
+              }}
+            >
+              <div className="calendar-drop-zone-main">
+                <img src={calendarIcon} alt="" aria-hidden="true" />
+                <div>
+                  <h4>Drop a calendar screenshot</h4>
+                  <p>Browse, drag an image here, or paste from the clipboard.</p>
+                </div>
+              </div>
+              <div className="calendar-upload-actions">
+                <button
+                  type="button"
+                  className="button-soft-primary"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    calendarFileInputRef.current?.click()
+                  }}
+                  disabled={calendarIsExtracting}
+                >
+                  <span className="control-icon plus-icon" aria-hidden="true" />
+                  Browse
+                </button>
+                <button
+                  type="button"
+                  className="ghost calendar-paste-button"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void onReadCalendarImageFromClipboard()
+                  }}
+                  disabled={calendarIsExtracting}
+                >
+                  <span className="control-icon paste-icon" aria-hidden="true" />
+                  Paste
+                </button>
+              </div>
+            </div>
+
+            <aside className="calendar-submission-preview">
+              <div className="calendar-submission-preview-header">
+                <h4>Screenshot</h4>
+                {calendarSelectedFileName ? <span>{calendarSelectedFileName}</span> : null}
+              </div>
+              {calendarImagePreviewUrl ? (
+                <img src={calendarImagePreviewUrl} alt="Calendar screenshot preview" />
+              ) : (
+                <p className="timeline-editor-empty">No screenshot staged yet.</p>
+              )}
+              {calendarIsExtracting ? (
+                <p className="calendar-bulk-status">Extracting calendar events...</p>
+              ) : calendarUploadStatusMessage ? (
+                <p className="calendar-bulk-status">{calendarUploadStatusMessage}</p>
+              ) : null}
+              {calendarUploadErrorMessage ? (
+                <p className="calendar-bulk-error" role="alert">{calendarUploadErrorMessage}</p>
+              ) : null}
+            </aside>
+          </div>
+        ) : (
+          <div className="calendar-review-layout">
+            <section className="calendar-review-timeline-panel">
+              <div
+                className="timeline-grid calendar-review-timeline"
+                role="list"
+                aria-label="Calendar review timeline"
+              >
+                <div
+                  className="timeline-canvas"
+                  style={{ minHeight: `${timelineCanvasHeight}px` }}
+                >
+                  {timelineHourMarks.map((minute) => (
+                    <div
+                      key={`calendar-review-hour-${minute}`}
+                      className="timeline-hour-mark"
+                      style={{
+                        top:
+                          TIMELINE_CANVAS_TOP_PADDING
+                          + (minute - timelineWindow.startMinute) * PIXELS_PER_MINUTE,
+                      }}
+                    >
+                      <span>{minuteToLabel(minute)}</span>
+                    </div>
+                  ))}
+
+                  <div className="timeline-entry-layer">
+                    {positionedCalendarReviewEntries.map((positionedEntry) => {
+                      const { entry } = positionedEntry
+                      const candidateId = entry.id.startsWith('calendar-')
+                        ? entry.id.slice('calendar-'.length)
+                        : null
+                      const candidate = candidateId
+                        ? calendarReviewCandidates.find((reviewCandidate) => reviewCandidate.id === candidateId)
+                        : null
+                      const blockColor = resolveTimelineBlockColor(
+                        entry,
+                        activityColorById,
+                        engagementColorById,
+                      )
+                      const blockLabel = buildTimelineBlockLabel(
+                        entry,
+                        positionedEntry.widthPercent,
+                        positionedEntry.height,
+                      )
+                      const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
+                      const blockPalette = buildTimelineBlockPalette(blockColor)
+                      const blockClassName = [
+                        'timeline-block',
+                        'calendar-review-block',
+                        `tier-${blockLabel.tier}`,
+                        candidate ? `state-${candidate.reviewState}` : 'is-existing',
+                        candidate?.id === selectedCalendarCandidate?.id ? 'selected' : '',
+                        reviewLabel ? 'needs-review' : '',
+                        candidate?.needsDateConfirmation || candidate?.needsTimeConfirmation
+                          ? 'needs-confirmation'
+                          : '',
+                      ]
+                        .filter((className) => className.length > 0)
+                        .join(' ')
+                      const blockStyle = {
+                        top: positionedEntry.top,
+                        height: positionedEntry.height,
+                        left: `${positionedEntry.leftPercent}%`,
+                        width: `${positionedEntry.widthPercent}%`,
+                        ...buildTimelineBlockCssVariables(blockPalette),
+                      } as CSSProperties
+                      const title = buildTimelineBlockTitle(
+                        blockLabel.fullLabel,
+                        entry.description,
+                        reviewLabel,
+                      )
+
+                      if (!candidate) {
+                        return null
+                      }
+
+                      return (
+                        <button
+                          type="button"
+                          key={entry.id}
+                          className={blockClassName}
+                          style={blockStyle}
+                          onClick={() => setSelectedCalendarCandidateId(candidate.id)}
+                          title={title}
+                          aria-label={title}
+                        >
+                          <TimelineBlockContent label={blockLabel.label} />
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <aside className={`calendar-review-editor timeline-editor ${selectedCalendarCandidate ? '' : 'is-empty'}`}>
+              <div className="timeline-editor-header">
+                <div>
+                  <h3>Review Event</h3>
+                  {selectedCalendarCandidate ? (
+                    <p className={`calendar-review-state ${selectedCalendarCandidate.reviewState}`}>
+                      {selectedCalendarCandidate.reviewState}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+
+              {selectedCalendarCandidate ? (
+                <>
+                  <div className="stack calendar-entry-form">
+                    <label>
+                      Date
+                      <input
+                        type="date"
+                        value={selectedCalendarCandidate.date}
+                        onChange={(event) => {
+                          const nextDate = event.target.value
+                          if (!nextDate) {
+                            return
+                          }
+                          updateCalendarCandidate(selectedCalendarCandidate.id, (candidate) => ({
+                            ...candidate,
+                            date: nextDate,
+                            needsDateConfirmation: false,
+                          }))
+                        }}
+                      />
+                    </label>
+                    <label>
+                      Engagement
+                      <select
+                        value={selectedCalendarCandidate.engagementId ?? ''}
+                        onChange={(event) =>
+                          onCalendarCandidateEngagementChange(
+                            selectedCalendarCandidate.id,
+                            event.target.value,
+                          )
+                        }
+                      >
+                        <option value="">Uncategorized</option>
+                        {engagements.map((engagement) => (
+                          <option key={engagement.id} value={engagement.id}>
+                            {formatEntityDisplayLabel(engagement.name, engagement.code)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Activity
+                      <select
+                        value={selectedCalendarCandidate.activityId ?? ''}
+                        onChange={(event) =>
+                          onCalendarCandidateActivityChange(
+                            selectedCalendarCandidate.id,
+                            event.target.value,
+                          )
+                        }
+                      >
+                        <option value="">Uncategorized</option>
+                        {selectedCalendarCandidateActivities.map((activity) => (
+                          <option key={activity.id} value={activity.id}>
+                            {formatEntityDisplayLabel(activity.name, activity.code)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Start
+                      <span className="time-input-shell">
+                        <input
+                          type="time"
+                          step={60}
+                          value={minuteToTimeInput(Math.min(selectedCalendarCandidate.startMinute, MINUTES_IN_DAY - 1))}
+                          onChange={(event) => {
+                            const nextStartMinute = Math.min(
+                              MINUTES_IN_DAY - 1,
+                              Math.max(0, timeInputToMinute(event.target.value)),
+                            )
+                            updateCalendarCandidate(selectedCalendarCandidate.id, (candidate) => {
+                              const nextEndMinute = Math.min(
+                                MINUTES_IN_DAY,
+                                Math.max(candidate.endMinute, nextStartMinute + 1),
+                              )
+                              return {
+                                ...candidate,
+                                startMinute: nextStartMinute,
+                                endMinute: nextEndMinute,
+                                durationMinutes: Math.max(1, nextEndMinute - nextStartMinute),
+                                needsTimeConfirmation: false,
+                              }
+                            })
+                          }}
+                        />
+                        <span className="control-icon clock-icon" aria-hidden="true" />
+                      </span>
+                    </label>
+                    <label>
+                      End
+                      <span className="time-input-shell">
+                        <input
+                          type="time"
+                          step={60}
+                          value={
+                            selectedCalendarCandidate.endMinute >= MINUTES_IN_DAY
+                              ? END_OF_DAY_INPUT_SENTINEL
+                              : minuteToTimeInput(selectedCalendarCandidate.endMinute)
+                          }
+                          onChange={(event) => {
+                            updateCalendarCandidate(selectedCalendarCandidate.id, (candidate) => {
+                              const parsedEndMinute = timeInputToMinute(event.target.value)
+                              const nextEndMinute = Math.min(
+                                MINUTES_IN_DAY,
+                                Math.max(candidate.startMinute + 1, parsedEndMinute),
+                              )
+                              return {
+                                ...candidate,
+                                endMinute: nextEndMinute,
+                                durationMinutes: Math.max(1, nextEndMinute - candidate.startMinute),
+                                needsTimeConfirmation: false,
+                              }
+                            })
+                          }}
+                        />
+                        <span className="control-icon clock-icon" aria-hidden="true" />
+                      </span>
+                    </label>
+                    <label>
+                      Description
+                      <textarea
+                        rows={4}
+                        value={selectedCalendarCandidate.description}
+                        onChange={(event) =>
+                          updateCalendarCandidate(selectedCalendarCandidate.id, (candidate) => ({
+                            ...candidate,
+                            description: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  <div className="calendar-review-diagnostics">
+                    <p>
+                      Confidence: {(selectedCalendarCandidate.confidence * 100).toFixed(0)}%
+                    </p>
+                    <p>Extracted: {selectedCalendarCandidate.extractedText}</p>
+                    {selectedCalendarCandidate.timeEvidence ? (
+                      <p>Time evidence: {selectedCalendarCandidate.timeEvidence}</p>
+                    ) : null}
+                    {selectedCalendarCandidate.needsDateConfirmation ? (
+                      <p className="calendar-bulk-warning-text">Date confirmation required.</p>
+                    ) : null}
+                    {selectedCalendarCandidate.needsTimeConfirmation ? (
+                      <p className="calendar-bulk-warning-text">Time confirmation required.</p>
+                    ) : null}
+                    {selectedCalendarCandidate.warningFlags.length > 0 ? (
+                      <div className="warning-row">
+                        {selectedCalendarCandidate.warningFlags.map((warningType) => (
+                          <WarningBadge
+                            key={`${selectedCalendarCandidate.id}-${warningType}`}
+                            type={warningType}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                </>
+              ) : (
+                <p className="timeline-editor-empty">
+                  Upload a screenshot to stage calendar events for review.
+                </p>
+              )}
+
+              {calendarUploadErrorMessage ? (
+                <p className="calendar-bulk-error" role="alert">{calendarUploadErrorMessage}</p>
+              ) : null}
+            </aside>
+          </div>
+        )}
+      </section>
+    </div>,
+    document.body,
+  ) : null
+
   if (!tauriRuntime) {
     return (
       <div className="runtime-shell">
@@ -4075,6 +5049,16 @@ function App() {
                   title={voiceCaptureState === 'recording' ? 'Stop recording' : 'Start recording'}
                 >
                   <img src={microphoneIcon} alt="" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="capture-calendar-button"
+                  onClick={openCalendarBulkModal}
+                  disabled={voiceCaptureState === 'transcribing' || calendarIsExtracting}
+                  aria-label="Open calendar bulk add"
+                  title="Calendar bulk add"
+                >
+                  <img src={calendarIcon} alt="" aria-hidden="true" />
                 </button>
                 <button
                   type="submit"
@@ -5261,6 +6245,36 @@ function App() {
                     </button>
                   </div>
                 </form>
+                <form className="settings-preference-row" onSubmit={onSaveCalendarBulkModel}>
+                  <label htmlFor="settings-calendar-bulk-model">Calendar Bulk Add</label>
+                  <div className="settings-control-group">
+                    <select
+                      id="settings-calendar-bulk-model"
+                      value={selectedCalendarBulkModelDraft}
+                      onChange={(event) =>
+                        setSelectedCalendarBulkModelDraft(event.target.value as OpenAiModelId)
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    >
+                      {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="submit"
+                      className="settings-save-button button-soft-primary"
+                      disabled={
+                        isBusy ||
+                        settingsStatus === null ||
+                        selectedCalendarBulkModelDraft === settingsStatus.selectedCalendarBulkModel
+                      }
+                    >
+                      Save
+                    </button>
+                  </div>
+                </form>
                 <form className="settings-preference-row" onSubmit={onSaveTranscriptionModel}>
                   <label htmlFor="settings-transcription-model">Speech-to-Text</label>
                   <div className="settings-control-group">
@@ -5346,6 +6360,48 @@ function App() {
 
               <section className="settings-card">
                 <div className="settings-card-header">
+                  <h3>Calendar Bulk Add</h3>
+                </div>
+                <form className="settings-preference-row" onSubmit={onSaveCalendarBulkPreferences}>
+                  <label htmlFor="settings-calendar-ignore-keywords">Ignored keywords</label>
+                  <div className="settings-control-group settings-control-group-vertical">
+                    <textarea
+                      id="settings-calendar-ignore-keywords"
+                      value={calendarIgnoredKeywordDraft}
+                      onChange={(event) => setCalendarIgnoredKeywordDraft(event.target.value)}
+                      rows={4}
+                      placeholder="lunch"
+                      disabled={isBusy || settingsStatus === null}
+                    />
+                    <button
+                      type="submit"
+                      className="settings-save-button button-soft-primary"
+                      disabled={isBusy || settingsStatus === null}
+                    >
+                      Save
+                    </button>
+                  </div>
+                </form>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-calendar-ignore-all-day">
+                    Ignore all-day calendar events
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-calendar-ignore-all-day"
+                      type="checkbox"
+                      checked={settingsStatus?.calendarBulkIgnoreAllDayEvents ?? true}
+                      onChange={(event) =>
+                        onSaveCalendarIgnoreAllDayPreference(event.target.checked)
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    />
+                  </div>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-header">
                   <h3>Status</h3>
                 </div>
                 <div className="settings-status-grid">
@@ -5365,6 +6421,16 @@ function App() {
                       {settingsStatus
                         ? settingsStatus.availableOpenAiModels.find(
                             (model) => model.id === settingsStatus.selectedOpenAiModel,
+                          )?.label ?? 'unknown'
+                        : 'unknown'}
+                    </strong>
+                  </div>
+                  <div className="settings-status-item">
+                    <span>Calendar Bulk Add</span>
+                    <strong>
+                      {settingsStatus
+                        ? settingsStatus.availableOpenAiModels.find(
+                            (model) => model.id === settingsStatus.selectedCalendarBulkModel,
                           )?.label ?? 'unknown'
                         : 'unknown'}
                     </strong>
@@ -5650,6 +6716,7 @@ function App() {
           </div>
         </main>
       </div>
+      {calendarBulkModal}
       {timelineContextMenu ? createPortal(
         <div
           ref={timelineContextMenuRef}
@@ -6106,6 +7173,68 @@ function buildEntryDraft(entry: TimelineEntry): EntryDraft {
     description: entry.description,
     startTime: minuteToTimeInput(entry.startMinute),
     ...endState,
+  }
+}
+
+function parseCalendarIgnoredKeywordDraft(value: string): string[] {
+  const seen = new Set<string>()
+  const keywords: string[] = []
+
+  for (const candidate of value.split(/[,\n;]/)) {
+    const normalized = candidate.trim().toLowerCase()
+    if (normalized.length === 0 || seen.has(normalized)) {
+      continue
+    }
+
+    seen.add(normalized)
+    keywords.push(normalized)
+  }
+
+  return keywords
+}
+
+function refreshCalendarCandidateWarnings(candidate: CalendarReviewCandidate): WarningType[] {
+  const warnings: WarningType[] = candidate.warningFlags.filter((warning) => warning === 'overlap')
+
+  if (candidate.confidence < CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD) {
+    warnings.push('low_confidence')
+  }
+
+  if (!candidate.engagementId || !candidate.activityId) {
+    warnings.push('unmatched')
+  }
+
+  return warnings
+}
+
+function calendarCandidateToTimelineEntry(candidate: CalendarReviewCandidate): TimelineEntry {
+  return {
+    id: `calendar-${candidate.id}`,
+    date: candidate.date,
+    startMinute: candidate.startMinute,
+    endMinute: candidate.endMinute,
+    durationMinutes: Math.max(1, candidate.endMinute - candidate.startMinute),
+    description: candidate.description,
+    userSubmissionText: candidate.extractedText || candidate.sourceText,
+    source: 'calendar',
+    confidence: candidate.confidence,
+    engagementId: candidate.engagementId,
+    activityId: candidate.activityId,
+    engagementCode: candidate.engagementCode,
+    engagementName: candidate.engagementName,
+    activityCode: candidate.activityCode,
+    activityName: candidate.activityName,
+    usedActivityFallback: false,
+    usedTemporalFallback: false,
+    durationDefaulted: false,
+    fallbackSummary: null,
+    sourceMessageEntryIndex: null,
+    sourceMessageEntryCount: null,
+    modelUsed: null,
+    modelUsedLabel: null,
+    transcriptionModelUsed: null,
+    transcriptionModelUsedLabel: null,
+    warningFlags: candidate.warningFlags,
   }
 }
 

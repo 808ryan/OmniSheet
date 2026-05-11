@@ -127,12 +127,13 @@
 
 .capture-actions {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   gap: 0.55rem;
   align-items: center;
 }
 
-.capture-mic-button {
+.capture-mic-button,
+.capture-calendar-button {
   width: 2.7rem;
   height: 2.7rem;
   padding: 0;
@@ -144,7 +145,8 @@
   box-shadow: var(--glass-inset);
 }
 
-.capture-mic-button:hover:not(:disabled) {
+.capture-mic-button:hover:not(:disabled),
+.capture-calendar-button:hover:not(:disabled) {
   background: rgba(31, 122, 255, 0.12);
 }
 
@@ -154,7 +156,8 @@
   color: var(--danger);
 }
 
-.capture-mic-button img {
+.capture-mic-button img,
+.capture-calendar-button img {
   width: 1.1rem;
   height: 1.1rem;
 }
@@ -470,6 +473,19 @@
   max-width: 28rem;
 }
 
+.settings-control-group-vertical {
+  display: grid;
+  justify-items: stretch;
+  gap: 0.55rem;
+}
+
+.settings-control-group-vertical textarea {
+  width: 100%;
+  max-width: 28rem;
+  min-height: 6.2rem;
+  justify-self: end;
+}
+
 .settings-toggle-group {
   display: flex;
   justify-content: flex-end;
@@ -755,6 +771,30 @@ button.danger:hover:not(:disabled) {
   border-left: 1.8px solid currentColor;
   border-bottom: 1.8px solid currentColor;
   border-radius: 0 0 0 0.08rem;
+}
+
+.paste-icon::before {
+  content: '';
+  position: absolute;
+  left: 0.27rem;
+  top: 0.27rem;
+  width: 0.48rem;
+  height: 0.58rem;
+  border: 1.7px solid currentColor;
+  border-radius: 0.12rem;
+}
+
+.paste-icon::after {
+  content: '';
+  position: absolute;
+  left: 0.38rem;
+  top: 0.14rem;
+  width: 0.24rem;
+  height: 0.18rem;
+  border: 1.7px solid currentColor;
+  border-bottom: 0;
+  border-radius: 0.14rem 0.14rem 0 0;
+  background: #fff;
 }
 
 .alert {
@@ -1644,6 +1684,359 @@ button.danger:hover:not(:disabled) {
   padding-top: 0.7rem;
   font-size: 0.85rem;
   color: var(--ink-soft);
+}
+
+.calendar-bulk-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(10, 18, 34, 0.36);
+  backdrop-filter: blur(12px) saturate(1.08);
+  -webkit-backdrop-filter: blur(12px) saturate(1.08);
+}
+
+.calendar-bulk-modal {
+  width: 92vw;
+  height: 86vh;
+  max-width: 96rem;
+  max-height: 58rem;
+  min-width: min(62rem, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.48);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(245, 249, 255, 0.9));
+  box-shadow: 0 28px 60px rgba(16, 24, 40, 0.26), var(--glass-inset);
+  padding: 1rem;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 0.8rem;
+  overflow: hidden;
+}
+
+.calendar-bulk-header,
+.calendar-submission-preview-header,
+.calendar-bulk-header-actions,
+.calendar-bulk-top-row,
+.calendar-review-toolbar,
+.calendar-review-context,
+.calendar-review-stepper,
+.calendar-upload-actions,
+.calendar-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.calendar-bulk-header {
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.calendar-bulk-header h3,
+.calendar-submission-preview-header h4 {
+  margin: 0;
+}
+
+.calendar-bulk-header p,
+.calendar-submission-preview-header span,
+.calendar-bulk-counter,
+.calendar-bulk-status,
+.calendar-review-diagnostics {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.calendar-bulk-header-actions {
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.calendar-bulk-counter {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.calendar-bulk-top-row {
+  justify-content: space-between;
+  min-width: 0;
+  align-items: center;
+}
+
+.calendar-bulk-tabs {
+  grid-template-columns: repeat(2, minmax(0, max-content));
+  width: fit-content;
+}
+
+.calendar-bulk-tabs button {
+  min-width: 10.5rem;
+}
+
+.calendar-bulk-warning-text {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.calendar-bulk-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.calendar-bulk-loading {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.calendar-submission-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 26rem);
+  gap: 1rem;
+}
+
+.calendar-file-input {
+  display: none;
+}
+
+.calendar-drop-zone {
+  min-width: 0;
+  min-height: 18rem;
+  border: 1px dashed rgba(91, 111, 139, 0.58);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(235, 243, 255, 0.58));
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 1.1rem;
+  padding: 1.4rem;
+  text-align: center;
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.calendar-drop-zone:hover,
+.calendar-drop-zone:focus-visible {
+  border-color: rgba(31, 122, 255, 0.55);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(226, 238, 255, 0.72));
+  box-shadow: 0 0 0 3px rgba(31, 122, 255, 0.12);
+}
+
+.calendar-drop-zone-main {
+  display: grid;
+  justify-items: center;
+  gap: 0.8rem;
+}
+
+.calendar-drop-zone-main img {
+  width: 2.5rem;
+  height: 2.5rem;
+  color: var(--accent);
+}
+
+.calendar-drop-zone-main h4 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.calendar-drop-zone-main p {
+  margin: 0.28rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+.calendar-upload-actions {
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.calendar-paste-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+.calendar-submission-preview {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--outline);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.68);
+  padding: 0.9rem;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 0.7rem;
+  overflow: hidden;
+}
+
+.calendar-submission-preview-header {
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.calendar-submission-preview-header span {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-submission-preview img {
+  width: 100%;
+  min-height: 0;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 12px;
+  border: 1px solid rgba(170, 188, 218, 0.5);
+  background: #fff;
+}
+
+.calendar-review-layout {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(20rem, 3fr);
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.calendar-review-layout > * {
+  min-width: 0;
+  min-height: 0;
+}
+
+.calendar-review-timeline-panel {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+.calendar-review-timeline {
+  --timeline-gutter-left: 4rem;
+}
+
+.calendar-review-block.is-existing {
+  opacity: 0.42;
+  cursor: default;
+  pointer-events: none;
+}
+
+.calendar-review-block.state-pending {
+  border-style: dashed;
+}
+
+.calendar-review-block.state-accepted {
+  box-shadow:
+    0 0 0 2px rgba(2, 122, 72, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    0 4px 10px rgba(15, 23, 42, 0.1);
+}
+
+.calendar-review-block.state-rejected {
+  opacity: 0.34;
+  filter: grayscale(0.7);
+}
+
+.calendar-review-block.needs-confirmation:not(.selected) {
+  outline: 2px solid rgba(181, 71, 8, 0.32);
+  outline-offset: 1px;
+}
+
+.calendar-review-editor {
+  overflow: auto;
+  align-content: start;
+}
+
+.calendar-review-editor .timeline-editor-header {
+  align-items: flex-start;
+}
+
+.calendar-review-toolbar {
+  justify-content: flex-end;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.calendar-review-context {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.12rem;
+  min-width: 8.5rem;
+}
+
+.calendar-review-context strong {
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
+.calendar-review-context span {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.calendar-review-state {
+  margin: 0.18rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.calendar-review-state.accepted {
+  color: #067647;
+}
+
+.calendar-review-state.rejected {
+  color: var(--danger);
+}
+
+.calendar-review-stepper {
+  flex: 0 0 auto;
+}
+
+.calendar-review-stepper span {
+  min-width: 6.4rem;
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.calendar-entry-form {
+  min-width: 0;
+}
+
+.calendar-review-diagnostics {
+  border-top: 1px solid var(--outline);
+  padding-top: 0.7rem;
+  display: grid;
+  gap: 0.36rem;
+}
+
+.calendar-review-diagnostics p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.calendar-review-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  flex: 0 0 auto;
+  min-width: 13rem;
 }
 
 .code-panel {
@@ -2876,7 +3269,12 @@ button.danger:hover:not(:disabled) {
   }
 
   .timeline-layout,
-  .code-panel {
+  .code-panel,
+  .calendar-review-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .calendar-submission-layout {
     grid-template-columns: 1fr;
   }
 
@@ -2966,8 +3364,50 @@ button.danger:hover:not(:disabled) {
 
   .settings-control-group input,
   .settings-control-group select,
+  .settings-control-group-vertical textarea,
   .settings-save-button {
     max-width: none;
+    width: 100%;
+  }
+
+  .calendar-bulk-modal {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    border-radius: 16px;
+  }
+
+  .calendar-bulk-tabs {
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .calendar-bulk-header,
+  .calendar-bulk-header-actions,
+  .calendar-bulk-top-row,
+  .calendar-review-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .calendar-bulk-header-actions {
+    min-width: 0;
+  }
+
+  .calendar-bulk-counter,
+  .calendar-review-context,
+  .calendar-review-context span {
+    text-align: left;
+    align-items: flex-start;
+    white-space: normal;
+  }
+
+  .calendar-review-toolbar {
+    width: 100%;
+  }
+
+  .calendar-review-actions {
+    grid-template-columns: 1fr;
     width: 100%;
   }
 
