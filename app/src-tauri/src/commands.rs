@@ -20,17 +20,17 @@ use crate::models::{
     CalendarExtractResult, CalendarImportEntryInput, CalendarImportInput, CalendarImportResult,
     CalendarVisionEvent, CaptureSourceId, CodeContext, ContextActivity, ContextEngagement,
     DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput,
-    Engagement, EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput,
-    KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
+    Engagement, EngagementType, EngagementUpsertInput, IdInput, IdResult, InterpretResult,
+    InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
     MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId, SettingsSetCalendarBulkModelInput,
     SettingsSetCalendarBulkPreferencesInput, SettingsSetOpenAiModelInput,
     SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
     StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
     SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
     TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
-    TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView, TimelineWeekViewDay,
-    TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult,
-    TranscriptionModelId, Warning, WarningType,
+    TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
+    TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput,
+    TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -50,6 +50,10 @@ const APP_SETTING_TIMELINE_EXCLUDE_UNCATEGORIZED_FROM_DAILY_TOTALS: &str =
     "timeline_exclude_uncategorized_from_daily_totals";
 const APP_SETTING_TIMELINE_SHOW_UNCATEGORIZED_DAILY_TOTAL: &str =
     "timeline_show_uncategorized_daily_total";
+const APP_SETTING_TIMELINE_INCLUDE_EXTERNAL_IN_TOTALS: &str = "timeline_include_external_in_totals";
+const APP_SETTING_TIMELINE_INCLUDE_INTERNAL_IN_TOTALS: &str = "timeline_include_internal_in_totals";
+const APP_SETTING_TIMELINE_SEPARATE_ENGAGEMENT_TYPE_TOTALS: &str =
+    "timeline_separate_engagement_type_totals";
 const APP_SETTING_CALENDAR_BULK_IGNORED_KEYWORDS: &str = "calendar_bulk_ignored_keywords";
 const APP_SETTING_CALENDAR_BULK_IGNORE_ALL_DAY_EVENTS: &str = "calendar_bulk_ignore_all_day_events";
 const APP_SETTING_SUMMARY_LAYOUT_STATE: &str = "summary_layout_state";
@@ -183,6 +187,15 @@ fn bool_app_setting_value(value: bool) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimelinePreferenceValues {
+    exclude_uncategorized_from_totals: bool,
+    show_uncategorized_total: bool,
+    include_external_in_totals: bool,
+    include_internal_in_totals: bool,
+    separate_engagement_type_totals: bool,
+}
+
 fn resolve_saved_bool_setting_value(saved_value: Option<String>, default_value: bool) -> bool {
     match saved_value.as_deref().map(str::trim) {
         Some("true") | Some("1") => true,
@@ -191,7 +204,28 @@ fn resolve_saved_bool_setting_value(saved_value: Option<String>, default_value: 
     }
 }
 
-fn read_saved_timeline_preferences(connection: &Connection) -> AppResult<(bool, bool)> {
+fn normalize_timeline_preference_values(
+    mut values: TimelinePreferenceValues,
+) -> TimelinePreferenceValues {
+    if !values.include_external_in_totals && !values.include_internal_in_totals {
+        values.include_external_in_totals = true;
+    }
+
+    values
+}
+
+fn validate_timeline_preferences(preferences: TimelinePreferenceValues) -> Result<(), String> {
+    if !preferences.include_external_in_totals && !preferences.include_internal_in_totals {
+        return Err(
+            "at least one of external or internal type codes must be included in totals"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn read_saved_timeline_preferences(connection: &Connection) -> AppResult<TimelinePreferenceValues> {
     let exclude_uncategorized = resolve_saved_bool_setting_value(
         db::get_app_setting(
             connection,
@@ -206,8 +240,65 @@ fn read_saved_timeline_preferences(connection: &Connection) -> AppResult<(bool, 
         )?,
         true,
     );
+    let include_external_in_totals = resolve_saved_bool_setting_value(
+        db::get_app_setting(connection, APP_SETTING_TIMELINE_INCLUDE_EXTERNAL_IN_TOTALS)?,
+        true,
+    );
+    let include_internal_in_totals = resolve_saved_bool_setting_value(
+        db::get_app_setting(connection, APP_SETTING_TIMELINE_INCLUDE_INTERNAL_IN_TOTALS)?,
+        false,
+    );
+    let separate_engagement_type_totals = resolve_saved_bool_setting_value(
+        db::get_app_setting(
+            connection,
+            APP_SETTING_TIMELINE_SEPARATE_ENGAGEMENT_TYPE_TOTALS,
+        )?,
+        true,
+    );
 
-    Ok((exclude_uncategorized, show_uncategorized_total))
+    Ok(normalize_timeline_preference_values(
+        TimelinePreferenceValues {
+            exclude_uncategorized_from_totals: exclude_uncategorized,
+            show_uncategorized_total,
+            include_external_in_totals,
+            include_internal_in_totals,
+            separate_engagement_type_totals,
+        },
+    ))
+}
+
+fn apply_timeline_preferences_to_breakdown(
+    breakdown: &mut TimelineTotalBreakdown,
+    preferences: TimelinePreferenceValues,
+) {
+    breakdown.primary_minutes = 0;
+
+    if preferences.include_external_in_totals {
+        breakdown.primary_minutes += breakdown.external_minutes;
+    }
+    if preferences.include_internal_in_totals {
+        breakdown.primary_minutes += breakdown.internal_minutes;
+    }
+    if !preferences.exclude_uncategorized_from_totals {
+        breakdown.primary_minutes += breakdown.uncategorized_minutes;
+    }
+}
+
+fn apply_timeline_preferences_to_weekly_summary(
+    summary: &mut TimelineWeeklySummary,
+    preferences: TimelinePreferenceValues,
+) {
+    for breakdown in &mut summary.day_total_breakdowns {
+        apply_timeline_preferences_to_breakdown(breakdown, preferences);
+    }
+    apply_timeline_preferences_to_breakdown(&mut summary.week_total_breakdown, preferences);
+
+    summary.day_total_minutes = summary
+        .day_total_breakdowns
+        .iter()
+        .map(|breakdown| breakdown.primary_minutes)
+        .collect();
+    summary.week_total_minutes = summary.week_total_breakdown.primary_minutes;
 }
 
 fn normalize_calendar_bulk_ignored_keywords(values: &[String]) -> Vec<String> {
@@ -2058,8 +2149,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         invalid_saved_calendar_bulk_model,
         selected_transcription_model,
         invalid_saved_transcription_model,
-        timeline_exclude_uncategorized_from_daily_totals,
-        timeline_show_uncategorized_daily_total,
+        timeline_preferences,
         calendar_bulk_ignored_keywords,
         calendar_bulk_ignore_all_day_events,
     ) = {
@@ -2138,10 +2228,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
                 }
             };
 
-        let (
-            timeline_exclude_uncategorized_from_daily_totals,
-            timeline_show_uncategorized_daily_total,
-        ) = match read_saved_timeline_preferences(&connection) {
+        let timeline_preferences = match read_saved_timeline_preferences(&connection) {
             Ok(value) => value,
             Err(error) => {
                 let message = error.to_string();
@@ -2187,8 +2274,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             invalid_saved_calendar_bulk_model,
             selected_transcription_model,
             invalid_saved_transcription_model,
-            timeline_exclude_uncategorized_from_daily_totals,
-            timeline_show_uncategorized_daily_total,
+            timeline_preferences,
             calendar_bulk_ignored_keywords,
             calendar_bulk_ignore_all_day_events,
         )
@@ -2217,8 +2303,13 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         selected_calendar_bulk_model,
         selected_transcription_model,
         available_transcription_models: transcription_model_options(),
-        timeline_exclude_uncategorized_from_daily_totals,
-        timeline_show_uncategorized_daily_total,
+        timeline_exclude_uncategorized_from_daily_totals: timeline_preferences
+            .exclude_uncategorized_from_totals,
+        timeline_show_uncategorized_daily_total: timeline_preferences.show_uncategorized_total,
+        timeline_include_external_in_totals: timeline_preferences.include_external_in_totals,
+        timeline_include_internal_in_totals: timeline_preferences.include_internal_in_totals,
+        timeline_separate_engagement_type_totals: timeline_preferences
+            .separate_engagement_type_totals,
         calendar_bulk_ignored_keywords,
         calendar_bulk_ignore_all_day_events,
     };
@@ -2248,6 +2339,9 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "availableTranscriptionModelCount": status.available_transcription_models.len(),
           "timelineExcludeUncategorizedFromDailyTotals": status.timeline_exclude_uncategorized_from_daily_totals,
           "timelineShowUncategorizedDailyTotal": status.timeline_show_uncategorized_daily_total,
+          "timelineIncludeExternalInTotals": status.timeline_include_external_in_totals,
+          "timelineIncludeInternalInTotals": status.timeline_include_internal_in_totals,
+          "timelineSeparateEngagementTypeTotals": status.timeline_separate_engagement_type_totals,
           "calendarBulkIgnoredKeywords": status.calendar_bulk_ignored_keywords,
           "calendarBulkIgnoreAllDayEvents": status.calendar_bulk_ignore_all_day_events,
         }),
@@ -2627,25 +2721,69 @@ pub fn settings_set_timeline_preferences(
         format_command_error(&correlation_id, message)
     })?;
 
-    let exclude_uncategorized = input.timeline_exclude_uncategorized_from_daily_totals;
-    let show_uncategorized_total = input.timeline_show_uncategorized_daily_total;
+    let preferences = TimelinePreferenceValues {
+        exclude_uncategorized_from_totals: input.timeline_exclude_uncategorized_from_daily_totals,
+        show_uncategorized_total: input.timeline_show_uncategorized_daily_total,
+        include_external_in_totals: input.timeline_include_external_in_totals,
+        include_internal_in_totals: input.timeline_include_internal_in_totals,
+        separate_engagement_type_totals: input.timeline_separate_engagement_type_totals,
+    };
+
+    if let Err(message) = validate_timeline_preferences(preferences) {
+        record_backend_event(
+            &connection,
+            state.inner(),
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({
+              "stage": "validate_timeline_preferences",
+              "message": message,
+              "timelineIncludeExternalInTotals": preferences.include_external_in_totals,
+              "timelineIncludeInternalInTotals": preferences.include_internal_in_totals,
+            }),
+        );
+        return Err(format_command_error(&correlation_id, message));
+    }
+
     let save_result: Result<(), String> = (|| {
         db::upsert_app_setting(
             &connection,
             APP_SETTING_TIMELINE_EXCLUDE_UNCATEGORIZED_FROM_DAILY_TOTALS,
-            bool_app_setting_value(exclude_uncategorized),
+            bool_app_setting_value(preferences.exclude_uncategorized_from_totals),
         )
         .map_err(|error| error.to_string())?;
         db::upsert_app_setting(
             &connection,
             APP_SETTING_TIMELINE_SHOW_UNCATEGORIZED_DAILY_TOTAL,
-            bool_app_setting_value(show_uncategorized_total),
+            bool_app_setting_value(preferences.show_uncategorized_total),
+        )
+        .map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_TIMELINE_INCLUDE_EXTERNAL_IN_TOTALS,
+            bool_app_setting_value(preferences.include_external_in_totals),
+        )
+        .map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_TIMELINE_INCLUDE_INTERNAL_IN_TOTALS,
+            bool_app_setting_value(preferences.include_internal_in_totals),
+        )
+        .map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_TIMELINE_SEPARATE_ENGAGEMENT_TYPE_TOTALS,
+            bool_app_setting_value(preferences.separate_engagement_type_totals),
         )
         .map_err(|error| error.to_string())?;
 
         let verified =
             read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
-        if verified != (exclude_uncategorized, show_uncategorized_total) {
+        if verified != preferences {
             return Err("Timeline preferences verification failed".to_string());
         }
 
@@ -2664,8 +2802,11 @@ pub fn settings_set_timeline_preferences(
                 Some(duration_ms(started_at)),
                 None,
                 json!({
-                  "timelineExcludeUncategorizedFromDailyTotals": exclude_uncategorized,
-                  "timelineShowUncategorizedDailyTotal": show_uncategorized_total,
+                  "timelineExcludeUncategorizedFromDailyTotals": preferences.exclude_uncategorized_from_totals,
+                  "timelineShowUncategorizedDailyTotal": preferences.show_uncategorized_total,
+                  "timelineIncludeExternalInTotals": preferences.include_external_in_totals,
+                  "timelineIncludeInternalInTotals": preferences.include_internal_in_totals,
+                  "timelineSeparateEngagementTypeTotals": preferences.separate_engagement_type_totals,
                   "verified": true,
                 }),
             );
@@ -2684,8 +2825,11 @@ pub fn settings_set_timeline_preferences(
                 json!({
                   "stage": "save_timeline_preferences_setting",
                   "message": message,
-                  "timelineExcludeUncategorizedFromDailyTotals": exclude_uncategorized,
-                  "timelineShowUncategorizedDailyTotal": show_uncategorized_total,
+                  "timelineExcludeUncategorizedFromDailyTotals": preferences.exclude_uncategorized_from_totals,
+                  "timelineShowUncategorizedDailyTotal": preferences.show_uncategorized_total,
+                  "timelineIncludeExternalInTotals": preferences.include_external_in_totals,
+                  "timelineIncludeInternalInTotals": preferences.include_internal_in_totals,
+                  "timelineSeparateEngagementTypeTotals": preferences.separate_engagement_type_totals,
                 }),
             );
             Err(format_command_error(&correlation_id, message))
@@ -2994,9 +3138,15 @@ pub fn timeline_weekly_summary(
 ) -> Result<TimelineWeeklySummary, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
     let (start_date, end_date_exclusive) = timeline_week_bounds(&input.date)?;
+    let preferences =
+        read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
 
-    db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
-        .map_err(|error| error.to_string())
+    let mut summary =
+        db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
+            .map_err(|error| error.to_string())?;
+    apply_timeline_preferences_to_weekly_summary(&mut summary, preferences);
+
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -3041,9 +3191,12 @@ pub fn summary_export_weekly_excel(
     let (start_date, end_date_exclusive) = timeline_week_bounds(&input.date)?;
     let (summary, engagements) = {
         let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-        let summary =
+        let mut summary =
             db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
                 .map_err(|error| error.to_string())?;
+        let preferences =
+            read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
+        apply_timeline_preferences_to_weekly_summary(&mut summary, preferences);
         let engagements = db::list_engagements(&connection).map_err(|error| error.to_string())?;
         (summary, engagements)
     };
@@ -5054,6 +5207,9 @@ fn build_calendar_extract_candidate(
     let (engagement_id, activity_id) = resolve_ref_ids(&normalized_entry, code_context);
     let (engagement_code, engagement_name, activity_code, activity_name) =
         resolve_calendar_candidate_labels(&normalized_entry, code_context);
+    let engagement_type = engagement_id
+        .as_ref()
+        .map(|_| infer_engagement_type_from_code(engagement_code.as_deref()));
     let (is_ignored, ignored_reason) = resolve_calendar_candidate_ignored_state(
         &extracted_text,
         event.is_all_day,
@@ -5089,6 +5245,7 @@ fn build_calendar_extract_candidate(
         activity_id,
         engagement_code,
         engagement_name,
+        engagement_type,
         activity_code,
         activity_name,
         warning_flags,
@@ -5220,6 +5377,19 @@ fn resolve_calendar_candidate_labels(
         activity.and_then(|value| value.code.clone()),
         activity.map(|value| value.name.clone()),
     )
+}
+
+fn infer_engagement_type_from_code(code: Option<&str>) -> EngagementType {
+    match code
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .next()
+        .map(|character| character.to_ascii_uppercase())
+    {
+        Some('I') | Some('A') => EngagementType::Internal,
+        _ => EngagementType::External,
+    }
 }
 
 fn resolve_calendar_candidate_ignored_state(
@@ -6525,18 +6695,18 @@ mod tests {
 
     use crate::models::{
         Activity, CalendarImportEntryInput, CalendarVisionEvent, CaptureSourceId, CodeContext,
-        ContextActivity, ContextEngagement, Engagement, KeySource, LlmEntry, NormalizedEntry,
-        OpenAiModelId, StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey,
-        SummaryLayoutPreset, SummaryLayoutState, TimelineWeeklySummary, TimelineWeeklySummaryCell,
-        TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
-        TranscriptionModelId,
+        ContextActivity, ContextEngagement, Engagement, EngagementType, KeySource, LlmEntry,
+        NormalizedEntry, OpenAiModelId, StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey,
+        SummaryLayoutPreset, SummaryLayoutState, TimelineTotalBreakdown, TimelineWeeklySummary,
+        TimelineWeeklySummaryCell, TimelineWeeklySummaryDay, TimelineWeeklySummaryNote,
+        TimelineWeeklySummaryRow, TranscriptionModelId,
     };
     use crate::openai::LlmAttemptTelemetry;
 
     use super::{
         apply_activity_fallback_if_needed, apply_global_activity_fallback_if_needed,
-        apply_multi_event_sequence_adjustments, build_export_metadata_maps,
-        build_summary_export_hours_and_notes_sheet_columns,
+        apply_multi_event_sequence_adjustments, apply_timeline_preferences_to_weekly_summary,
+        build_export_metadata_maps, build_summary_export_hours_and_notes_sheet_columns,
         build_summary_export_hours_sheet_columns, capture_source_label, dedupe_prepared_entries,
         default_summary_layout_state, derive_key_status_level, llm_attempt_event_status,
         message_has_contextual_day_or_date_cue, message_has_explicit_clock_time_cue,
@@ -6550,8 +6720,9 @@ mod tests {
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
         round_to_nearest_15, summary_day_notes_header, timeline_week_bounds,
         timeline_week_view_bounds, validate_calendar_import_entry, validate_manual_update_window,
-        PreparedEntry, SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType,
-        TemporalReference, MINUTES_IN_DAY,
+        validate_timeline_preferences, PreparedEntry, SequencingEntryContext,
+        SummaryExportSheetColumnKind, TemporalCueType, TemporalReference, TimelinePreferenceValues,
+        MINUTES_IN_DAY,
     };
 
     fn prepared_entry_for_test(
@@ -7077,6 +7248,7 @@ mod tests {
                 activity_name: "Testing".to_string(),
                 engagement_name: "Client Work".to_string(),
                 client_name: "Acme".to_string(),
+                engagement_type: Some(EngagementType::External),
                 is_uncategorized: false,
                 cells: vec![
                     TimelineWeeklySummaryCell {
@@ -7117,6 +7289,56 @@ mod tests {
             }],
             day_total_minutes: vec![120, 60, 0, 0, 0, 0, 0],
             week_total_minutes: 180,
+            day_total_breakdowns: vec![
+                TimelineTotalBreakdown {
+                    primary_minutes: 120,
+                    external_minutes: 120,
+                    internal_minutes: 0,
+                    uncategorized_minutes: 0,
+                },
+                TimelineTotalBreakdown {
+                    primary_minutes: 60,
+                    external_minutes: 60,
+                    internal_minutes: 0,
+                    uncategorized_minutes: 0,
+                },
+                TimelineTotalBreakdown {
+                    primary_minutes: 0,
+                    external_minutes: 0,
+                    internal_minutes: 0,
+                    uncategorized_minutes: 0,
+                },
+                TimelineTotalBreakdown {
+                    primary_minutes: 0,
+                    external_minutes: 0,
+                    internal_minutes: 0,
+                    uncategorized_minutes: 0,
+                },
+                TimelineTotalBreakdown {
+                    primary_minutes: 0,
+                    external_minutes: 0,
+                    internal_minutes: 0,
+                    uncategorized_minutes: 0,
+                },
+                TimelineTotalBreakdown {
+                    primary_minutes: 0,
+                    external_minutes: 0,
+                    internal_minutes: 0,
+                    uncategorized_minutes: 0,
+                },
+                TimelineTotalBreakdown {
+                    primary_minutes: 0,
+                    external_minutes: 0,
+                    internal_minutes: 0,
+                    uncategorized_minutes: 0,
+                },
+            ],
+            week_total_breakdown: TimelineTotalBreakdown {
+                primary_minutes: 180,
+                external_minutes: 180,
+                internal_minutes: 0,
+                uncategorized_minutes: 0,
+            },
         }
     }
 
@@ -7126,6 +7348,7 @@ mod tests {
             code: Some("ENG-1".to_string()),
             name: "Client Work".to_string(),
             client: Some("Acme".to_string()),
+            engagement_type: EngagementType::External,
             color_hex: None,
             tags: vec!["SOX".to_string(), "FAIT".to_string()],
             describe_when_to_use: Some("Use for client delivery work.".to_string()),
@@ -7145,6 +7368,72 @@ mod tests {
                 updated_at: 0,
             }],
         }]
+    }
+
+    #[test]
+    fn timeline_preferences_filter_weekly_summary_primary_totals() {
+        let mut summary = test_weekly_summary();
+        summary.day_total_breakdowns[0] = TimelineTotalBreakdown {
+            primary_minutes: 165,
+            external_minutes: 120,
+            internal_minutes: 30,
+            uncategorized_minutes: 15,
+        };
+        summary.week_total_breakdown = TimelineTotalBreakdown {
+            primary_minutes: 225,
+            external_minutes: 180,
+            internal_minutes: 30,
+            uncategorized_minutes: 15,
+        };
+
+        apply_timeline_preferences_to_weekly_summary(
+            &mut summary,
+            TimelinePreferenceValues {
+                exclude_uncategorized_from_totals: true,
+                show_uncategorized_total: true,
+                include_external_in_totals: true,
+                include_internal_in_totals: false,
+                separate_engagement_type_totals: true,
+            },
+        );
+
+        assert_eq!(summary.day_total_minutes[0], 120);
+        assert_eq!(summary.day_total_minutes[1], 60);
+        assert_eq!(summary.week_total_minutes, 180);
+        assert_eq!(summary.week_total_breakdown.external_minutes, 180);
+        assert_eq!(summary.week_total_breakdown.internal_minutes, 30);
+        assert_eq!(summary.week_total_breakdown.uncategorized_minutes, 15);
+
+        apply_timeline_preferences_to_weekly_summary(
+            &mut summary,
+            TimelinePreferenceValues {
+                exclude_uncategorized_from_totals: false,
+                show_uncategorized_total: true,
+                include_external_in_totals: true,
+                include_internal_in_totals: true,
+                separate_engagement_type_totals: true,
+            },
+        );
+
+        assert_eq!(summary.day_total_minutes[0], 165);
+        assert_eq!(summary.week_total_minutes, 225);
+    }
+
+    #[test]
+    fn timeline_preferences_reject_disabling_external_and_internal_totals() {
+        let error = validate_timeline_preferences(TimelinePreferenceValues {
+            exclude_uncategorized_from_totals: true,
+            show_uncategorized_total: true,
+            include_external_in_totals: false,
+            include_internal_in_totals: false,
+            separate_engagement_type_totals: true,
+        })
+        .expect_err("both included categories cannot be disabled");
+
+        assert_eq!(
+            error,
+            "at least one of external or internal type codes must be included in totals"
+        );
     }
 
     #[test]
@@ -7369,6 +7658,7 @@ mod tests {
             activity_name: "Uncategorized".to_string(),
             engagement_name: "Uncategorized".to_string(),
             client_name: "".to_string(),
+            engagement_type: None,
             is_uncategorized: true,
             cells: vec![],
             row_total_minutes: 0,

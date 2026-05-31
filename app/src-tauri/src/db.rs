@@ -10,10 +10,11 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
-    DiagnosticsEvent, Engagement, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
-    TimelineDaySummary, TimelineEntry, TimelineWeeklySummary, TimelineWeeklySummaryCell,
-    TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
-    TranscriptionModelId, Warning, WarningType,
+    DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput, NormalizedEntry,
+    OpenAiModelId, TimelineDaySummary, TimelineEntry, TimelineTotalBreakdown,
+    TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
+    TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, TranscriptionModelId, Warning,
+    WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
@@ -54,6 +55,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         code TEXT,
         name TEXT NOT NULL,
         client TEXT,
+        engagement_type TEXT NOT NULL DEFAULT 'external',
         color_hex TEXT,
         tags TEXT NOT NULL,
         describe_when_to_use TEXT,
@@ -176,6 +178,14 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
 }
 
 fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
+    let had_engagement_type = column_exists(conn, "engagements", "engagement_type")?;
+    ensure_column_exists(
+        conn,
+        "engagements",
+        "engagement_type",
+        "TEXT NOT NULL DEFAULT 'external'",
+    )?;
+    ensure_engagement_type_values(conn, !had_engagement_type)?;
     ensure_column_exists(conn, "engagements", "color_hex", "TEXT")?;
     ensure_column_exists(conn, "engagements", "describe_when_to_use", "TEXT")?;
     ensure_column_exists(conn, "activities", "color_hex", "TEXT")?;
@@ -272,6 +282,7 @@ fn migrate_optional_user_code_schema(conn: &Connection) -> AppResult<()> {
         code TEXT,
         name TEXT NOT NULL,
         client TEXT,
+        engagement_type TEXT NOT NULL DEFAULT 'external',
         color_hex TEXT,
         tags TEXT NOT NULL,
         describe_when_to_use TEXT,
@@ -281,13 +292,18 @@ fn migrate_optional_user_code_schema(conn: &Connection) -> AppResult<()> {
       );
 
       INSERT INTO engagements_new (
-        id, code, name, client, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+        id, code, name, client, engagement_type, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
       )
       SELECT
         id,
         NULLIF(TRIM(code), ''),
         name,
         client,
+        CASE
+          WHEN engagement_type IN ('external', 'internal') THEN engagement_type
+          WHEN lower(substr(trim(code), 1, 1)) IN ('i', 'a') THEN 'internal'
+          ELSE 'external'
+        END,
         color_hex,
         tags,
         describe_when_to_use,
@@ -375,6 +391,21 @@ fn column_is_not_null(conn: &Connection, table_name: &str, column_name: &str) ->
     Ok(false)
 }
 
+fn column_exists(conn: &Connection, table_name: &str, column_name: &str) -> AppResult<bool> {
+    let query = format!("PRAGMA table_info({table_name})");
+    let mut statement = conn.prepare(&query)?;
+    let mut rows = statement.query([])?;
+
+    while let Some(row) = rows.next()? {
+        let candidate_name: String = row.get(1)?;
+        if candidate_name == column_name {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 fn ensure_column_exists(
     conn: &Connection,
     table_name: &str,
@@ -403,6 +434,35 @@ fn ensure_column_exists(
     Ok(())
 }
 
+fn ensure_engagement_type_values(
+    conn: &Connection,
+    should_backfill_from_code: bool,
+) -> AppResult<()> {
+    if should_backfill_from_code {
+        conn.execute_batch(
+            r#"
+            UPDATE engagements
+            SET engagement_type = CASE
+              WHEN lower(substr(trim(code), 1, 1)) IN ('i', 'a') THEN 'internal'
+              ELSE 'external'
+            END;
+            "#,
+        )?;
+    }
+
+    conn.execute_batch(
+        r#"
+        UPDATE engagements
+        SET engagement_type = 'external'
+        WHERE engagement_type IS NULL
+          OR engagement_type NOT IN ('external', 'internal')
+          OR trim(engagement_type) = '';
+        "#,
+    )?;
+
+    Ok(())
+}
+
 pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> AppResult<String> {
     if input.name.trim().is_empty() {
         return Err(AppError::InvalidInput(
@@ -418,6 +478,10 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let code = normalize_optional_code(input.code);
+    let engagement_type = input
+        .engagement_type
+        .unwrap_or_else(|| infer_engagement_type_from_code(code.as_deref()));
+    let engagement_type = engagement_type_db_value(engagement_type);
     let color_hex = normalize_color_hex(input.color_hex)?;
     let tags_json = serde_json::to_string(&normalize_tags(input.tags))?;
     let describe_when_to_use = normalize_usage_description(input.describe_when_to_use)?;
@@ -430,13 +494,14 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
     conn.execute(
         r#"
       INSERT INTO engagements (
-        id, code, name, client, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+        id, code, name, client, engagement_type, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
       )
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
       ON CONFLICT(id) DO UPDATE SET
         code = excluded.code,
         name = excluded.name,
         client = excluded.client,
+        engagement_type = excluded.engagement_type,
         color_hex = excluded.color_hex,
         tags = excluded.tags,
         describe_when_to_use = excluded.describe_when_to_use,
@@ -448,6 +513,7 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
             code,
             input.name.trim(),
             input.client.as_ref().map(|client| client.trim()),
+            engagement_type,
             color_hex,
             tags_json,
             describe_when_to_use,
@@ -558,7 +624,7 @@ pub fn upsert_app_setting(conn: &Connection, key: &str, value: &str) -> AppResul
 pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
     let mut engagement_statement = conn.prepare(
         r#"
-      SELECT id, code, name, client, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+      SELECT id, code, name, client, engagement_type, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
       FROM engagements
       ORDER BY name COLLATE NOCASE
     "#,
@@ -566,19 +632,25 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
 
     let mut engagements: Vec<Engagement> = engagement_statement
         .query_map([], |row| {
-            let tags_json: String = row.get(5)?;
+            let code = row.get::<_, Option<String>>(1)?;
+            let engagement_type_raw = row.get::<_, Option<String>>(4)?;
+            let tags_json: String = row.get(6)?;
             let tags = parse_tags(&tags_json).unwrap_or_default();
             Ok(Engagement {
                 id: row.get(0)?,
-                code: row.get(1)?,
+                engagement_type: db_value_to_engagement_type(
+                    engagement_type_raw.as_deref(),
+                    code.as_deref(),
+                ),
+                code,
                 name: row.get(2)?,
                 client: row.get(3)?,
-                color_hex: row.get(4)?,
+                color_hex: row.get(5)?,
                 tags,
-                describe_when_to_use: row.get(6)?,
-                is_active: row.get::<_, i64>(7)? == 1,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                describe_when_to_use: row.get(7)?,
+                is_active: row.get::<_, i64>(8)? == 1,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
                 activities: Vec::new(),
             })
         })?
@@ -943,11 +1015,20 @@ where
     let mut entries = statement
         .query_map(params, |row| {
             let model_used = row
-                .get::<_, Option<String>>(21)?
+                .get::<_, Option<String>>(22)?
                 .and_then(|value| OpenAiModelId::from_api_name(&value));
             let transcription_model_used = row
-                .get::<_, Option<String>>(22)?
+                .get::<_, Option<String>>(23)?
                 .and_then(|value| TranscriptionModelId::from_api_name(&value));
+            let engagement_id = row.get::<_, Option<String>>(9)?;
+            let engagement_code = row.get::<_, Option<String>>(11)?;
+            let engagement_type_raw = row.get::<_, Option<String>>(13)?;
+            let engagement_type = engagement_id.as_ref().map(|_| {
+                db_value_to_engagement_type(
+                    engagement_type_raw.as_deref(),
+                    engagement_code.as_deref(),
+                )
+            });
 
             Ok(TimelineEntry {
                 id: row.get(0)?,
@@ -959,18 +1040,19 @@ where
                 user_submission_text: row.get(6)?,
                 source: row.get(7)?,
                 confidence: row.get(8)?,
-                engagement_id: row.get(9)?,
+                engagement_id,
                 activity_id: row.get(10)?,
-                engagement_code: row.get(11)?,
+                engagement_code,
                 engagement_name: row.get(12)?,
-                activity_code: row.get(13)?,
-                activity_name: row.get(14)?,
-                used_activity_fallback: row.get::<_, i64>(15)? == 1,
-                used_temporal_fallback: row.get::<_, i64>(16)? == 1,
-                duration_defaulted: row.get::<_, i64>(17)? == 1,
-                fallback_summary: row.get(18)?,
-                source_message_entry_index: row.get(19)?,
-                source_message_entry_count: row.get(20)?,
+                engagement_type,
+                activity_code: row.get(14)?,
+                activity_name: row.get(15)?,
+                used_activity_fallback: row.get::<_, i64>(16)? == 1,
+                used_temporal_fallback: row.get::<_, i64>(17)? == 1,
+                duration_defaulted: row.get::<_, i64>(18)? == 1,
+                fallback_summary: row.get(19)?,
+                source_message_entry_index: row.get(20)?,
+                source_message_entry_count: row.get(21)?,
                 model_used,
                 model_used_label: model_used.map(|model| model.display_label().to_string()),
                 transcription_model_used,
@@ -1006,6 +1088,7 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         te.activity_id,
         e.code,
         e.name,
+        e.engagement_type,
         a.code,
         a.name,
         te.used_activity_fallback,
@@ -1049,6 +1132,7 @@ pub fn list_timeline_entries_for_date_range(
         te.activity_id,
         e.code,
         e.name,
+        e.engagement_type,
         a.code,
         a.name,
         te.used_activity_fallback,
@@ -1110,6 +1194,7 @@ struct WeeklySummaryRowKey {
     activity_name: String,
     engagement_name: String,
     client_name: String,
+    engagement_type: Option<EngagementType>,
     is_uncategorized: bool,
 }
 
@@ -1122,6 +1207,7 @@ struct WeeklySummaryRowAccumulator {
     activity_name: String,
     engagement_name: String,
     client_name: String,
+    engagement_type: Option<EngagementType>,
     is_uncategorized: bool,
     day_minutes: [i64; 7],
     day_notes: [Vec<TimelineWeeklySummaryNote>; 7],
@@ -1149,6 +1235,7 @@ pub fn list_timeline_weekly_summary(
         e.code,
         e.name,
         e.client,
+        e.engagement_type,
         a.code,
         a.name
       FROM timesheet_entries te
@@ -1175,6 +1262,7 @@ pub fn list_timeline_weekly_summary(
             row.get::<_, Option<String>>(9)?,
             row.get::<_, Option<String>>(10)?,
             row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<String>>(12)?,
         ))
     })?;
 
@@ -1190,6 +1278,7 @@ pub fn list_timeline_weekly_summary(
             engagement_code_raw,
             engagement_name_raw,
             client_name_raw,
+            engagement_type_raw,
             activity_code_raw,
             activity_name_raw,
         ) = row?;
@@ -1237,6 +1326,9 @@ pub fn list_timeline_weekly_summary(
         let is_uncategorized = engagement_id.is_none() || activity_id.is_none();
 
         let engagement_code = engagement_code_trimmed.map(|value| value.to_string());
+        let engagement_type = engagement_id.as_ref().map(|_| {
+            db_value_to_engagement_type(engagement_type_raw.as_deref(), engagement_code_trimmed)
+        });
         let activity_code = activity_code_trimmed.map(|value| value.to_string());
         let activity_name = activity_name_trimmed.unwrap_or("Uncategorized").to_string();
         let engagement_name = engagement_name_trimmed
@@ -1252,6 +1344,7 @@ pub fn list_timeline_weekly_summary(
             activity_name: activity_name.clone(),
             engagement_name: engagement_name.clone(),
             client_name: client_name.clone(),
+            engagement_type,
             is_uncategorized,
         };
 
@@ -1265,6 +1358,7 @@ pub fn list_timeline_weekly_summary(
                 activity_name: activity_name.clone(),
                 engagement_name: engagement_name.clone(),
                 client_name: client_name.clone(),
+                engagement_type,
                 is_uncategorized,
                 day_minutes: [0; 7],
                 day_notes: std::array::from_fn(|_| Vec::new()),
@@ -1301,6 +1395,7 @@ pub fn list_timeline_weekly_summary(
                 activity_name: accumulator.activity_name,
                 engagement_name: accumulator.engagement_name,
                 client_name: accumulator.client_name,
+                engagement_type: accumulator.engagement_type,
                 is_uncategorized: accumulator.is_uncategorized,
                 row_total_minutes: accumulator.day_minutes.iter().sum(),
                 cells,
@@ -1347,13 +1442,32 @@ pub fn list_timeline_weekly_summary(
             })
     });
 
-    let mut day_total_minutes = vec![0; 7];
+    let mut day_total_breakdowns = vec![empty_timeline_total_breakdown(); 7];
     for row in &rows {
         for (index, cell) in row.cells.iter().enumerate() {
-            day_total_minutes[index] += cell.total_minutes;
+            add_weekly_summary_minutes_to_breakdown(
+                &mut day_total_breakdowns[index],
+                row.is_uncategorized,
+                row.engagement_type,
+                cell.total_minutes,
+            );
         }
     }
-    let week_total_minutes = day_total_minutes.iter().sum();
+    for breakdown in &mut day_total_breakdowns {
+        finalize_raw_timeline_total_breakdown(breakdown);
+    }
+    let mut week_total_breakdown = empty_timeline_total_breakdown();
+    for breakdown in &day_total_breakdowns {
+        week_total_breakdown.external_minutes += breakdown.external_minutes;
+        week_total_breakdown.internal_minutes += breakdown.internal_minutes;
+        week_total_breakdown.uncategorized_minutes += breakdown.uncategorized_minutes;
+    }
+    finalize_raw_timeline_total_breakdown(&mut week_total_breakdown);
+    let day_total_minutes = day_total_breakdowns
+        .iter()
+        .map(|breakdown| breakdown.primary_minutes)
+        .collect::<Vec<_>>();
+    let week_total_minutes = week_total_breakdown.primary_minutes;
 
     let days = (0..7)
         .map(|index| TimelineWeeklySummaryDay {
@@ -1375,7 +1489,44 @@ pub fn list_timeline_weekly_summary(
         rows,
         day_total_minutes,
         week_total_minutes,
+        day_total_breakdowns,
+        week_total_breakdown,
     })
+}
+
+fn empty_timeline_total_breakdown() -> TimelineTotalBreakdown {
+    TimelineTotalBreakdown {
+        primary_minutes: 0,
+        external_minutes: 0,
+        internal_minutes: 0,
+        uncategorized_minutes: 0,
+    }
+}
+
+fn add_weekly_summary_minutes_to_breakdown(
+    breakdown: &mut TimelineTotalBreakdown,
+    is_uncategorized: bool,
+    engagement_type: Option<EngagementType>,
+    minutes: i64,
+) {
+    if minutes <= 0 {
+        return;
+    }
+
+    if is_uncategorized {
+        breakdown.uncategorized_minutes += minutes;
+        return;
+    }
+
+    match engagement_type.unwrap_or(EngagementType::External) {
+        EngagementType::External => breakdown.external_minutes += minutes,
+        EngagementType::Internal => breakdown.internal_minutes += minutes,
+    }
+}
+
+fn finalize_raw_timeline_total_breakdown(breakdown: &mut TimelineTotalBreakdown) {
+    breakdown.primary_minutes =
+        breakdown.external_minutes + breakdown.internal_minutes + breakdown.uncategorized_minutes;
 }
 
 pub fn list_warning_flags(conn: &Connection, entry_id: &str) -> AppResult<Vec<WarningType>> {
@@ -1643,6 +1794,34 @@ fn normalize_optional_code(raw_value: Option<String>) -> Option<String> {
     })
 }
 
+fn infer_engagement_type_from_code(code: Option<&str>) -> EngagementType {
+    match code
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .next()
+        .map(|character| character.to_ascii_uppercase())
+    {
+        Some('I') | Some('A') => EngagementType::Internal,
+        _ => EngagementType::External,
+    }
+}
+
+fn engagement_type_db_value(engagement_type: EngagementType) -> &'static str {
+    match engagement_type {
+        EngagementType::External => "external",
+        EngagementType::Internal => "internal",
+    }
+}
+
+fn db_value_to_engagement_type(value: Option<&str>, code: Option<&str>) -> EngagementType {
+    match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "internal" => EngagementType::Internal,
+        "external" => EngagementType::External,
+        _ => infer_engagement_type_from_code(code),
+    }
+}
+
 fn normalize_usage_description(raw_value: String) -> AppResult<String> {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
@@ -1702,7 +1881,7 @@ mod tests {
         upsert_activity, upsert_app_setting, upsert_engagement,
     };
     use crate::models::{
-        ActivityUpsertInput, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
+        ActivityUpsertInput, EngagementType, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
         TranscriptionModelId,
     };
 
@@ -1723,6 +1902,7 @@ mod tests {
                 code: None,
                 name: "No Code Engagement".to_string(),
                 client: None,
+                engagement_type: None,
                 color_hex: None,
                 tags: vec![],
                 describe_when_to_use: "Use when the user has no external code.".to_string(),
@@ -1739,6 +1919,131 @@ mod tests {
 
         assert!(saved.code.is_none());
         assert_eq!(saved.name, "No Code Engagement");
+        assert_eq!(saved.engagement_type, EngagementType::External);
+    }
+
+    #[test]
+    fn engagement_upsert_infers_type_from_code_when_missing() {
+        let connection = test_connection();
+
+        let internal_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some(" i-100 ".to_string()),
+                name: "Internal Work".to_string(),
+                client: None,
+                engagement_type: None,
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for internal work.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("internal engagement should save");
+
+        let admin_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some("A-200".to_string()),
+                name: "Admin Work".to_string(),
+                client: None,
+                engagement_type: None,
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for admin work.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("admin engagement should save");
+
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        let internal = engagements
+            .iter()
+            .find(|engagement| engagement.id == internal_id)
+            .expect("internal engagement should exist");
+        let admin = engagements
+            .iter()
+            .find(|engagement| engagement.id == admin_id)
+            .expect("admin engagement should exist");
+
+        assert_eq!(internal.engagement_type, EngagementType::Internal);
+        assert_eq!(admin.engagement_type, EngagementType::Internal);
+    }
+
+    #[test]
+    fn engagement_upsert_preserves_manual_type_override() {
+        let connection = test_connection();
+
+        let engagement_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some("I-Manual-External".to_string()),
+                name: "Manual External".to_string(),
+                client: None,
+                engagement_type: Some(EngagementType::External),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for external work despite the code.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("engagement should save");
+
+        let saved = list_engagements(&connection)
+            .expect("engagements should load")
+            .into_iter()
+            .find(|engagement| engagement.id == engagement_id)
+            .expect("saved engagement should exist");
+
+        assert_eq!(saved.engagement_type, EngagementType::External);
+    }
+
+    #[test]
+    fn migrations_backfill_engagement_type_from_existing_codes() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE engagements (
+                  id TEXT PRIMARY KEY,
+                  code TEXT,
+                  name TEXT NOT NULL,
+                  client TEXT,
+                  color_hex TEXT,
+                  tags TEXT NOT NULL,
+                  describe_when_to_use TEXT,
+                  is_active INTEGER NOT NULL DEFAULT 1,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL
+                );
+
+                INSERT INTO engagements (
+                  id, code, name, client, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+                )
+                VALUES
+                  ('eng-internal', 'A-100', 'Admin', NULL, NULL, '[]', 'Use for admin.', 1, 0, 0),
+                  ('eng-external', 'E-100', 'External', NULL, NULL, '[]', 'Use for external.', 1, 0, 0);
+                "#,
+            )
+            .expect("legacy schema should load");
+
+        run_migrations(&connection).expect("migrations should run");
+
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        let admin = engagements
+            .iter()
+            .find(|engagement| engagement.id == "eng-internal")
+            .expect("admin engagement should exist");
+        let external = engagements
+            .iter()
+            .find(|engagement| engagement.id == "eng-external")
+            .expect("external engagement should exist");
+
+        assert_eq!(admin.engagement_type, EngagementType::Internal);
+        assert_eq!(external.engagement_type, EngagementType::External);
     }
 
     #[test]
@@ -2079,6 +2384,7 @@ mod tests {
                 code: None,
                 name: "Client Work".to_string(),
                 client: Some("Example Client".to_string()),
+                engagement_type: Some(EngagementType::External),
                 color_hex: None,
                 tags: vec![],
                 describe_when_to_use: "Use for client delivery work.".to_string(),
@@ -2154,9 +2460,13 @@ mod tests {
         let row = summary.rows.first().expect("summary row should exist");
 
         assert!(!row.is_uncategorized);
+        assert_eq!(row.engagement_type, Some(EngagementType::External));
         assert!(row.engagement_code.is_none());
         assert!(row.activity_code.is_none());
         assert_eq!(row.engagement_name, "Client Work");
         assert_eq!(row.activity_name, "Fieldwork");
+        assert_eq!(summary.week_total_breakdown.external_minutes, 60);
+        assert_eq!(summary.week_total_breakdown.internal_minutes, 0);
+        assert_eq!(summary.week_total_breakdown.uncategorized_minutes, 0);
     }
 }

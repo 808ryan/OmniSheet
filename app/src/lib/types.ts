@@ -26,11 +26,14 @@ export interface Activity {
   updatedAt: number
 }
 
+export type EngagementType = 'external' | 'internal'
+
 export interface Engagement {
   id: string
   code: string | null
   name: string
   client: string | null
+  engagementType: EngagementType
   colorHex: string | null
   tags: string[]
   describeWhenToUse: string | null
@@ -45,6 +48,7 @@ export interface EngagementUpsertInput {
   code?: string | null
   name: string
   client?: string | null
+  engagementType?: EngagementType
   colorHex?: string | null
   tags: string[]
   describeWhenToUse: string
@@ -151,6 +155,7 @@ export interface TimelineEntry {
   activityId: string | null
   engagementCode: string | null
   engagementName: string | null
+  engagementType: EngagementType | null
   activityCode: string | null
   activityName: string | null
   usedActivityFallback: boolean
@@ -179,6 +184,15 @@ export interface TimelineWeeklySummary {
   rows: TimelineWeeklySummaryRow[]
   dayTotalMinutes: number[]
   weekTotalMinutes: number
+  dayTotalBreakdowns: TimelineTotalBreakdown[]
+  weekTotalBreakdown: TimelineTotalBreakdown
+}
+
+export interface TimelineTotalBreakdown {
+  primaryMinutes: number
+  externalMinutes: number
+  internalMinutes: number
+  uncategorizedMinutes: number
 }
 
 export interface TimelineWeeklySummaryDay {
@@ -193,6 +207,7 @@ export interface TimelineWeeklySummaryRow {
   activityName: string
   engagementName: string
   clientName: string
+  engagementType: EngagementType | null
   isUncategorized: boolean
   cells: TimelineWeeklySummaryCell[]
   rowTotalMinutes: number
@@ -308,6 +323,9 @@ export interface SettingsStatus {
   availableTranscriptionModels: TranscriptionModelOption[]
   timelineExcludeUncategorizedFromDailyTotals: boolean
   timelineShowUncategorizedDailyTotal: boolean
+  timelineIncludeExternalInTotals: boolean
+  timelineIncludeInternalInTotals: boolean
+  timelineSeparateEngagementTypeTotals: boolean
   calendarBulkIgnoredKeywords: string[]
   calendarBulkIgnoreAllDayEvents: boolean
 }
@@ -315,6 +333,9 @@ export interface SettingsStatus {
 export interface SettingsTimelinePreferencesInput {
   timelineExcludeUncategorizedFromDailyTotals: boolean
   timelineShowUncategorizedDailyTotal: boolean
+  timelineIncludeExternalInTotals: boolean
+  timelineIncludeInternalInTotals: boolean
+  timelineSeparateEngagementTypeTotals: boolean
 }
 
 export interface SettingsCalendarBulkPreferencesInput {
@@ -360,6 +381,7 @@ export interface CalendarExtractCandidate {
   activityId: string | null
   engagementCode: string | null
   engagementName: string | null
+  engagementType?: EngagementType | null
   activityCode: string | null
   activityName: string | null
   warningFlags: WarningType[]
