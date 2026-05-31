@@ -10,6 +10,8 @@ pub struct ApiKeyInput {
 pub enum OpenAiModelId {
     #[serde(rename = "gpt-5.4")]
     Gpt54,
+    #[serde(rename = "gpt-5.4-mini")]
+    Gpt54Mini,
     #[serde(rename = "gpt-5-nano")]
     Gpt5Nano,
     #[serde(rename = "gpt-4.1-nano")]
@@ -23,7 +25,12 @@ impl Default for OpenAiModelId {
 }
 
 impl OpenAiModelId {
-    pub const ALL: [Self; 3] = [Self::Gpt54, Self::Gpt5Nano, Self::Gpt41Nano];
+    pub const ALL: [Self; 4] = [
+        Self::Gpt54,
+        Self::Gpt54Mini,
+        Self::Gpt5Nano,
+        Self::Gpt41Nano,
+    ];
 
     pub fn default_calendar_bulk_model() -> Self {
         Self::Gpt54
@@ -32,6 +39,7 @@ impl OpenAiModelId {
     pub fn api_name(self) -> &'static str {
         match self {
             Self::Gpt54 => "gpt-5.4",
+            Self::Gpt54Mini => "gpt-5.4-mini",
             Self::Gpt5Nano => "gpt-5-nano",
             Self::Gpt41Nano => "gpt-4.1-nano",
         }
@@ -40,6 +48,7 @@ impl OpenAiModelId {
     pub fn display_label(self) -> &'static str {
         match self {
             Self::Gpt54 => "GPT-5.4",
+            Self::Gpt54Mini => "GPT-5.4 Mini",
             Self::Gpt5Nano => "GPT-5 Nano",
             Self::Gpt41Nano => "GPT-4.1 Nano",
         }
@@ -48,6 +57,7 @@ impl OpenAiModelId {
     pub fn from_api_name(value: &str) -> Option<Self> {
         match value.trim() {
             "gpt-5.4" => Some(Self::Gpt54),
+            "gpt-5.4-mini" => Some(Self::Gpt54Mini),
             "gpt-5-nano" => Some(Self::Gpt5Nano),
             "gpt-4.1-nano" => Some(Self::Gpt41Nano),
             _ => None,
@@ -833,6 +843,8 @@ mod tests {
         );
         assert_eq!(OpenAiModelId::Gpt54.api_name(), "gpt-5.4");
         assert_eq!(OpenAiModelId::Gpt54.display_label(), "GPT-5.4");
+        assert_eq!(OpenAiModelId::Gpt54Mini.api_name(), "gpt-5.4-mini");
+        assert_eq!(OpenAiModelId::Gpt54Mini.display_label(), "GPT-5.4 Mini");
         assert_eq!(OpenAiModelId::Gpt41Nano.display_label(), "GPT-4.1 Nano");
     }
 
@@ -853,12 +865,19 @@ mod tests {
             OpenAiModelId::from_api_name("gpt-5.4"),
             Some(OpenAiModelId::Gpt54)
         );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.4-mini"),
+            Some(OpenAiModelId::Gpt54Mini)
+        );
         assert_eq!(OpenAiModelId::from_api_name("gpt-4.1"), None);
 
         let options = OpenAiModelId::options();
         assert!(options
             .iter()
             .any(|option| option.id == OpenAiModelId::Gpt54));
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt54Mini));
     }
 
     #[test]
