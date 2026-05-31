@@ -68,6 +68,7 @@ import type {
   CaptureSourceId,
   DiagnosticsEvent,
   Engagement,
+  EngagementType,
   MicrophonePermissionStatus,
   OpenAiModelId,
   SettingsStatus,
@@ -77,6 +78,7 @@ import type {
   SummaryLayoutState,
   TimelineDaySummary,
   TimelineEntry,
+  TimelineTotalBreakdown,
   TimelineWeekView,
   TimelineWeeklySummary,
   TimelineWeeklySummaryNote,
@@ -146,6 +148,7 @@ interface EngagementFormState {
   code: string
   name: string
   client: string
+  engagementType: EngagementType
   colorHex: string
   describeWhenToUse: string
   tags: string
@@ -251,12 +254,6 @@ interface TimelineLabel {
   label: string
   fullLabel: string
   tier: TimelineLabelTier
-}
-
-interface TimelineTotalBreakdown {
-  primaryMinutes: number
-  categorizedMinutes: number
-  uncategorizedMinutes: number
 }
 
 interface MiniCalendarProps {
@@ -385,6 +382,7 @@ const EMPTY_ENGAGEMENT_FORM: EngagementFormState = {
   code: '',
   name: '',
   client: '',
+  engagementType: 'external',
   colorHex: '',
   describeWhenToUse: '',
   tags: '',
@@ -403,6 +401,11 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
 
 function getDefaultActivityEngagementId(engagements: Engagement[]): string {
   return engagements[0]?.id ?? ''
+}
+
+function inferEngagementTypeFromCode(code: string | null | undefined): EngagementType {
+  const firstCharacter = code?.trim().charAt(0).toUpperCase()
+  return firstCharacter === 'I' || firstCharacter === 'A' ? 'internal' : 'external'
 }
 
 function buildEmptyActivityForm(engagementId: string): ActivityFormState {
@@ -646,6 +649,7 @@ function App() {
   const [expandedEngagementId, setExpandedEngagementId] = useState<string | null>(null)
   const [engagementForm, setEngagementForm] =
     useState<EngagementFormState>(EMPTY_ENGAGEMENT_FORM)
+  const [hasManualEngagementTypeSelection, setHasManualEngagementTypeSelection] = useState(false)
   const [activityForm, setActivityForm] = useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
 
   const [captureMessage, setCaptureMessage] = useState('')
@@ -990,8 +994,26 @@ function App() {
     settingsStatus?.timelineExcludeUncategorizedFromDailyTotals ?? true
   const timelineShowUncategorizedDailyTotal =
     settingsStatus?.timelineShowUncategorizedDailyTotal ?? true
+  const timelineIncludeExternalInTotals =
+    settingsStatus?.timelineIncludeExternalInTotals ?? true
+  const timelineIncludeInternalInTotals =
+    settingsStatus?.timelineIncludeInternalInTotals ?? false
+  const timelineSeparateEngagementTypeTotals =
+    settingsStatus?.timelineSeparateEngagementTypeTotals ?? true
   const shouldShowTimelineUncategorizedDailyTotal =
     timelineExcludeUncategorizedFromDailyTotals && timelineShowUncategorizedDailyTotal
+  const timelineTotalPreferences = useMemo(
+    () => ({
+      includeExternalInTotals: timelineIncludeExternalInTotals,
+      includeInternalInTotals: timelineIncludeInternalInTotals,
+      excludeUncategorizedFromTotals: timelineExcludeUncategorizedFromDailyTotals,
+    }),
+    [
+      timelineExcludeUncategorizedFromDailyTotals,
+      timelineIncludeExternalInTotals,
+      timelineIncludeInternalInTotals,
+    ],
+  )
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
   const timelineHeaderDate = useMemo(
@@ -1027,9 +1049,9 @@ function App() {
   const timelineDayTotalBreakdown = useMemo(
     () => buildTimelineTotalBreakdown(
       timelineEntriesForLayout,
-      timelineExcludeUncategorizedFromDailyTotals,
+      timelineTotalPreferences,
     ),
-    [timelineEntriesForLayout, timelineExcludeUncategorizedFromDailyTotals],
+    [timelineEntriesForLayout, timelineTotalPreferences],
   )
   const shouldShowTimelineDayUncategorizedDailyTotal =
     shouldShowTimelineUncategorizedDailyTotal
@@ -1080,13 +1102,19 @@ function App() {
     () => buildTimelineDayTotalBreakdowns(
       weekTimelineEntriesForLayout,
       weekTimelineDays,
-      timelineExcludeUncategorizedFromDailyTotals,
+      timelineTotalPreferences,
     ),
     [
-      timelineExcludeUncategorizedFromDailyTotals,
+      timelineTotalPreferences,
       weekTimelineDays,
       weekTimelineEntriesForLayout,
     ],
+  )
+  const displayedSummaryWeekTotalBreakdown = useMemo(
+    () => weeklySummary
+      ? finalizeTimelineTotalBreakdown(weeklySummary.weekTotalBreakdown, timelineTotalPreferences)
+      : null,
+    [timelineTotalPreferences, weeklySummary],
   )
   const baselinePositionedWeekTimelineEntries = useMemo(
     () => positionWeekTimelineEntries(
@@ -1281,6 +1309,7 @@ function App() {
 
   const openCreateEngagementEditor = useCallback(() => {
     setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    setHasManualEngagementTypeSelection(false)
     setCodeEditorSurface('create-engagement')
     setEditorActivationKey((previous) => previous + 1)
   }, [])
@@ -1298,6 +1327,7 @@ function App() {
   const closeCodeEditor = useCallback(() => {
     if (isEngagementEditorOpen) {
       setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+      setHasManualEngagementTypeSelection(false)
     }
 
     if (isActivityEditorOpen) {
@@ -1356,6 +1386,7 @@ function App() {
       const engagementStillExists = engagements.some((engagement) => engagement.id === engagementForm.id)
       if (!engagementStillExists) {
         setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+        setHasManualEngagementTypeSelection(false)
         setCodeEditorSurface(null)
       }
       return
@@ -3314,6 +3345,7 @@ function App() {
         code: engagementForm.code.trim() || null,
         name: engagementForm.name,
         client: engagementForm.client || null,
+        engagementType: engagementForm.engagementType,
         colorHex,
         describeWhenToUse,
         tags: parseTagInput(engagementForm.tags),
@@ -3321,6 +3353,7 @@ function App() {
       })
 
       setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+      setHasManualEngagementTypeSelection(false)
       await refreshAfterMutation()
       if (isEditing) {
         setCodeEditorSurface(null)
@@ -3343,11 +3376,13 @@ function App() {
   const onEditEngagement = (engagement: Engagement) => {
     setExpandedEngagementId(engagement.id)
     setCodeEditorSurface('edit-engagement')
+    setHasManualEngagementTypeSelection(false)
     setEngagementForm({
       id: engagement.id,
       code: engagement.code ?? '',
       name: engagement.name,
       client: engagement.client ?? '',
+      engagementType: engagement.engagementType,
       colorHex: engagement.colorHex ?? '',
       describeWhenToUse: engagement.describeWhenToUse ?? '',
       tags: joinTags(engagement.tags),
@@ -3890,9 +3925,17 @@ function App() {
   const onSaveTimelinePreferences = (
     timelineExcludeUncategorizedFromDailyTotals: boolean,
     timelineShowUncategorizedDailyTotal: boolean,
+    timelineIncludeExternalInTotals: boolean,
+    timelineIncludeInternalInTotals: boolean,
+    timelineSeparateEngagementTypeTotals: boolean,
   ) => {
     const previousStatus = settingsStatus
     if (!previousStatus) {
+      return
+    }
+
+    if (!timelineIncludeExternalInTotals && !timelineIncludeInternalInTotals) {
+      setErrorMessage('At least one of External or Internal type codes must be included in totals.')
       return
     }
 
@@ -3900,6 +3943,9 @@ function App() {
       ...previousStatus,
       timelineExcludeUncategorizedFromDailyTotals,
       timelineShowUncategorizedDailyTotal,
+      timelineIncludeExternalInTotals,
+      timelineIncludeInternalInTotals,
+      timelineSeparateEngagementTypeTotals,
     })
 
     void runAction(async () => {
@@ -3907,6 +3953,9 @@ function App() {
         await settingsSetTimelinePreferences({
           timelineExcludeUncategorizedFromDailyTotals,
           timelineShowUncategorizedDailyTotal,
+          timelineIncludeExternalInTotals,
+          timelineIncludeInternalInTotals,
+          timelineSeparateEngagementTypeTotals,
         })
         const status = await settingsGetStatus()
         setSettingsStatus(status)
@@ -5337,18 +5386,20 @@ function App() {
                 </h2>
                 <p className="timeline-range">
                   {timelineHeaderDate.weekday}
-                  <span className="timeline-range-separator" aria-hidden="true">•</span>
-                  <span className="timeline-range-total">
-                    {formatTimelineHoursCompact(timelineDayTotalBreakdown.primaryMinutes)} total
-                  </span>
-                  {shouldShowTimelineDayUncategorizedDailyTotal ? (
-                    <>
+                  {buildTimelineTotalDisplaySegments(timelineDayTotalBreakdown, {
+                    includePrimaryTotal: true,
+                    separateEngagementTypeTotals: timelineSeparateEngagementTypeTotals,
+                    showUncategorizedTotal: shouldShowTimelineDayUncategorizedDailyTotal,
+                  }).map((segment) => (
+                    <Fragment key={segment.key}>
                       <span className="timeline-range-separator" aria-hidden="true">•</span>
-                      <span className="timeline-range-total timeline-range-total-secondary">
-                        {formatTimelineHoursCompact(timelineDayTotalBreakdown.uncategorizedMinutes)} uncategorized
+                      <span
+                        className={`timeline-range-total ${segment.key === 'total' ? '' : 'timeline-range-total-secondary'}`}
+                      >
+                        {segment.label}
                       </span>
-                    </>
-                  ) : null}
+                    </Fragment>
+                  ))}
                 </p>
               </div>
               <div className="timeline-controls timeline-stepper" aria-label="Day navigation">
@@ -5616,6 +5667,10 @@ function App() {
                       const shouldShowDayUncategorizedDailyTotal =
                         shouldShowTimelineUncategorizedDailyTotal
                         && dayTotalBreakdown.uncategorizedMinutes > 0
+                      const weekDayPrimaryTotalSegments = buildWeekTimelinePrimaryTotalSegments(
+                        dayTotalBreakdown,
+                        timelineSeparateEngagementTypeTotals,
+                      )
                       const headerClassName = [
                         'week-timeline-day-header',
                         isSelectedDay ? 'is-selected' : '',
@@ -5630,9 +5685,17 @@ function App() {
                             {formatWeekTimelineDayLabel(day.date)}
                           </span>
                           <span className="week-timeline-day-total">
-                            <span>
-                              {formatTimelineHoursCompact(dayTotalBreakdown.primaryMinutes)}
-                              {shouldShowTimelineUncategorizedDailyTotal ? ' total' : ''}
+                            <span className="week-timeline-day-total-line">
+                              {weekDayPrimaryTotalSegments.map((segment, segmentIndex) => (
+                                <Fragment key={segment.key}>
+                                  {segmentIndex > 0 ? (
+                                    <span className="week-timeline-day-total-separator" aria-hidden="true">
+                                      •
+                                    </span>
+                                  ) : null}
+                                  <span>{segment.label}</span>
+                                </Fragment>
+                              ))}
                             </span>
                             {shouldShowDayUncategorizedDailyTotal ? (
                               <span className="week-timeline-day-uncategorized-total">
@@ -5879,12 +5942,16 @@ function App() {
                             Code
                             <input
                               value={engagementForm.code}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                const nextCode = event.target.value
                                 setEngagementForm((previous) => ({
                                   ...previous,
-                                  code: event.target.value,
+                                  code: nextCode,
+                                  engagementType: hasManualEngagementTypeSelection
+                                    ? previous.engagementType
+                                    : inferEngagementTypeFromCode(nextCode),
                                 }))
-                              }
+                              }}
                             />
                           </label>
                           <label>
@@ -5931,6 +5998,32 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="code-editor-field">
+                            <span className="code-editor-field-label">Type</span>
+                            <div
+                              className="segmented-control engagement-type-segmented"
+                              role="group"
+                              aria-label="Engagement type"
+                            >
+                              {(['external', 'internal'] as const).map((engagementType) => (
+                                <button
+                                  key={engagementType}
+                                  type="button"
+                                  className={engagementForm.engagementType === engagementType ? 'active' : ''}
+                                  aria-pressed={engagementForm.engagementType === engagementType}
+                                  onClick={() => {
+                                    setHasManualEngagementTypeSelection(true)
+                                    setEngagementForm((previous) => ({
+                                      ...previous,
+                                      engagementType,
+                                    }))
+                                  }}
+                                >
+                                  {engagementType === 'external' ? 'External' : 'Internal'}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
                           <label>
                             Color
                             <div className="color-input-row">
@@ -6444,7 +6537,7 @@ function App() {
                 </div>
                 <div className="settings-preference-row settings-toggle-row">
                   <label htmlFor="settings-timeline-exclude-uncategorized">
-                    Exclude uncategorized time from daily totals
+                    Exclude uncategorized time from daily, weekly, and summary view totals
                   </label>
                   <div className="settings-toggle-group">
                     <input
@@ -6455,6 +6548,9 @@ function App() {
                         onSaveTimelinePreferences(
                           event.target.checked,
                           timelineShowUncategorizedDailyTotal,
+                          timelineIncludeExternalInTotals,
+                          timelineIncludeInternalInTotals,
+                          timelineSeparateEngagementTypeTotals,
                         )
                       }
                       disabled={isBusy || settingsStatus === null}
@@ -6463,7 +6559,7 @@ function App() {
                 </div>
                 <div className="settings-preference-row settings-toggle-row">
                   <label htmlFor="settings-timeline-show-uncategorized">
-                    Display uncategorized time alongside categorized time in daily totals
+                    Display uncategorized time alongside categorized time in daily, weekly, and summary view totals.
                   </label>
                   <div className="settings-toggle-group">
                     <input
@@ -6474,6 +6570,9 @@ function App() {
                         onSaveTimelinePreferences(
                           timelineExcludeUncategorizedFromDailyTotals,
                           event.target.checked,
+                          timelineIncludeExternalInTotals,
+                          timelineIncludeInternalInTotals,
+                          timelineSeparateEngagementTypeTotals,
                         )
                       }
                       disabled={
@@ -6484,6 +6583,80 @@ function App() {
                     />
                   </div>
                 </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-timeline-include-external">
+                    External type codes should be included in the weekly totals
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-timeline-include-external"
+                      type="checkbox"
+                      checked={timelineIncludeExternalInTotals}
+                      onChange={(event) =>
+                        onSaveTimelinePreferences(
+                          timelineExcludeUncategorizedFromDailyTotals,
+                          timelineShowUncategorizedDailyTotal,
+                          event.target.checked,
+                          timelineIncludeInternalInTotals,
+                          timelineSeparateEngagementTypeTotals,
+                        )
+                      }
+                      disabled={
+                        isBusy
+                        || settingsStatus === null
+                        || (timelineIncludeExternalInTotals && !timelineIncludeInternalInTotals)
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-timeline-include-internal">
+                    Internal type codes should be included in the weekly totals.
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-timeline-include-internal"
+                      type="checkbox"
+                      checked={timelineIncludeInternalInTotals}
+                      onChange={(event) =>
+                        onSaveTimelinePreferences(
+                          timelineExcludeUncategorizedFromDailyTotals,
+                          timelineShowUncategorizedDailyTotal,
+                          timelineIncludeExternalInTotals,
+                          event.target.checked,
+                          timelineSeparateEngagementTypeTotals,
+                        )
+                      }
+                      disabled={
+                        isBusy
+                        || settingsStatus === null
+                        || (timelineIncludeInternalInTotals && !timelineIncludeExternalInTotals)
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-timeline-separate-types">
+                    Separate out External and Internal type codes in the daily, weekly, and summary view totals.
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-timeline-separate-types"
+                      type="checkbox"
+                      checked={timelineSeparateEngagementTypeTotals}
+                      onChange={(event) =>
+                        onSaveTimelinePreferences(
+                          timelineExcludeUncategorizedFromDailyTotals,
+                          timelineShowUncategorizedDailyTotal,
+                          timelineIncludeExternalInTotals,
+                          timelineIncludeInternalInTotals,
+                          event.target.checked,
+                        )
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    />
+                  </div>
+                </div>
               </section>
 
               <section className="settings-card">
@@ -6491,7 +6664,12 @@ function App() {
                   <h3>Calendar Bulk Add</h3>
                 </div>
                 <form className="settings-preference-row" onSubmit={onSaveCalendarBulkPreferences}>
-                  <label htmlFor="settings-calendar-ignore-keywords">Ignored keywords</label>
+                  <label htmlFor="settings-calendar-ignore-keywords">
+                    Ignored keywords
+                    <span className="field-helper">
+                      Separate words/phrases by new line, comma, or semicolons.
+                    </span>
+                  </label>
                   <div className="settings-control-group settings-control-group-vertical">
                     <textarea
                       id="settings-calendar-ignore-keywords"
@@ -6753,10 +6931,26 @@ function App() {
             <div className="summary-week-total">
               <span>Week Total Hours</span>
               <strong>
-                {weeklySummary
-                  ? formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+                {displayedSummaryWeekTotalBreakdown
+                  ? `${formatTimelineHoursCompact(displayedSummaryWeekTotalBreakdown.primaryMinutes)} total`
                   : '--'}
               </strong>
+              {displayedSummaryWeekTotalBreakdown ? (
+                <span className="summary-week-total-breakdown">
+                  {buildTimelineTotalDisplaySegments(displayedSummaryWeekTotalBreakdown, {
+                    includePrimaryTotal: false,
+                    separateEngagementTypeTotals: timelineSeparateEngagementTypeTotals,
+                    showUncategorizedTotal: shouldShowTimelineUncategorizedDailyTotal,
+                  }).map((segment, segmentIndex) => (
+                    <Fragment key={segment.key}>
+                      {segmentIndex > 0 ? (
+                        <span className="summary-total-separator" aria-hidden="true">•</span>
+                      ) : null}
+                      <span>{segment.label}</span>
+                    </Fragment>
+                  ))}
+                </span>
+              ) : null}
             </div>
 
             {weeklySummaryError ? (
@@ -6829,7 +7023,15 @@ function App() {
                           ) ? 'summary-cell-wrap' : ''}
                           style={{ minWidth: column.width }}
                         >
-                          {renderSummaryFooterCell(column, columnIndex, summaryFooterLabelIndex, weeklySummary)}
+                          {renderSummaryFooterCell(
+                            column,
+                            columnIndex,
+                            summaryFooterLabelIndex,
+                            weeklySummary,
+                            timelineTotalPreferences,
+                            timelineSeparateEngagementTypeTotals,
+                            shouldShowTimelineUncategorizedDailyTotal,
+                          )}
                         </td>
                       ))}
                     </tr>
@@ -7022,7 +7224,13 @@ function App() {
                             </div>
                           ))}
                           <div className="summary-layout-editor-cell summary-layout-editor-footer-cell">
-                            {renderSummaryPreviewFooter(previewColumn, weeklySummary)}
+                            {renderSummaryPreviewFooter(
+                              previewColumn,
+                              weeklySummary,
+                              timelineTotalPreferences,
+                              timelineSeparateEngagementTypeTotals,
+                              shouldShowTimelineUncategorizedDailyTotal,
+                            )}
                           </div>
                         </div>
                         <button
@@ -7358,6 +7566,9 @@ function calendarCandidateToTimelineEntry(candidate: CalendarReviewCandidate): T
     activityId: candidate.activityId,
     engagementCode: candidate.engagementCode,
     engagementName: candidate.engagementName,
+    engagementType: candidate.engagementType ?? (
+      candidate.engagementId ? inferEngagementTypeFromCode(candidate.engagementCode) : null
+    ),
     activityCode: candidate.activityCode,
     activityName: candidate.activityName,
     usedActivityFallback: false,
@@ -8010,20 +8221,96 @@ function applyDragPreviewToTimelineEntries(
 function createEmptyTimelineTotalBreakdown(): TimelineTotalBreakdown {
   return {
     primaryMinutes: 0,
-    categorizedMinutes: 0,
+    externalMinutes: 0,
+    internalMinutes: 0,
     uncategorizedMinutes: 0,
   }
 }
 
+interface TimelineTotalPreferences {
+  includeExternalInTotals: boolean
+  includeInternalInTotals: boolean
+  excludeUncategorizedFromTotals: boolean
+}
+
+interface TimelineTotalDisplaySegment {
+  key: string
+  label: string
+}
+
+function createTimelineTotalSegment(
+  key: string,
+  minutes: number,
+  label: string,
+): TimelineTotalDisplaySegment {
+  return {
+    key,
+    label: `${formatTimelineHoursCompact(minutes)} ${label}`,
+  }
+}
+
+function buildTimelineTotalDisplaySegments(
+  breakdown: TimelineTotalBreakdown,
+  options: {
+    includePrimaryTotal: boolean
+    separateEngagementTypeTotals: boolean
+    showUncategorizedTotal: boolean
+  },
+): TimelineTotalDisplaySegment[] {
+  const segments: TimelineTotalDisplaySegment[] = []
+
+  if (options.includePrimaryTotal) {
+    segments.push(createTimelineTotalSegment('total', breakdown.primaryMinutes, 'total'))
+  }
+
+  if (options.separateEngagementTypeTotals) {
+    if (breakdown.externalMinutes > 0) {
+      segments.push(createTimelineTotalSegment('external', breakdown.externalMinutes, 'external'))
+    }
+    if (breakdown.internalMinutes > 0) {
+      segments.push(createTimelineTotalSegment('internal', breakdown.internalMinutes, 'internal'))
+    }
+  }
+
+  if (options.showUncategorizedTotal && breakdown.uncategorizedMinutes > 0) {
+    segments.push(
+      createTimelineTotalSegment('uncategorized', breakdown.uncategorizedMinutes, 'uncategorized'),
+    )
+  }
+
+  return segments
+}
+
+function buildWeekTimelinePrimaryTotalSegments(
+  breakdown: TimelineTotalBreakdown,
+  separateEngagementTypeTotals: boolean,
+): TimelineTotalDisplaySegment[] {
+  if (
+    separateEngagementTypeTotals
+    && (breakdown.externalMinutes > 0 || breakdown.internalMinutes > 0)
+  ) {
+    return buildTimelineTotalDisplaySegments(breakdown, {
+      includePrimaryTotal: false,
+      separateEngagementTypeTotals: true,
+      showUncategorizedTotal: false,
+    })
+  }
+
+  return [createTimelineTotalSegment('total', breakdown.primaryMinutes, 'total')]
+}
+
 function finalizeTimelineTotalBreakdown(
   breakdown: TimelineTotalBreakdown,
-  excludeUncategorized: boolean,
+  preferences: TimelineTotalPreferences,
 ): TimelineTotalBreakdown {
+  const primaryMinutes =
+    (preferences.includeExternalInTotals ? breakdown.externalMinutes : 0)
+    + (preferences.includeInternalInTotals ? breakdown.internalMinutes : 0)
+    + (preferences.excludeUncategorizedFromTotals ? 0 : breakdown.uncategorizedMinutes)
+
   return {
     ...breakdown,
-    primaryMinutes: excludeUncategorized
-      ? breakdown.categorizedMinutes
-      : breakdown.categorizedMinutes + breakdown.uncategorizedMinutes,
+    primaryMinutes,
   }
 }
 
@@ -8036,12 +8323,17 @@ function addEntryToTimelineTotalBreakdown(
     return
   }
 
-  breakdown.categorizedMinutes += entry.durationMinutes
+  if (entry.engagementType === 'internal') {
+    breakdown.internalMinutes += entry.durationMinutes
+    return
+  }
+
+  breakdown.externalMinutes += entry.durationMinutes
 }
 
 function buildTimelineTotalBreakdown(
   entries: TimelineEntry[],
-  excludeUncategorized: boolean,
+  preferences: TimelineTotalPreferences,
 ): TimelineTotalBreakdown {
   const breakdown = createEmptyTimelineTotalBreakdown()
 
@@ -8049,13 +8341,13 @@ function buildTimelineTotalBreakdown(
     addEntryToTimelineTotalBreakdown(breakdown, entry)
   }
 
-  return finalizeTimelineTotalBreakdown(breakdown, excludeUncategorized)
+  return finalizeTimelineTotalBreakdown(breakdown, preferences)
 }
 
 function buildTimelineDayTotalBreakdowns(
   entries: TimelineEntry[],
   days: TimelineWeekView['days'],
-  excludeUncategorized: boolean,
+  preferences: TimelineTotalPreferences,
 ): Map<string, TimelineTotalBreakdown> {
   const totalsByDate = new Map(
     days.map((day) => [day.date, createEmptyTimelineTotalBreakdown()] as const),
@@ -8072,7 +8364,7 @@ function buildTimelineDayTotalBreakdowns(
   }
 
   for (const [date, breakdown] of totalsByDate) {
-    totalsByDate.set(date, finalizeTimelineTotalBreakdown(breakdown, excludeUncategorized))
+    totalsByDate.set(date, finalizeTimelineTotalBreakdown(breakdown, preferences))
   }
 
   return totalsByDate
@@ -8860,17 +9152,30 @@ function renderSummaryPreviewCell(
 function renderSummaryPreviewFooter(
   column: SummaryLayoutViewColumn,
   weeklySummary: TimelineWeeklySummary | null,
+  timelineTotalPreferences: TimelineTotalPreferences,
+  separateEngagementTypeTotals: boolean,
+  showUncategorizedTotal: boolean,
 ) {
   if (!weeklySummary) {
     return ''
   }
 
   if (column.kind === 'day' && column.dayIndex !== undefined) {
-    return formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
+    return renderSummaryTotalBreakdown(
+      weeklySummary.dayTotalBreakdowns[column.dayIndex],
+      timelineTotalPreferences,
+      separateEngagementTypeTotals,
+      showUncategorizedTotal,
+    )
   }
 
   if (column.kind === 'rowTotal') {
-    return formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+    return renderSummaryTotalBreakdown(
+      weeklySummary.weekTotalBreakdown,
+      timelineTotalPreferences,
+      separateEngagementTypeTotals,
+      showUncategorizedTotal,
+    )
   }
 
   return ''
@@ -8881,13 +9186,26 @@ function renderSummaryFooterCell(
   columnIndex: number,
   summaryFooterLabelIndex: number,
   weeklySummary: TimelineWeeklySummary,
+  timelineTotalPreferences: TimelineTotalPreferences,
+  separateEngagementTypeTotals: boolean,
+  showUncategorizedTotal: boolean,
 ) {
   if (column.kind === 'day' && column.dayIndex !== undefined) {
-    return formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
+    return renderSummaryTotalBreakdown(
+      weeklySummary.dayTotalBreakdowns[column.dayIndex],
+      timelineTotalPreferences,
+      separateEngagementTypeTotals,
+      showUncategorizedTotal,
+    )
   }
 
   if (column.kind === 'rowTotal') {
-    return formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+    return renderSummaryTotalBreakdown(
+      weeklySummary.weekTotalBreakdown,
+      timelineTotalPreferences,
+      separateEngagementTypeTotals,
+      showUncategorizedTotal,
+    )
   }
 
   return (
@@ -8895,6 +9213,43 @@ function renderSummaryFooterCell(
     && columnIndex === summaryFooterLabelIndex
     && column.kind !== 'day'
   ) ? 'Day Totals' : ''
+}
+
+function renderSummaryTotalBreakdown(
+  breakdown: TimelineTotalBreakdown | undefined,
+  timelineTotalPreferences: TimelineTotalPreferences,
+  separateEngagementTypeTotals: boolean,
+  showUncategorizedTotal: boolean,
+) {
+  if (!breakdown) {
+    return formatMinutesAsHours(0)
+  }
+
+  const displayedBreakdown = finalizeTimelineTotalBreakdown(breakdown, timelineTotalPreferences)
+
+  const segments = buildTimelineTotalDisplaySegments(displayedBreakdown, {
+    includePrimaryTotal: false,
+    separateEngagementTypeTotals,
+    showUncategorizedTotal,
+  })
+
+  return (
+    <span className="summary-total-breakdown">
+      <span>{formatMinutesAsHours(displayedBreakdown.primaryMinutes)}</span>
+      {segments.length > 0 ? (
+        <span className="summary-total-breakdown-detail">
+          {segments.map((segment, segmentIndex) => (
+            <Fragment key={segment.key}>
+              {segmentIndex > 0 ? (
+                <span className="summary-total-separator" aria-hidden="true">•</span>
+              ) : null}
+              <span>{segment.label}</span>
+            </Fragment>
+          ))}
+        </span>
+      ) : null}
+    </span>
+  )
 }
 
 function buildSummaryLayoutInsertOptions(preset: SummaryLayoutPreset): Array<{

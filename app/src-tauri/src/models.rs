@@ -6,7 +6,7 @@ pub struct ApiKeyInput {
     pub api_key: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OpenAiModelId {
     #[serde(rename = "gpt-5.4")]
     Gpt54,
@@ -73,6 +73,22 @@ impl OpenAiModelId {
             })
             .collect()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngagementType {
+    External,
+    Internal,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineTotalBreakdown {
+    pub primary_minutes: i64,
+    pub external_minutes: i64,
+    pub internal_minutes: i64,
+    pub uncategorized_minutes: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +186,9 @@ pub struct SettingsSetTranscriptionModelInput {
 pub struct SettingsSetTimelinePreferencesInput {
     pub timeline_exclude_uncategorized_from_daily_totals: bool,
     pub timeline_show_uncategorized_daily_total: bool,
+    pub timeline_include_external_in_totals: bool,
+    pub timeline_include_internal_in_totals: bool,
+    pub timeline_separate_engagement_type_totals: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +213,9 @@ pub struct SettingsStatus {
     pub available_transcription_models: Vec<TranscriptionModelOption>,
     pub timeline_exclude_uncategorized_from_daily_totals: bool,
     pub timeline_show_uncategorized_daily_total: bool,
+    pub timeline_include_external_in_totals: bool,
+    pub timeline_include_internal_in_totals: bool,
+    pub timeline_separate_engagement_type_totals: bool,
     pub calendar_bulk_ignored_keywords: Vec<String>,
     pub calendar_bulk_ignore_all_day_events: bool,
 }
@@ -244,6 +266,7 @@ pub struct Engagement {
     pub code: Option<String>,
     pub name: String,
     pub client: Option<String>,
+    pub engagement_type: EngagementType,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
     pub describe_when_to_use: Option<String>,
@@ -260,6 +283,7 @@ pub struct EngagementUpsertInput {
     pub code: Option<String>,
     pub name: String,
     pub client: Option<String>,
+    pub engagement_type: Option<EngagementType>,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
     pub describe_when_to_use: String,
@@ -411,6 +435,7 @@ pub struct CalendarExtractCandidate {
     pub activity_id: Option<String>,
     pub engagement_code: Option<String>,
     pub engagement_name: Option<String>,
+    pub engagement_type: Option<EngagementType>,
     pub activity_code: Option<String>,
     pub activity_name: Option<String>,
     pub warning_flags: Vec<WarningType>,
@@ -512,6 +537,7 @@ pub struct TimelineEntry {
     pub activity_id: Option<String>,
     pub engagement_code: Option<String>,
     pub engagement_name: Option<String>,
+    pub engagement_type: Option<EngagementType>,
     pub activity_code: Option<String>,
     pub activity_name: Option<String>,
     pub used_activity_fallback: bool,
@@ -544,6 +570,8 @@ pub struct TimelineWeeklySummary {
     pub rows: Vec<TimelineWeeklySummaryRow>,
     pub day_total_minutes: Vec<i64>,
     pub week_total_minutes: i64,
+    pub day_total_breakdowns: Vec<TimelineTotalBreakdown>,
+    pub week_total_breakdown: TimelineTotalBreakdown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -562,6 +590,7 @@ pub struct TimelineWeeklySummaryRow {
     pub activity_name: String,
     pub engagement_name: String,
     pub client_name: String,
+    pub engagement_type: Option<EngagementType>,
     pub is_uncategorized: bool,
     pub cells: Vec<TimelineWeeklySummaryCell>,
     pub row_total_minutes: i64,
