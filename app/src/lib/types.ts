@@ -169,6 +169,8 @@ export interface TimelineEntry {
   transcriptionModelUsed: TranscriptionModelId | null
   transcriptionModelUsedLabel: string | null
   warningFlags: WarningType[]
+  createdAt: number
+  updatedAt: number
 }
 
 export interface TimelineDaySummary {
@@ -308,6 +310,35 @@ export interface TimelineCreateInput {
   date: string
   startMinute: number
   endMinute: number
+  engagementId?: string | null
+  activityId?: string | null
+  description?: string | null
+}
+
+export interface HistoryListResult {
+  weekStartDate: string
+  weekEndDate: string
+  submissions: HistorySubmission[]
+  entries: TimelineEntry[]
+}
+
+export interface HistorySubmission {
+  id: string
+  rawText: string
+  captureSource: string
+  status: string
+  messageTimestamp: number
+  createdAt: number
+  interpretedEntryCount: number
+  uniqueEntryCount: number
+  savedEntryCount: number
+  truncatedEntryCount: number
+  containsMultipleEvents: boolean
+  confidence: number
+  modelUsed: OpenAiModelId | null
+  modelUsedLabel: string | null
+  transcriptionModelUsed: TranscriptionModelId | null
+  transcriptionModelUsedLabel: string | null
 }
 
 export interface SettingsStatus {

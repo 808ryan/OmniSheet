@@ -551,6 +551,8 @@ pub struct TimelineEntry {
     pub transcription_model_used: Option<TranscriptionModelId>,
     pub transcription_model_used_label: Option<String>,
     pub warning_flags: Vec<WarningType>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -722,12 +724,45 @@ pub struct TimelineCreateInput {
     pub date: String,
     pub start_minute: i64,
     pub end_minute: i64,
+    pub engagement_id: Option<String>,
+    pub activity_id: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdResult {
     pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryListResult {
+    pub week_start_date: String,
+    pub week_end_date: String,
+    pub submissions: Vec<HistorySubmission>,
+    pub entries: Vec<TimelineEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySubmission {
+    pub id: String,
+    pub raw_text: String,
+    pub capture_source: String,
+    pub status: String,
+    pub message_timestamp: i64,
+    pub created_at: i64,
+    pub interpreted_entry_count: i64,
+    pub unique_entry_count: i64,
+    pub saved_entry_count: i64,
+    pub truncated_entry_count: i64,
+    pub contains_multiple_events: bool,
+    pub confidence: f64,
+    pub model_used: Option<OpenAiModelId>,
+    pub model_used_label: Option<String>,
+    pub transcription_model_used: Option<TranscriptionModelId>,
+    pub transcription_model_used_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

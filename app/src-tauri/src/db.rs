@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
-    DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput, NormalizedEntry,
-    OpenAiModelId, TimelineDaySummary, TimelineEntry, TimelineTotalBreakdown,
+    DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput, HistorySubmission,
+    NormalizedEntry, OpenAiModelId, TimelineDaySummary, TimelineEntry, TimelineTotalBreakdown,
     TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
     TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, TranscriptionModelId, Warning,
     WarningType,
@@ -596,6 +596,30 @@ pub fn delete_timeline_entry(conn: &Connection, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub fn engagement_exists(conn: &Connection, engagement_id: &str) -> AppResult<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM engagements WHERE id = ?1)",
+        params![engagement_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    Ok(exists == 1)
+}
+
+pub fn activity_belongs_to_engagement(
+    conn: &Connection,
+    engagement_id: &str,
+    activity_id: &str,
+) -> AppResult<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM activities WHERE id = ?1 AND engagement_id = ?2)",
+        params![activity_id, engagement_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    Ok(exists == 1)
+}
+
 pub fn get_app_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
     let value = conn
         .query_row(
@@ -850,6 +874,8 @@ pub fn insert_manual_timeline_entry(
     end_minute: i64,
     duration_minutes: i64,
     description: &str,
+    engagement_id: Option<&str>,
+    activity_id: Option<&str>,
 ) -> AppResult<String> {
     let id = Uuid::new_v4().to_string();
     let now = current_unix_timestamp();
@@ -862,10 +888,12 @@ pub fn insert_manual_timeline_entry(
         used_activity_fallback, used_temporal_fallback, duration_defaulted,
         fallback_summary, source_message_entry_index, source_message_entry_count, created_at, updated_at
       )
-      VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, 'Manual Entry', 'manual', NULL, 1.0, 0, 0, 0, NULL, NULL, NULL, ?7, ?7)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'Manual Entry', 'manual', NULL, 1.0, 0, 0, 0, NULL, NULL, NULL, ?9, ?9)
     "#,
         params![
             id,
+            engagement_id,
+            activity_id,
             date,
             start_minute,
             end_minute,
@@ -1059,6 +1087,8 @@ where
                 transcription_model_used_label: transcription_model_used
                     .map(|model| model.display_label().to_string()),
                 warning_flags: Vec::new(),
+                created_at: row.get(24)?,
+                updated_at: row.get(25)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1098,7 +1128,9 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         te.source_message_entry_index,
         te.source_message_entry_count,
         rm.open_ai_model,
-        rm.transcription_model
+        rm.transcription_model,
+        te.created_at,
+        te.updated_at
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -1142,7 +1174,9 @@ pub fn list_timeline_entries_for_date_range(
         te.source_message_entry_index,
         te.source_message_entry_count,
         rm.open_ai_model,
-        rm.transcription_model
+        rm.transcription_model,
+        te.created_at,
+        te.updated_at
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -1152,6 +1186,69 @@ pub fn list_timeline_entries_for_date_range(
     "#,
         params![start_date, end_date_exclusive],
     )
+}
+
+pub fn list_history_submissions(
+    conn: &Connection,
+    start_date: &str,
+    end_date_exclusive: &str,
+) -> AppResult<Vec<HistorySubmission>> {
+    let mut statement = conn.prepare(
+        r#"
+      SELECT
+        id,
+        raw_text,
+        capture_source,
+        status,
+        message_timestamp,
+        created_at,
+        interpreted_entry_count,
+        unique_entry_count,
+        saved_entry_count,
+        truncated_entry_count,
+        contains_multiple_events,
+        confidence,
+        open_ai_model,
+        transcription_model
+      FROM raw_messages
+      WHERE date(message_timestamp, 'unixepoch', 'localtime') >= ?1
+        AND date(message_timestamp, 'unixepoch', 'localtime') < ?2
+      ORDER BY message_timestamp DESC, created_at DESC, id
+    "#,
+    )?;
+
+    let submissions = statement
+        .query_map(params![start_date, end_date_exclusive], |row| {
+            let model_used = row
+                .get::<_, Option<String>>(12)?
+                .and_then(|value| OpenAiModelId::from_api_name(&value));
+            let transcription_model_used = row
+                .get::<_, Option<String>>(13)?
+                .and_then(|value| TranscriptionModelId::from_api_name(&value));
+
+            Ok(HistorySubmission {
+                id: row.get(0)?,
+                raw_text: row.get(1)?,
+                capture_source: row.get(2)?,
+                status: row.get(3)?,
+                message_timestamp: row.get(4)?,
+                created_at: row.get(5)?,
+                interpreted_entry_count: row.get(6)?,
+                unique_entry_count: row.get(7)?,
+                saved_entry_count: row.get(8)?,
+                truncated_entry_count: row.get(9)?,
+                contains_multiple_events: row.get::<_, i64>(10)? == 1,
+                confidence: row.get(11)?,
+                model_used,
+                model_used_label: model_used.map(|model| model.display_label().to_string()),
+                transcription_model_used,
+                transcription_model_used_label: transcription_model_used
+                    .map(|model| model.display_label().to_string()),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(submissions)
 }
 
 pub fn list_timeline_day_summaries_for_month(
@@ -1876,7 +1973,7 @@ mod tests {
 
     use super::{
         current_unix_timestamp, get_app_setting, insert_manual_timeline_entry, insert_raw_message,
-        insert_timesheet_entry, list_engagements, list_timeline_entries,
+        insert_timesheet_entry, list_engagements, list_history_submissions, list_timeline_entries,
         list_timeline_entries_for_date_range, list_timeline_weekly_summary, run_migrations,
         upsert_activity, upsert_app_setting, upsert_engagement,
     };
@@ -2327,7 +2424,7 @@ mod tests {
     fn manual_timeline_entry_uses_manual_defaults() {
         let connection = test_connection();
 
-        insert_manual_timeline_entry(&connection, "2026-03-19", 600, 630, 30, "")
+        insert_manual_timeline_entry(&connection, "2026-03-19", 600, 630, 30, "", None, None)
             .expect("manual timeline entry should save");
 
         let saved_entry = list_timeline_entries(&connection, "2026-03-19")
@@ -2345,15 +2442,106 @@ mod tests {
     }
 
     #[test]
+    fn manual_timeline_entry_can_store_categorized_refs() {
+        let connection = test_connection();
+        let engagement_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some("E-100".to_string()),
+                name: "Client Audit".to_string(),
+                client: Some("Client".to_string()),
+                engagement_type: Some(EngagementType::External),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for client audit work.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("engagement saves");
+        let activity_id = upsert_activity(
+            &connection,
+            ActivityUpsertInput {
+                id: None,
+                engagement_id: engagement_id.clone(),
+                code: Some("461".to_string()),
+                name: "Planning".to_string(),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for planning.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("activity saves");
+
+        insert_manual_timeline_entry(
+            &connection,
+            "2026-03-20",
+            600,
+            630,
+            30,
+            "Planning",
+            Some(&engagement_id),
+            Some(&activity_id),
+        )
+        .expect("manual timeline entry should save");
+
+        let saved_entry = list_timeline_entries(&connection, "2026-03-20")
+            .expect("entries should load")
+            .into_iter()
+            .next()
+            .expect("entry should exist");
+
+        assert_eq!(saved_entry.source, "manual");
+        assert_eq!(saved_entry.description, "Planning");
+        assert_eq!(
+            saved_entry.engagement_id.as_deref(),
+            Some(engagement_id.as_str())
+        );
+        assert_eq!(
+            saved_entry.activity_id.as_deref(),
+            Some(activity_id.as_str())
+        );
+        assert_eq!(saved_entry.warning_flags, Vec::new());
+    }
+
+    #[test]
     fn timeline_entries_for_range_include_week_entries_in_date_order() {
         let connection = test_connection();
 
-        insert_manual_timeline_entry(&connection, "2026-03-30", 540, 570, 30, "Monday task")
-            .expect("first entry should save");
-        insert_manual_timeline_entry(&connection, "2026-03-29", 600, 630, 30, "Sunday task")
-            .expect("second entry should save");
-        insert_manual_timeline_entry(&connection, "2026-04-01", 480, 510, 30, "Wednesday task")
-            .expect("third entry should save");
+        insert_manual_timeline_entry(
+            &connection,
+            "2026-03-30",
+            540,
+            570,
+            30,
+            "Monday task",
+            None,
+            None,
+        )
+        .expect("first entry should save");
+        insert_manual_timeline_entry(
+            &connection,
+            "2026-03-29",
+            600,
+            630,
+            30,
+            "Sunday task",
+            None,
+            None,
+        )
+        .expect("second entry should save");
+        insert_manual_timeline_entry(
+            &connection,
+            "2026-04-01",
+            480,
+            510,
+            30,
+            "Wednesday task",
+            None,
+            None,
+        )
+        .expect("third entry should save");
 
         let entries = list_timeline_entries_for_date_range(&connection, "2026-03-29", "2026-04-05")
             .expect("range entries should load");
@@ -2370,6 +2558,76 @@ mod tests {
                 ("2026-03-30", "Monday task"),
                 ("2026-04-01", "Wednesday task"),
             ]
+        );
+    }
+
+    #[test]
+    fn history_submissions_include_raw_messages_for_date_range() {
+        let connection = test_connection();
+        let in_range_timestamp = chrono::NaiveDate::from_ymd_opt(2026, 3, 30)
+            .expect("date")
+            .and_hms_opt(12, 0, 0)
+            .expect("time")
+            .and_utc()
+            .timestamp();
+        let outside_range_timestamp = chrono::NaiveDate::from_ymd_opt(2026, 4, 6)
+            .expect("date")
+            .and_hms_opt(12, 0, 0)
+            .expect("time")
+            .and_utc()
+            .timestamp();
+
+        insert_raw_message(
+            &connection,
+            "raw-in-range",
+            "voice note",
+            "{}",
+            OpenAiModelId::Gpt5Nano.api_name(),
+            "voice",
+            Some(TranscriptionModelId::Whisper1.api_name()),
+            Some(1200),
+            0.88,
+            in_range_timestamp,
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message saves");
+        insert_raw_message(
+            &connection,
+            "raw-outside-range",
+            "outside note",
+            "{}",
+            OpenAiModelId::Gpt5Nano.api_name(),
+            "text",
+            None,
+            None,
+            0.9,
+            outside_range_timestamp,
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("outside raw message saves");
+
+        let submissions = list_history_submissions(&connection, "2026-03-29", "2026-04-05")
+            .expect("history submissions load");
+
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions[0].id, "raw-in-range");
+        assert_eq!(submissions[0].capture_source, "voice");
+        assert_eq!(submissions[0].model_used, Some(OpenAiModelId::Gpt5Nano));
+        assert_eq!(
+            submissions[0].transcription_model_used,
+            Some(TranscriptionModelId::Whisper1)
+        );
+        assert_eq!(
+            submissions[0].transcription_model_used_label.as_deref(),
+            Some("Whisper")
         );
     }
 

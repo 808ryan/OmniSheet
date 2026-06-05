@@ -20,17 +20,18 @@ use crate::models::{
     CalendarExtractResult, CalendarImportEntryInput, CalendarImportInput, CalendarImportResult,
     CalendarVisionEvent, CaptureSourceId, CodeContext, ContextActivity, ContextEngagement,
     DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput,
-    Engagement, EngagementType, EngagementUpsertInput, IdInput, IdResult, InterpretResult,
-    InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult,
-    MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId, SettingsSetCalendarBulkModelInput,
-    SettingsSetCalendarBulkPreferencesInput, SettingsSetOpenAiModelInput,
-    SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
-    StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
-    SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
-    TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
-    TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
-    TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput,
-    TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
+    Engagement, EngagementType, EngagementUpsertInput, HistoryListResult, IdInput, IdResult,
+    InterpretResult, InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry,
+    MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
+    SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
+    SettingsSetOpenAiModelInput, SettingsSetTimelinePreferencesInput,
+    SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
+    SummaryExportResult, SummaryExportWeeklyExcelInput, SummaryLayoutColumn, SummaryLayoutFieldKey,
+    SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput, TimelineDaySummary,
+    TimelineEntry, TimelineMonthSummaryInput, TimelineTotalBreakdown, TimelineUpdateInput,
+    TimelineUpdateMode, TimelineWeekView, TimelineWeekViewDay, TimelineWeeklySummary,
+    TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult, TranscriptionModelId,
+    Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -3182,6 +3183,36 @@ pub fn timeline_list_for_week_view(
 }
 
 #[tauri::command]
+pub fn history_list(
+    state: State<'_, AppState>,
+    input: DateInput,
+) -> Result<HistoryListResult, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    list_history_for_date(&connection, &input.date)
+}
+
+fn list_history_for_date(connection: &Connection, date: &str) -> Result<HistoryListResult, String> {
+    let (start_date, end_date_exclusive) = timeline_week_bounds(date)?;
+    let week_start = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
+        .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
+    let week_end_date = (week_start + Duration::days(6))
+        .format("%Y-%m-%d")
+        .to_string();
+    let submissions = db::list_history_submissions(connection, &start_date, &end_date_exclusive)
+        .map_err(|error| error.to_string())?;
+    let entries =
+        db::list_timeline_entries_for_date_range(connection, &start_date, &end_date_exclusive)
+            .map_err(|error| error.to_string())?;
+
+    Ok(HistoryListResult {
+        week_start_date: start_date,
+        week_end_date,
+        submissions,
+        entries,
+    })
+}
+
+#[tauri::command]
 pub fn summary_export_weekly_excel(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -3318,35 +3349,85 @@ pub fn timeline_update_entry(
     Ok(())
 }
 
+fn normalize_optional_id(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn validate_manual_create_refs(
+    connection: &Connection,
+    engagement_id: Option<&str>,
+    activity_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(activity_id) = activity_id {
+        let Some(engagement_id) = engagement_id else {
+            return Err("activity requires an engagement".to_string());
+        };
+
+        if !db::activity_belongs_to_engagement(connection, engagement_id, activity_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("activity must belong to the selected engagement".to_string());
+        }
+
+        return Ok(());
+    }
+
+    if let Some(engagement_id) = engagement_id {
+        if !db::engagement_exists(connection, engagement_id).map_err(|error| error.to_string())? {
+            return Err("engagement not found".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn timeline_create_entry(
     state: State<'_, AppState>,
     input: TimelineCreateInput,
 ) -> Result<IdResult, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    create_manual_timeline_entry(&connection, input)
+}
+
+fn create_manual_timeline_entry(
+    connection: &Connection,
+    input: TimelineCreateInput,
+) -> Result<IdResult, String> {
     let date = input.date.trim();
     let (start_minute, end_minute, duration_minutes) =
         validate_manual_update_window(input.start_minute, input.end_minute)?;
+    let engagement_id = normalize_optional_id(input.engagement_id.as_deref());
+    let activity_id = normalize_optional_id(input.activity_id.as_deref());
+
+    validate_manual_create_refs(connection, engagement_id.as_deref(), activity_id.as_deref())?;
 
     let id = db::insert_manual_timeline_entry(
-        &connection,
+        connection,
         date,
         start_minute,
         end_minute,
         duration_minutes,
-        "",
+        input.description.as_deref().unwrap_or(""),
+        engagement_id.as_deref(),
+        activity_id.as_deref(),
     )
     .map_err(|error| error.to_string())?;
 
-    db::add_warning(
-        &connection,
-        &id,
-        WarningType::Unmatched,
-        Some("Entry is uncategorized".to_string()),
-    )
-    .map_err(|error| error.to_string())?;
+    if engagement_id.is_none() || activity_id.is_none() {
+        db::add_warning(
+            connection,
+            &id,
+            WarningType::Unmatched,
+            Some("Entry is uncategorized".to_string()),
+        )
+        .map_err(|error| error.to_string())?;
+    }
 
-    let _ = db::recompute_overlap_warnings(&connection, date).map_err(|error| error.to_string())?;
+    let _ = db::recompute_overlap_warnings(connection, date).map_err(|error| error.to_string())?;
 
     Ok(IdResult { id })
 }
@@ -6692,14 +6773,17 @@ impl TimeParts for NaiveTime {
 #[cfg(test)]
 mod tests {
     use chrono::{Local, NaiveDate};
+    use rusqlite::Connection;
 
+    use crate::db;
     use crate::models::{
-        Activity, CalendarImportEntryInput, CalendarVisionEvent, CaptureSourceId, CodeContext,
-        ContextActivity, ContextEngagement, Engagement, EngagementType, KeySource, LlmEntry,
-        NormalizedEntry, OpenAiModelId, StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey,
-        SummaryLayoutPreset, SummaryLayoutState, TimelineTotalBreakdown, TimelineWeeklySummary,
+        Activity, ActivityUpsertInput, CalendarImportEntryInput, CalendarVisionEvent,
+        CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, Engagement,
+        EngagementType, EngagementUpsertInput, KeySource, LlmEntry, NormalizedEntry, OpenAiModelId,
+        StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset,
+        SummaryLayoutState, TimelineCreateInput, TimelineTotalBreakdown, TimelineWeeklySummary,
         TimelineWeeklySummaryCell, TimelineWeeklySummaryDay, TimelineWeeklySummaryNote,
-        TimelineWeeklySummaryRow, TranscriptionModelId,
+        TimelineWeeklySummaryRow, TranscriptionModelId, WarningType,
     };
     use crate::openai::LlmAttemptTelemetry;
 
@@ -6707,8 +6791,9 @@ mod tests {
         apply_activity_fallback_if_needed, apply_global_activity_fallback_if_needed,
         apply_multi_event_sequence_adjustments, apply_timeline_preferences_to_weekly_summary,
         build_export_metadata_maps, build_summary_export_hours_and_notes_sheet_columns,
-        build_summary_export_hours_sheet_columns, capture_source_label, dedupe_prepared_entries,
-        default_summary_layout_state, derive_key_status_level, llm_attempt_event_status,
+        build_summary_export_hours_sheet_columns, capture_source_label,
+        create_manual_timeline_entry, dedupe_prepared_entries, default_summary_layout_state,
+        derive_key_status_level, list_history_for_date, llm_attempt_event_status,
         message_has_contextual_day_or_date_cue, message_has_explicit_clock_time_cue,
         message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
         normalize_calendar_bulk_ignored_keywords, normalize_confidence, normalize_llm_entry,
@@ -6719,11 +6804,51 @@ mod tests {
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
         round_to_nearest_15, summary_day_notes_header, timeline_week_bounds,
-        timeline_week_view_bounds, validate_calendar_import_entry, validate_manual_update_window,
-        validate_timeline_preferences, PreparedEntry, SequencingEntryContext,
-        SummaryExportSheetColumnKind, TemporalCueType, TemporalReference, TimelinePreferenceValues,
-        MINUTES_IN_DAY,
+        timeline_week_view_bounds, validate_calendar_import_entry, validate_manual_create_refs,
+        validate_manual_update_window, validate_timeline_preferences, PreparedEntry,
+        SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType, TemporalReference,
+        TimelinePreferenceValues, MINUTES_IN_DAY,
     };
+
+    fn test_connection() -> Connection {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        db::run_migrations(&connection).expect("migrations should run");
+        connection
+    }
+
+    fn create_test_engagement_with_activity(connection: &Connection) -> (String, String) {
+        let engagement_id = db::upsert_engagement(
+            connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some("E-100".to_string()),
+                name: "Client Audit".to_string(),
+                client: Some("Client".to_string()),
+                engagement_type: Some(EngagementType::External),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for client audit work.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("engagement saves");
+        let activity_id = db::upsert_activity(
+            connection,
+            ActivityUpsertInput {
+                id: None,
+                engagement_id: engagement_id.clone(),
+                code: Some("461".to_string()),
+                name: "Planning".to_string(),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for planning.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("activity saves");
+
+        (engagement_id, activity_id)
+    }
 
     fn prepared_entry_for_test(
         start_minute: i64,
@@ -6877,6 +7002,184 @@ mod tests {
             serde_json::from_str::<CaptureSourceId>("\"calendar\"").expect("deserializes"),
             CaptureSourceId::Calendar,
         );
+    }
+
+    #[test]
+    fn manual_create_ref_validation_rejects_activity_from_other_engagement() {
+        let connection = test_connection();
+        let first_engagement_id = db::upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some("E-100".to_string()),
+                name: "First Engagement".to_string(),
+                client: None,
+                engagement_type: Some(EngagementType::External),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for first engagement.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("first engagement saves");
+        let second_engagement_id = db::upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some("E-200".to_string()),
+                name: "Second Engagement".to_string(),
+                client: None,
+                engagement_type: Some(EngagementType::External),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for second engagement.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("second engagement saves");
+        let activity_id = db::upsert_activity(
+            &connection,
+            ActivityUpsertInput {
+                id: None,
+                engagement_id: first_engagement_id.clone(),
+                code: Some("461".to_string()),
+                name: "Planning".to_string(),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "Use for planning.".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("activity saves");
+
+        let error = validate_manual_create_refs(
+            &connection,
+            Some(second_engagement_id.as_str()),
+            Some(activity_id.as_str()),
+        )
+        .expect_err("mismatch should be rejected");
+
+        assert_eq!(error, "activity must belong to the selected engagement");
+    }
+
+    #[test]
+    fn manual_create_with_codes_stores_refs_without_unmatched_warning() {
+        let connection = test_connection();
+        let (engagement_id, activity_id) = create_test_engagement_with_activity(&connection);
+
+        let result = create_manual_timeline_entry(
+            &connection,
+            TimelineCreateInput {
+                date: "2026-04-01".to_string(),
+                start_minute: 9 * 60,
+                end_minute: 9 * 60 + 30,
+                engagement_id: Some(engagement_id.clone()),
+                activity_id: Some(activity_id.clone()),
+                description: None,
+            },
+        )
+        .expect("manual create succeeds");
+
+        let saved_entry = db::list_timeline_entries(&connection, "2026-04-01")
+            .expect("entries load")
+            .into_iter()
+            .find(|entry| entry.id == result.id)
+            .expect("entry exists");
+
+        assert_eq!(saved_entry.source, "manual");
+        assert_eq!(saved_entry.description, "");
+        assert_eq!(saved_entry.confidence, 1.0);
+        assert_eq!(
+            saved_entry.engagement_id.as_deref(),
+            Some(engagement_id.as_str())
+        );
+        assert_eq!(
+            saved_entry.activity_id.as_deref(),
+            Some(activity_id.as_str())
+        );
+        assert!(!saved_entry.warning_flags.contains(&WarningType::Unmatched));
+    }
+
+    #[test]
+    fn manual_create_without_codes_adds_unmatched_warning() {
+        let connection = test_connection();
+
+        let result = create_manual_timeline_entry(
+            &connection,
+            TimelineCreateInput {
+                date: "2026-04-01".to_string(),
+                start_minute: 10 * 60,
+                end_minute: 10 * 60 + 30,
+                engagement_id: None,
+                activity_id: None,
+                description: None,
+            },
+        )
+        .expect("manual create succeeds");
+
+        let saved_entry = db::list_timeline_entries(&connection, "2026-04-01")
+            .expect("entries load")
+            .into_iter()
+            .find(|entry| entry.id == result.id)
+            .expect("entry exists");
+
+        assert_eq!(saved_entry.source, "manual");
+        assert!(saved_entry.warning_flags.contains(&WarningType::Unmatched));
+    }
+
+    #[test]
+    fn history_list_returns_current_week_submissions_and_manual_entries() {
+        let connection = test_connection();
+        let message_timestamp = chrono::NaiveDate::from_ymd_opt(2026, 3, 30)
+            .expect("valid date")
+            .and_hms_opt(12, 0, 0)
+            .expect("valid time")
+            .and_utc()
+            .timestamp();
+
+        db::insert_raw_message(
+            &connection,
+            "raw-history-test",
+            "Voice submission",
+            "[]",
+            OpenAiModelId::default().api_name(),
+            "voice",
+            Some(TranscriptionModelId::default().api_name()),
+            Some(900),
+            0.91,
+            message_timestamp,
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .expect("raw message saves");
+
+        create_manual_timeline_entry(
+            &connection,
+            TimelineCreateInput {
+                date: "2026-03-31".to_string(),
+                start_minute: 11 * 60,
+                end_minute: 11 * 60 + 30,
+                engagement_id: None,
+                activity_id: None,
+                description: Some("Manual admin".to_string()),
+            },
+        )
+        .expect("manual entry saves");
+
+        let result = list_history_for_date(&connection, "2026-04-01").expect("history loads");
+
+        assert_eq!(result.week_start_date, "2026-03-28");
+        assert_eq!(result.week_end_date, "2026-04-03");
+        assert_eq!(result.submissions.len(), 1);
+        assert_eq!(result.submissions[0].id, "raw-history-test");
+        assert_eq!(result.submissions[0].capture_source, "voice");
+        assert!(result
+            .entries
+            .iter()
+            .any(|entry| { entry.source == "manual" && entry.description == "Manual admin" }));
     }
 
     #[test]
