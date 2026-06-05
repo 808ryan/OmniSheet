@@ -15,6 +15,7 @@ import type {
   DiagnosticsRecordInput,
   Engagement,
   EngagementUpsertInput,
+  HistoryListResult,
   IdResult,
   InterpretResult,
   InterpretTextInput,
@@ -298,6 +299,10 @@ export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {
 
 export function timelineCreateEntry(input: TimelineCreateInput): Promise<IdResult> {
   return invokeCommand<IdResult>('timeline_create_entry', { input })
+}
+
+export function historyList(input: DateInput): Promise<HistoryListResult> {
+  return invokeCommand<HistoryListResult>('history_list', { input })
 }
 
 export function timelineDeleteEntry(id: string): Promise<void> {
