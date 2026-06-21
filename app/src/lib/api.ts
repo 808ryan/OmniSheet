@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 
-import { mockInvokeCommand } from './agentMockApi'
-import { isAgentMockRuntime, isTauriRuntime } from './runtime'
+import { isTauriRuntime } from './runtime'
 import type {
   ActivityUpsertInput,
   AppCommandErrorShape,
@@ -103,11 +102,6 @@ function extractErrorMessage(error: unknown): string {
 }
 
 async function recordFrontendDiagnostic(input: DiagnosticsRecordInput): Promise<void> {
-  if (isAgentMockRuntime()) {
-    await mockInvokeCommand<void>('diagnostics_record_frontend_event', { input })
-    return
-  }
-
   if (!isTauriRuntime()) {
     return
   }
@@ -128,10 +122,6 @@ async function invokeCommand<T>(
   args?: Record<string, unknown>,
   options?: InvokeCommandOptions,
 ): Promise<T> {
-  if (isAgentMockRuntime()) {
-    return mockInvokeCommand<T>(command, args)
-  }
-
   if (!isTauriRuntime()) {
     throw new Error('Tauri runtime is required. Use `npm run tauri dev`.')
   }

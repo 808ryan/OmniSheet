@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
@@ -20,7 +19,6 @@ use crate::models::{
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
 pub const DIAGNOSTICS_RETENTION_DAYS: i64 = 7;
-pub const DATABASE_PATH_ENV: &str = "OMNISHEET_DATABASE_PATH";
 const MAX_USAGE_DESCRIPTION_LENGTH: usize = 500;
 
 pub fn current_unix_timestamp() -> i64 {
@@ -31,38 +29,6 @@ pub fn current_unix_timestamp() -> i64 {
 }
 
 pub fn init_database(app: &AppHandle) -> AppResult<Connection> {
-    let db_path = resolve_database_path(app)?;
-    let connection = Connection::open(db_path)?;
-    run_migrations(&connection)?;
-    prune_old_diagnostics(&connection, DIAGNOSTICS_RETENTION_DAYS)?;
-    Ok(connection)
-}
-
-pub fn database_path_is_overridden() -> bool {
-    std::env::var_os(DATABASE_PATH_ENV).is_some()
-}
-
-fn resolve_database_path(app: &AppHandle) -> AppResult<PathBuf> {
-    if let Some(raw_path) = std::env::var_os(DATABASE_PATH_ENV) {
-        if raw_path.is_empty() {
-            return Err(AppError::Config(format!(
-                "{DATABASE_PATH_ENV} cannot be empty"
-            )));
-        }
-
-        let db_path = PathBuf::from(raw_path);
-        let parent = db_path.parent().ok_or_else(|| {
-            AppError::Config(format!(
-                "{DATABASE_PATH_ENV} must include a parent directory"
-            ))
-        })?;
-        fs::create_dir_all(parent).map_err(|error| {
-            AppError::Config(format!("failed to create override database dir: {error}"))
-        })?;
-
-        return Ok(db_path);
-    }
-
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -71,7 +37,11 @@ fn resolve_database_path(app: &AppHandle) -> AppResult<PathBuf> {
     fs::create_dir_all(&app_data_dir)
         .map_err(|error| AppError::Config(format!("failed to create app data dir: {error}")))?;
 
-    Ok(app_data_dir.join("omnisheet.db"))
+    let db_path = app_data_dir.join("omnisheet.db");
+    let connection = Connection::open(db_path)?;
+    run_migrations(&connection)?;
+    prune_old_diagnostics(&connection, DIAGNOSTICS_RETENTION_DAYS)?;
+    Ok(connection)
 }
 
 pub fn run_migrations(conn: &Connection) -> AppResult<()> {
