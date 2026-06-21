@@ -490,6 +490,11 @@ const PREFERRED_VOICE_MIME_TYPES = [
   'audio/ogg',
   'audio/wav',
 ] as const
+
+function quickAddActivityKey(engagementId: string, activityId: string): string {
+  return `${engagementId}:${activityId}`
+}
+
 const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'timeline', label: 'Day' },
   { id: 'week', label: 'Week' },
@@ -697,7 +702,7 @@ function App() {
   const [lastSubmissionNotice, setLastSubmissionNotice] = useState<string | null>(null)
   const [quickAddSearch, setQuickAddSearch] = useState('')
   const [quickAddSuggestionItems, setQuickAddSuggestionItems] = useState<QuickAddSuggestion[]>([])
-  const [isQuickAddSuggestionsLoading, setIsQuickAddSuggestionsLoading] = useState(false)
+  const [quickAddSuggestedKeys, setQuickAddSuggestedKeys] = useState<string[]>([])
   const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickBlockDragState | null>(null)
   const [isCalendarBulkModalOpen, setIsCalendarBulkModalOpen] = useState(false)
@@ -929,7 +934,7 @@ function App() {
   const quickAddSuggestionByKey = useMemo(() => {
     const values = new Map<string, QuickAddSuggestion>()
     for (const suggestion of quickAddSuggestionItems) {
-      values.set(`${suggestion.engagementId}:${suggestion.activityId}`, suggestion)
+      values.set(quickAddActivityKey(suggestion.engagementId, suggestion.activityId), suggestion)
     }
 
     return values
@@ -946,7 +951,7 @@ function App() {
           continue
         }
 
-        const suggestion = quickAddSuggestionByKey.get(`${engagement.id}:${activity.id}`)
+        const suggestion = quickAddSuggestionByKey.get(quickAddActivityKey(engagement.id, activity.id))
         values.push({
           engagement,
           activity,
@@ -961,17 +966,27 @@ function App() {
   const quickAddActivityByKey = useMemo(() => {
     const values = new Map<string, QuickAddActivityView>()
     for (const item of allQuickAddActivities) {
-      values.set(`${item.engagement.id}:${item.activity.id}`, item)
+      values.set(quickAddActivityKey(item.engagement.id, item.activity.id), item)
     }
 
     return values
   }, [allQuickAddActivities])
+  useEffect(() => {
+    setQuickAddSuggestedKeys((previous) => {
+      if (previous.length === 0) {
+        return previous
+      }
+
+      const next = previous.filter((key) => quickAddActivityByKey.has(key))
+
+      return next.length === previous.length ? previous : next
+    })
+  }, [quickAddActivityByKey])
   const suggestedQuickAddActivities = useMemo(() => {
     const values: QuickAddActivityView[] = []
     const seenKeys = new Set<string>()
 
-    for (const suggestion of quickAddSuggestionItems) {
-      const key = `${suggestion.engagementId}:${suggestion.activityId}`
+    for (const key of quickAddSuggestedKeys) {
       const item = quickAddActivityByKey.get(key)
       if (!item || seenKeys.has(key)) {
         continue
@@ -986,7 +1001,7 @@ function App() {
         break
       }
 
-      const key = `${item.engagement.id}:${item.activity.id}`
+      const key = quickAddActivityKey(item.engagement.id, item.activity.id)
       if (seenKeys.has(key)) {
         continue
       }
@@ -996,7 +1011,7 @@ function App() {
     }
 
     return values.slice(0, QUICK_ADD_DEFAULT_LIMIT)
-  }, [allQuickAddActivities, quickAddActivityByKey, quickAddSuggestionItems])
+  }, [allQuickAddActivities, quickAddActivityByKey, quickAddSuggestedKeys])
   const visibleQuickAddActivities = useMemo(() => {
     const searchTerms = quickAddSearch
       .trim()
@@ -1744,18 +1759,40 @@ function App() {
   }, [])
 
   const loadQuickAddSuggestions = useCallback(async () => {
-    setIsQuickAddSuggestionsLoading(true)
     setQuickAddSuggestionsError(null)
 
     try {
       const value = await quickAddSuggestions({ limit: QUICK_ADD_DEFAULT_LIMIT })
       setQuickAddSuggestionItems(value.suggestions)
+      setQuickAddSuggestedKeys((previous) => {
+        const incomingKeys = value.suggestions.map((suggestion) =>
+          quickAddActivityKey(suggestion.engagementId, suggestion.activityId),
+        )
+
+        if (previous.length === 0) {
+          return incomingKeys.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+        }
+
+        const next = previous.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+        const seenKeys = new Set(next)
+
+        for (const key of incomingKeys) {
+          if (next.length >= QUICK_ADD_DEFAULT_LIMIT) {
+            break
+          }
+
+          if (!seenKeys.has(key)) {
+            next.push(key)
+            seenKeys.add(key)
+          }
+        }
+
+        return next
+      })
       return value
     } catch (error) {
       setQuickAddSuggestionsError(extractErrorMessage(error))
       return null
-    } finally {
-      setIsQuickAddSuggestionsLoading(false)
     }
   }, [])
 
@@ -4327,7 +4364,6 @@ function App() {
           loadWeekTimeline(date),
           loadHistory(date),
           loadWeeklySummary(date),
-          loadQuickAddSuggestions(),
         ])
         invalidateMonthSummaries([monthKey])
         const createdEntry = entries.find((entry) => entry.id === result.id)
@@ -4342,7 +4378,6 @@ function App() {
       invalidateMonthSummaries,
       isBusy,
       loadHistory,
-      loadQuickAddSuggestions,
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
@@ -6226,7 +6261,6 @@ function App() {
             <div className="quick-add-panel" aria-label="Quick Add">
               <div className="quick-add-header">
                 <h3>Quick Add</h3>
-                {isQuickAddSuggestionsLoading ? <span>Updating</span> : null}
               </div>
               <input
                 className="quick-add-search"
@@ -6258,16 +6292,19 @@ function App() {
                           '--quick-add-color': engagementColor,
                         } as CSSProperties}
                       >
-                        <div className="quick-add-group-header">
-                          <span className="quick-add-group-dot" aria-hidden="true" />
-                          <span className="quick-add-group-main">
-                            <strong>{group.engagement.code || group.engagement.name}</strong>
-                            <span>
-                              {group.engagement.code
-                                ? group.engagement.name
-                                : group.engagement.client || 'Engagement'}
-                            </span>
-                          </span>
+                        <div
+                          className="quick-add-group-header"
+                          title={formatEntityDisplayLabel(
+                            group.engagement.name,
+                            group.engagement.code,
+                            'Engagement',
+                          )}
+                        >
+                          <span>{formatEntityPrimaryLabel(
+                            group.engagement.name,
+                            group.engagement.code,
+                            'Engagement',
+                          )}</span>
                         </div>
                         <div className="quick-add-grid">
                           {group.activities.map(({ activity, engagement, usageCount, lastUsedAt }) => {
@@ -6278,8 +6315,8 @@ function App() {
                             const durationMinutes = isDraggingActivity
                               ? quickBlockDragState.durationMinutes
                               : TIMELINE_MANUAL_CREATE_DURATION_MINUTES
-                            const activityLabel = activity.code || activity.name
-                            const activityDetail = activity.code ? activity.name : 'Activity'
+                            const activityLabel = activity.name || activity.code
+                            const fullActivityLabel = formatEntityDisplayLabel(activity.name, activity.code)
 
                             return (
                               <button
@@ -6305,11 +6342,11 @@ function App() {
                                   }
                                 }}
                                 disabled={isBusy}
-                                aria-label={`Add ${formatEntityDisplayLabel(activity.name, activity.code)}`}
+                                aria-label={`Add ${fullActivityLabel} for ${formatQuickBlockDuration(durationMinutes)}`}
                                 title={
                                   usageCount > 0 && lastUsedAt
-                                    ? `${formatEntityDisplayLabel(activity.name, activity.code)} - used ${usageCount} time${usageCount === 1 ? '' : 's'}`
-                                    : formatEntityDisplayLabel(activity.name, activity.code)
+                                    ? `${fullActivityLabel} - used ${usageCount} time${usageCount === 1 ? '' : 's'}`
+                                    : fullActivityLabel
                                 }
                                 style={{
                                   '--quick-add-color': activityColor,
@@ -6318,11 +6355,12 @@ function App() {
                               >
                                 <span className="quick-add-tile-main">
                                   <strong>{activityLabel}</strong>
-                                  <span>{activityDetail}</span>
                                 </span>
-                                <span className="quick-add-duration">
-                                  {formatQuickBlockDuration(durationMinutes)}
-                                </span>
+                                {isDraggingActivity ? (
+                                  <span className="quick-add-duration">
+                                    {formatQuickBlockDuration(durationMinutes)}
+                                  </span>
+                                ) : null}
                                 {isDraggingActivity ? (
                                   <span className="quick-add-duration-track" aria-hidden="true">
                                     <span />
