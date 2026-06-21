@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
@@ -11,14 +12,15 @@ use crate::error::{AppError, AppResult};
 use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
     DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput, HistorySubmission,
-    NormalizedEntry, OpenAiModelId, TimelineDaySummary, TimelineEntry, TimelineTotalBreakdown,
-    TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
-    TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, TranscriptionModelId, Warning,
-    WarningType,
+    NormalizedEntry, OpenAiModelId, QuickAddSuggestion, TimelineDaySummary, TimelineEntry,
+    TimelineTotalBreakdown, TimelineWeeklySummary, TimelineWeeklySummaryCell,
+    TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
+    TranscriptionModelId, Warning, WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
 pub const DIAGNOSTICS_RETENTION_DAYS: i64 = 7;
+pub const DATABASE_PATH_ENV: &str = "OMNISHEET_DATABASE_PATH";
 const MAX_USAGE_DESCRIPTION_LENGTH: usize = 500;
 
 pub fn current_unix_timestamp() -> i64 {
@@ -29,6 +31,38 @@ pub fn current_unix_timestamp() -> i64 {
 }
 
 pub fn init_database(app: &AppHandle) -> AppResult<Connection> {
+    let db_path = resolve_database_path(app)?;
+    let connection = Connection::open(db_path)?;
+    run_migrations(&connection)?;
+    prune_old_diagnostics(&connection, DIAGNOSTICS_RETENTION_DAYS)?;
+    Ok(connection)
+}
+
+pub fn database_path_is_overridden() -> bool {
+    std::env::var_os(DATABASE_PATH_ENV).is_some()
+}
+
+fn resolve_database_path(app: &AppHandle) -> AppResult<PathBuf> {
+    if let Some(raw_path) = std::env::var_os(DATABASE_PATH_ENV) {
+        if raw_path.is_empty() {
+            return Err(AppError::Config(format!(
+                "{DATABASE_PATH_ENV} cannot be empty"
+            )));
+        }
+
+        let db_path = PathBuf::from(raw_path);
+        let parent = db_path.parent().ok_or_else(|| {
+            AppError::Config(format!(
+                "{DATABASE_PATH_ENV} must include a parent directory"
+            ))
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            AppError::Config(format!("failed to create override database dir: {error}"))
+        })?;
+
+        return Ok(db_path);
+    }
+
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -37,11 +71,7 @@ pub fn init_database(app: &AppHandle) -> AppResult<Connection> {
     fs::create_dir_all(&app_data_dir)
         .map_err(|error| AppError::Config(format!("failed to create app data dir: {error}")))?;
 
-    let db_path = app_data_dir.join("omnisheet.db");
-    let connection = Connection::open(db_path)?;
-    run_migrations(&connection)?;
-    prune_old_diagnostics(&connection, DIAGNOSTICS_RETENTION_DAYS)?;
-    Ok(connection)
+    Ok(app_data_dir.join("omnisheet.db"))
 }
 
 pub fn run_migrations(conn: &Connection) -> AppResult<()> {
@@ -722,6 +752,53 @@ pub fn list_engagements(conn: &Connection) -> AppResult<Vec<Engagement>> {
     }
 
     Ok(engagements)
+}
+
+pub fn list_quick_add_suggestions(
+    conn: &Connection,
+    limit: i64,
+) -> AppResult<Vec<QuickAddSuggestion>> {
+    let safe_limit = limit.clamp(1, 100);
+    let mut statement = conn.prepare(
+        r#"
+      SELECT
+        e.id AS engagement_id,
+        a.id AS activity_id,
+        COUNT(te.id) AS usage_count,
+        MAX(te.created_at) AS last_used_at
+      FROM activities a
+      INNER JOIN engagements e ON e.id = a.engagement_id
+      LEFT JOIN timesheet_entries te
+        ON te.engagement_id = e.id
+       AND te.activity_id = a.id
+      WHERE e.is_active = 1
+        AND a.is_active = 1
+      GROUP BY e.id, a.id
+      ORDER BY
+        usage_count DESC,
+        last_used_at IS NULL ASC,
+        last_used_at DESC,
+        e.name COLLATE NOCASE ASC,
+        COALESCE(e.code, '') COLLATE NOCASE ASC,
+        a.name COLLATE NOCASE ASC,
+        COALESCE(a.code, '') COLLATE NOCASE ASC,
+        a.id ASC
+      LIMIT ?1
+    "#,
+    )?;
+
+    let suggestions = statement
+        .query_map(params![safe_limit], |row| {
+            Ok(QuickAddSuggestion {
+                engagement_id: row.get(0)?,
+                activity_id: row.get(1)?,
+                usage_count: row.get(2)?,
+                last_used_at: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(suggestions)
 }
 
 pub fn load_code_context(conn: &Connection) -> AppResult<CodeContext> {
@@ -1973,9 +2050,10 @@ mod tests {
 
     use super::{
         current_unix_timestamp, get_app_setting, insert_manual_timeline_entry, insert_raw_message,
-        insert_timesheet_entry, list_engagements, list_history_submissions, list_timeline_entries,
-        list_timeline_entries_for_date_range, list_timeline_weekly_summary, run_migrations,
-        upsert_activity, upsert_app_setting, upsert_engagement,
+        insert_timesheet_entry, list_engagements, list_history_submissions,
+        list_quick_add_suggestions, list_timeline_entries, list_timeline_entries_for_date_range,
+        list_timeline_weekly_summary, run_migrations, upsert_activity, upsert_app_setting,
+        upsert_engagement,
     };
     use crate::models::{
         ActivityUpsertInput, EngagementType, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
@@ -1986,6 +2064,66 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory db should open");
         run_migrations(&connection).expect("migrations should run");
         connection
+    }
+
+    fn create_test_engagement(
+        connection: &Connection,
+        code: &str,
+        name: &str,
+        is_active: bool,
+    ) -> String {
+        upsert_engagement(
+            connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some(code.to_string()),
+                name: name.to_string(),
+                client: None,
+                engagement_type: Some(EngagementType::External),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: format!("Use for {name}."),
+                is_active: Some(is_active),
+            },
+        )
+        .expect("engagement should save")
+    }
+
+    fn create_test_activity(
+        connection: &Connection,
+        engagement_id: &str,
+        code: &str,
+        name: &str,
+        is_active: bool,
+    ) -> String {
+        upsert_activity(
+            connection,
+            ActivityUpsertInput {
+                id: None,
+                engagement_id: engagement_id.to_string(),
+                code: Some(code.to_string()),
+                name: name.to_string(),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: format!("Use for {name}."),
+                is_active: Some(is_active),
+            },
+        )
+        .expect("activity should save")
+    }
+
+    fn normalized_entry_for_date(date: &str) -> NormalizedEntry {
+        NormalizedEntry {
+            date: date.to_string(),
+            start_minute: 540,
+            end_minute: 570,
+            duration_minutes: 30,
+            description: "Suggestion entry".to_string(),
+            user_submission_text: "Suggestion entry".to_string(),
+            confidence: 0.9,
+            engagement_ref: None,
+            activity_ref: None,
+        }
     }
 
     #[test]
@@ -2159,6 +2297,279 @@ mod tests {
             get_app_setting(&connection, "openai_model").expect("settings lookup should work"),
             Some("gpt-4.1-nano".to_string())
         );
+    }
+
+    #[test]
+    fn quick_add_suggestions_count_usage_across_entry_sources() {
+        let connection = test_connection();
+        let engagement_id =
+            create_test_engagement(&connection, "QA-COUNT", "Quick Add Count", true);
+        let activity_id = create_test_activity(
+            &connection,
+            &engagement_id,
+            "COUNT",
+            "Counted Activity",
+            true,
+        );
+
+        for source in ["text", "voice", "calendar"] {
+            let raw_message_id = format!("raw-{source}");
+            insert_raw_message(
+                &connection,
+                &raw_message_id,
+                "worked on counted activity",
+                "{\"entries\":[]}",
+                "gpt-5-nano",
+                source,
+                None,
+                None,
+                0.8,
+                current_unix_timestamp(),
+                1,
+                1,
+                1,
+                0,
+                false,
+            )
+            .expect("raw message should save");
+
+            insert_timesheet_entry(
+                &connection,
+                &raw_message_id,
+                &normalized_entry_for_date("2026-04-01"),
+                Some(&engagement_id),
+                Some(&activity_id),
+                false,
+                false,
+                false,
+                None,
+                Some(1),
+                Some(1),
+                source,
+            )
+            .expect("timesheet entry should save");
+        }
+
+        insert_manual_timeline_entry(
+            &connection,
+            "2026-04-01",
+            600,
+            630,
+            30,
+            "",
+            Some(&engagement_id),
+            Some(&activity_id),
+        )
+        .expect("manual entry should save");
+
+        let suggestions =
+            list_quick_add_suggestions(&connection, 12).expect("suggestions should load");
+        let suggestion = suggestions
+            .iter()
+            .find(|candidate| candidate.activity_id == activity_id)
+            .expect("used activity should be suggested");
+
+        assert_eq!(suggestion.engagement_id, engagement_id);
+        assert_eq!(suggestion.usage_count, 4);
+        assert!(suggestion.last_used_at.is_some());
+    }
+
+    #[test]
+    fn quick_add_suggestions_exclude_inactive_engagements_and_activities() {
+        let connection = test_connection();
+        let active_engagement_id =
+            create_test_engagement(&connection, "QA-ACTIVE", "Active Engagement", true);
+        let active_activity_id = create_test_activity(
+            &connection,
+            &active_engagement_id,
+            "ACTIVE",
+            "Active Activity",
+            true,
+        );
+        let inactive_activity_id = create_test_activity(
+            &connection,
+            &active_engagement_id,
+            "INACTIVE-ACT",
+            "Inactive Activity",
+            false,
+        );
+        let inactive_engagement_id =
+            create_test_engagement(&connection, "QA-INACTIVE", "Inactive Engagement", false);
+        let inactive_engagement_activity_id = create_test_activity(
+            &connection,
+            &inactive_engagement_id,
+            "INACTIVE-ENG",
+            "Inactive Engagement Activity",
+            true,
+        );
+
+        for (index, (engagement_id, activity_id)) in [
+            (&active_engagement_id, &active_activity_id),
+            (&active_engagement_id, &inactive_activity_id),
+            (&inactive_engagement_id, &inactive_engagement_activity_id),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_manual_timeline_entry(
+                &connection,
+                "2026-04-02",
+                540 + (index as i64 * 30),
+                570 + (index as i64 * 30),
+                30,
+                "",
+                Some(engagement_id),
+                Some(activity_id),
+            )
+            .expect("manual entry should save");
+        }
+
+        let suggestions =
+            list_quick_add_suggestions(&connection, 12).expect("suggestions should load");
+
+        assert!(suggestions
+            .iter()
+            .any(|candidate| candidate.activity_id == active_activity_id));
+        assert!(!suggestions
+            .iter()
+            .any(|candidate| candidate.activity_id == inactive_activity_id));
+        assert!(!suggestions
+            .iter()
+            .any(|candidate| candidate.activity_id == inactive_engagement_activity_id));
+    }
+
+    #[test]
+    fn quick_add_suggestions_sort_by_usage_count_then_recent_use() {
+        let connection = test_connection();
+        let engagement_id = create_test_engagement(&connection, "QA-SORT", "Quick Add Sort", true);
+        let high_count_activity_id =
+            create_test_activity(&connection, &engagement_id, "HIGH", "High Count", true);
+        let recent_activity_id =
+            create_test_activity(&connection, &engagement_id, "RECENT", "Recent Tie", true);
+        let older_activity_id =
+            create_test_activity(&connection, &engagement_id, "OLDER", "Older Tie", true);
+
+        let high_first_id = insert_manual_timeline_entry(
+            &connection,
+            "2026-04-03",
+            540,
+            570,
+            30,
+            "",
+            Some(&engagement_id),
+            Some(&high_count_activity_id),
+        )
+        .expect("manual entry should save");
+        let high_second_id = insert_manual_timeline_entry(
+            &connection,
+            "2026-04-03",
+            570,
+            600,
+            30,
+            "",
+            Some(&engagement_id),
+            Some(&high_count_activity_id),
+        )
+        .expect("manual entry should save");
+        let older_entry_id = insert_manual_timeline_entry(
+            &connection,
+            "2026-04-03",
+            600,
+            630,
+            30,
+            "",
+            Some(&engagement_id),
+            Some(&older_activity_id),
+        )
+        .expect("manual entry should save");
+        let recent_entry_id = insert_manual_timeline_entry(
+            &connection,
+            "2026-04-03",
+            630,
+            660,
+            30,
+            "",
+            Some(&engagement_id),
+            Some(&recent_activity_id),
+        )
+        .expect("manual entry should save");
+
+        for (entry_id, timestamp) in [
+            (high_first_id, 100),
+            (high_second_id, 110),
+            (older_entry_id, 200),
+            (recent_entry_id, 300),
+        ] {
+            connection
+                .execute(
+                    "UPDATE timesheet_entries SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                    rusqlite::params![timestamp, entry_id],
+                )
+                .expect("entry timestamp should update");
+        }
+
+        let suggestions =
+            list_quick_add_suggestions(&connection, 3).expect("suggestions should load");
+        let activity_ids = suggestions
+            .iter()
+            .map(|suggestion| suggestion.activity_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            activity_ids,
+            vec![
+                high_count_activity_id.as_str(),
+                recent_activity_id.as_str(),
+                older_activity_id.as_str(),
+            ],
+        );
+    }
+
+    #[test]
+    fn quick_add_suggestions_include_zero_usage_active_activity_fallbacks() {
+        let connection = test_connection();
+        let engagement_id = create_test_engagement(&connection, "QA-FILL", "Quick Add Fill", true);
+        let used_activity_id =
+            create_test_activity(&connection, &engagement_id, "USED", "Used Activity", true);
+        let unused_activity_id = create_test_activity(
+            &connection,
+            &engagement_id,
+            "UNUSED",
+            "Unused Activity",
+            true,
+        );
+        let second_unused_activity_id = create_test_activity(
+            &connection,
+            &engagement_id,
+            "UNUSED2",
+            "Second Unused Activity",
+            true,
+        );
+
+        insert_manual_timeline_entry(
+            &connection,
+            "2026-04-04",
+            540,
+            570,
+            30,
+            "",
+            Some(&engagement_id),
+            Some(&used_activity_id),
+        )
+        .expect("manual entry should save");
+
+        let suggestions =
+            list_quick_add_suggestions(&connection, 3).expect("suggestions should load");
+
+        assert_eq!(suggestions.len(), 3);
+        assert_eq!(suggestions[0].activity_id, used_activity_id);
+        assert_eq!(suggestions[0].usage_count, 1);
+        assert!(suggestions.iter().any(|suggestion| {
+            suggestion.activity_id == unused_activity_id && suggestion.usage_count == 0
+        }));
+        assert!(suggestions.iter().any(|suggestion| {
+            suggestion.activity_id == second_unused_activity_id && suggestion.usage_count == 0
+        }));
     }
 
     #[test]

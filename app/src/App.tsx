@@ -23,6 +23,7 @@ import {
   historyList,
   interpretTextMessage,
   isAppCommandError,
+  quickAddSuggestions,
   settingsGetStatus,
   settingsSetCalendarBulkModel,
   settingsSetCalendarBulkPreferences,
@@ -43,7 +44,7 @@ import {
   timelineUpdateEntry,
   voiceRequestMicrophonePermission,
 } from './lib/api'
-import { isTauriRuntime } from './lib/runtime'
+import { isAppRuntime, isTauriRuntime } from './lib/runtime'
 import { QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
 import {
   buildDefaultSummaryLayoutState,
@@ -73,6 +74,7 @@ import type {
   HistoryListResult,
   MicrophonePermissionStatus,
   OpenAiModelId,
+  QuickAddSuggestion,
   SettingsStatus,
   SummaryLayoutColumn,
   SummaryLayoutFieldKey,
@@ -138,6 +140,18 @@ interface QuickBlockDragState {
   currentClientX: number
   durationMinutes: number
   isDragging: boolean
+}
+
+interface QuickAddActivityView {
+  engagement: Engagement
+  activity: Activity
+  usageCount: number
+  lastUsedAt: number | null
+}
+
+interface QuickAddActivityGroup {
+  engagement: Engagement
+  activities: QuickAddActivityView[]
 }
 
 interface VoiceDraftMetadata {
@@ -446,6 +460,7 @@ const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
+const QUICK_ADD_DEFAULT_LIMIT = 12
 const QUICK_BLOCK_DURATION_STEP_MINUTES = 30
 const QUICK_BLOCK_MAX_DURATION_MINUTES = 8 * HOUR_IN_MINUTES
 const QUICK_BLOCK_DRAG_STEP_PX = 22
@@ -647,6 +662,7 @@ function ResponsiveCodeTagList({ tags, itemKeyPrefix }: ResponsiveCodeTagListPro
 
 function App() {
   const tauriRuntime = isTauriRuntime()
+  const appRuntime = isAppRuntime()
   const todayDate = useMemo(() => formatDate(new Date()), [])
 
   const [activeView, setActiveView] = useState<View>('timeline')
@@ -679,10 +695,11 @@ function App() {
   const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
   const [lastSubmissionNotice, setLastSubmissionNotice] = useState<string | null>(null)
-  const [quickBlockExpandedEngagementId, setQuickBlockExpandedEngagementId] = useState<string | null>(null)
-  const [quickBlockPinnedEngagementId, setQuickBlockPinnedEngagementId] = useState<string | null>(null)
+  const [quickAddSearch, setQuickAddSearch] = useState('')
+  const [quickAddSuggestionItems, setQuickAddSuggestionItems] = useState<QuickAddSuggestion[]>([])
+  const [isQuickAddSuggestionsLoading, setIsQuickAddSuggestionsLoading] = useState(false)
+  const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickBlockDragState | null>(null)
-  const [quickAddExpandedHeight, setQuickAddExpandedHeight] = useState<number | null>(null)
   const [isCalendarBulkModalOpen, setIsCalendarBulkModalOpen] = useState(false)
   const [calendarBulkTab, setCalendarBulkTab] = useState<CalendarBulkTab>('submission')
   const [calendarSelectedFileName, setCalendarSelectedFileName] = useState<string | null>(null)
@@ -718,8 +735,6 @@ function App() {
   const codeFormsBodyRef = useRef<HTMLDivElement | null>(null)
   const engagementNameInputRef = useRef<HTMLInputElement | null>(null)
   const activityEngagementSelectRef = useRef<HTMLSelectElement | null>(null)
-  const sidebarPanelRef = useRef<HTMLElement | null>(null)
-  const quickAddPanelRef = useRef<HTMLDivElement | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
   const weekTimelineGridRef = useRef<HTMLDivElement | null>(null)
   const calendarReviewTimelineGridRef = useRef<HTMLDivElement | null>(null)
@@ -911,19 +926,122 @@ function App() {
     }
     return values
   }, [engagements])
-  const quickBlockEngagements = useMemo(
-    () =>
-      engagements
-        .filter((engagement) => engagement.isActive)
-        .map((engagement) => ({
-          ...engagement,
-          activities: engagement.activities.filter((activity) => activity.isActive),
-        })),
-    [engagements],
-  )
-  const activeQuickBlockEngagementId =
-    quickBlockPinnedEngagementId ?? quickBlockExpandedEngagementId
-  const isQuickAddExpanded = activeQuickBlockEngagementId !== null || quickBlockDragState !== null
+  const quickAddSuggestionByKey = useMemo(() => {
+    const values = new Map<string, QuickAddSuggestion>()
+    for (const suggestion of quickAddSuggestionItems) {
+      values.set(`${suggestion.engagementId}:${suggestion.activityId}`, suggestion)
+    }
+
+    return values
+  }, [quickAddSuggestionItems])
+  const allQuickAddActivities = useMemo<QuickAddActivityView[]>(() => {
+    const values: QuickAddActivityView[] = []
+    for (const engagement of engagements) {
+      if (!engagement.isActive) {
+        continue
+      }
+
+      for (const activity of engagement.activities) {
+        if (!activity.isActive) {
+          continue
+        }
+
+        const suggestion = quickAddSuggestionByKey.get(`${engagement.id}:${activity.id}`)
+        values.push({
+          engagement,
+          activity,
+          usageCount: suggestion?.usageCount ?? 0,
+          lastUsedAt: suggestion?.lastUsedAt ?? null,
+        })
+      }
+    }
+
+    return values
+  }, [engagements, quickAddSuggestionByKey])
+  const quickAddActivityByKey = useMemo(() => {
+    const values = new Map<string, QuickAddActivityView>()
+    for (const item of allQuickAddActivities) {
+      values.set(`${item.engagement.id}:${item.activity.id}`, item)
+    }
+
+    return values
+  }, [allQuickAddActivities])
+  const suggestedQuickAddActivities = useMemo(() => {
+    const values: QuickAddActivityView[] = []
+    const seenKeys = new Set<string>()
+
+    for (const suggestion of quickAddSuggestionItems) {
+      const key = `${suggestion.engagementId}:${suggestion.activityId}`
+      const item = quickAddActivityByKey.get(key)
+      if (!item || seenKeys.has(key)) {
+        continue
+      }
+
+      values.push(item)
+      seenKeys.add(key)
+    }
+
+    for (const item of allQuickAddActivities) {
+      if (values.length >= QUICK_ADD_DEFAULT_LIMIT) {
+        break
+      }
+
+      const key = `${item.engagement.id}:${item.activity.id}`
+      if (seenKeys.has(key)) {
+        continue
+      }
+
+      values.push(item)
+      seenKeys.add(key)
+    }
+
+    return values.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+  }, [allQuickAddActivities, quickAddActivityByKey, quickAddSuggestionItems])
+  const visibleQuickAddActivities = useMemo(() => {
+    const searchTerms = quickAddSearch
+      .trim()
+      .toLocaleLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+
+    if (searchTerms.length === 0) {
+      return suggestedQuickAddActivities
+    }
+
+    return allQuickAddActivities.filter(({ engagement, activity }) => {
+      const haystack = [
+        engagement.code,
+        engagement.name,
+        activity.code,
+        activity.name,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLocaleLowerCase()
+
+      return searchTerms.every((term) => haystack.includes(term))
+    })
+  }, [allQuickAddActivities, quickAddSearch, suggestedQuickAddActivities])
+  const quickAddActivityGroups = useMemo<QuickAddActivityGroup[]>(() => {
+    const groups: QuickAddActivityGroup[] = []
+    const groupByEngagementId = new Map<string, QuickAddActivityGroup>()
+
+    for (const item of visibleQuickAddActivities) {
+      let group = groupByEngagementId.get(item.engagement.id)
+      if (!group) {
+        group = {
+          engagement: item.engagement,
+          activities: [],
+        }
+        groupByEngagementId.set(item.engagement.id, group)
+        groups.push(group)
+      }
+
+      group.activities.push(item)
+    }
+
+    return groups
+  }, [visibleQuickAddActivities])
   const summaryViewColumns = useMemo(
     () => buildSummaryViewColumns(selectedSummaryLayoutPreset),
     [selectedSummaryLayoutPreset],
@@ -1625,6 +1743,22 @@ function App() {
     return value
   }, [])
 
+  const loadQuickAddSuggestions = useCallback(async () => {
+    setIsQuickAddSuggestionsLoading(true)
+    setQuickAddSuggestionsError(null)
+
+    try {
+      const value = await quickAddSuggestions({ limit: QUICK_ADD_DEFAULT_LIMIT })
+      setQuickAddSuggestionItems(value.suggestions)
+      return value
+    } catch (error) {
+      setQuickAddSuggestionsError(extractErrorMessage(error))
+      return null
+    } finally {
+      setIsQuickAddSuggestionsLoading(false)
+    }
+  }, [])
+
   const invalidateMonthSummaries = useCallback((monthKeys: string[]) => {
     setMonthSummaryCache((previous) => {
       let changed = false
@@ -1672,6 +1806,7 @@ function App() {
           loadTimeline(refreshDate),
           loadWeekTimeline(refreshDate),
           loadWeeklySummary(refreshDate),
+          loadQuickAddSuggestions(),
         ])
       },
     ).then((nextUnlisten) => {
@@ -1692,11 +1827,12 @@ function App() {
     loadTimeline,
     loadWeekTimeline,
     loadWeeklySummary,
+    loadQuickAddSuggestions,
     tauriRuntime,
   ])
 
   useEffect(() => {
-    if (!tauriRuntime) {
+    if (!appRuntime) {
       return
     }
 
@@ -1705,6 +1841,7 @@ function App() {
         setIsBusy(true)
         await Promise.all([
           loadEngagements(),
+          loadQuickAddSuggestions(),
           loadSettings(),
           loadSummaryLayoutState(),
           loadTimeline(todayDate),
@@ -1722,10 +1859,11 @@ function App() {
   }, [
     loadDiagnostics,
     loadEngagements,
+    loadQuickAddSuggestions,
     loadSettings,
     loadSummaryLayoutState,
     loadTimeline,
-    tauriRuntime,
+    appRuntime,
     todayDate,
   ])
 
@@ -1751,7 +1889,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!tauriRuntime || !hasInitializedRef.current) {
+    if (!appRuntime || !hasInitializedRef.current) {
       return
     }
 
@@ -1776,7 +1914,7 @@ function App() {
         setIsTimelineLoading(false)
       }
     })()
-  }, [loadTimeline, selectedDate, tauriRuntime])
+  }, [appRuntime, loadTimeline, selectedDate])
 
   useEffect(() => () => {
     if (calendarImagePreviewUrl) {
@@ -1785,7 +1923,7 @@ function App() {
   }, [calendarImagePreviewUrl])
 
   useEffect(() => {
-    if (!tauriRuntime) {
+    if (!appRuntime) {
       return
     }
 
@@ -1819,7 +1957,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [hasVisibleMonthSummary, loadTimelineMonthSummary, tauriRuntime, visibleMonth])
+  }, [appRuntime, hasVisibleMonthSummary, loadTimelineMonthSummary, visibleMonth])
 
   useEffect(() => {
     if (selectedEntryId && loadedTimelineEntries.every((entry) => entry.id !== selectedEntryId)) {
@@ -1841,61 +1979,6 @@ function App() {
       setTimelineContextMenu(null)
     }
   }, [highlightedEntryId, loadedTimelineEntries, selectedEntryId, timelineContextMenu])
-
-  useEffect(() => {
-    if (
-      quickBlockPinnedEngagementId
-      && quickBlockEngagements.every((engagement) => engagement.id !== quickBlockPinnedEngagementId)
-    ) {
-      setQuickBlockPinnedEngagementId(null)
-    }
-
-    if (
-      quickBlockExpandedEngagementId
-      && quickBlockEngagements.every((engagement) => engagement.id !== quickBlockExpandedEngagementId)
-    ) {
-      setQuickBlockExpandedEngagementId(null)
-    }
-  }, [quickBlockEngagements, quickBlockExpandedEngagementId, quickBlockPinnedEngagementId])
-
-  useLayoutEffect(() => {
-    if (!isQuickAddExpanded) {
-      setQuickAddExpandedHeight(null)
-      return
-    }
-
-    const updateExpandedHeight = () => {
-      const sidebarPanel = sidebarPanelRef.current
-      const quickAddPanel = quickAddPanelRef.current
-      if (!sidebarPanel || !quickAddPanel) {
-        return
-      }
-
-      const sidebarRect = sidebarPanel.getBoundingClientRect()
-      const quickAddRect = quickAddPanel.getBoundingClientRect()
-      const bottomInset = 14
-      const nextHeight = Math.max(
-        280,
-        Math.floor(sidebarRect.bottom - quickAddRect.top - bottomInset),
-      )
-
-      setQuickAddExpandedHeight((previous) =>
-        previous !== null && Math.abs(previous - nextHeight) < 1 ? previous : nextHeight,
-      )
-    }
-
-    updateExpandedHeight()
-    window.addEventListener('resize', updateExpandedHeight)
-
-    return () => {
-      window.removeEventListener('resize', updateExpandedHeight)
-    }
-  }, [
-    activeQuickBlockEngagementId,
-    isQuickAddExpanded,
-    lastSubmissionNotice,
-    voiceCaptureStatusMessage,
-  ])
 
   useEffect(() => {
     if (!timelineContextMenu) {
@@ -1940,15 +2023,15 @@ function App() {
   }, [timelineContextMenu])
 
   useEffect(() => {
-    if (!tauriRuntime || activeView !== 'diagnostics') {
+    if (!appRuntime || activeView !== 'diagnostics') {
       return
     }
 
     void loadDiagnostics(diagnosticsFilter)
-  }, [activeView, diagnosticsFilter, loadDiagnostics, tauriRuntime])
+  }, [activeView, appRuntime, diagnosticsFilter, loadDiagnostics])
 
   useEffect(() => {
-    if (!tauriRuntime || activeView !== 'history') {
+    if (!appRuntime || activeView !== 'history') {
       return
     }
 
@@ -1977,10 +2060,10 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [activeView, loadHistory, selectedDate, tauriRuntime])
+  }, [activeView, appRuntime, loadHistory, selectedDate])
 
   useEffect(() => {
-    if (!tauriRuntime || !hasInitializedRef.current || activeView !== 'week') {
+    if (!appRuntime || !hasInitializedRef.current || activeView !== 'week') {
       return
     }
 
@@ -2012,10 +2095,10 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [activeView, loadWeekTimeline, selectedDate, tauriRuntime])
+  }, [activeView, appRuntime, loadWeekTimeline, selectedDate])
 
   useEffect(() => {
-    if (!tauriRuntime || !hasInitializedRef.current || activeView !== 'summary') {
+    if (!appRuntime || !hasInitializedRef.current || activeView !== 'summary') {
       return
     }
 
@@ -2047,7 +2130,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [activeView, loadWeeklySummary, selectedDate, tauriRuntime])
+  }, [activeView, appRuntime, loadWeeklySummary, selectedDate])
 
   useEffect(() => {
     if (
@@ -2329,8 +2412,18 @@ function App() {
       loadSettings(),
       loadHistory(selectedDate),
       loadWeeklySummary(selectedDate),
+      loadQuickAddSuggestions(),
     ])
-  }, [loadEngagements, loadHistory, loadSettings, loadTimeline, loadWeekTimeline, loadWeeklySummary, selectedDate])
+  }, [
+    loadEngagements,
+    loadHistory,
+    loadQuickAddSuggestions,
+    loadSettings,
+    loadTimeline,
+    loadWeekTimeline,
+    loadWeeklySummary,
+    selectedDate,
+  ])
 
   const runAction = useCallback(
     async (action: () => Promise<void>, options?: RunActionOptions) => {
@@ -2566,6 +2659,7 @@ function App() {
             loadTimeline(refreshDate),
             loadWeekTimeline(refreshDate),
             loadWeeklySummary(refreshDate),
+            loadQuickAddSuggestions(),
           ])
         } catch (error) {
           setErrorMessage(formatActionErrorMessage(error))
@@ -2580,6 +2674,7 @@ function App() {
       invalidateMonthSummaries,
       loadTimeline,
       loadWeekTimeline,
+      loadQuickAddSuggestions,
       loadWeeklySummary,
       setTimelineLanePreferences,
       setTimelineDragStateWithRef,
@@ -2655,6 +2750,7 @@ function App() {
           loadWeekTimeline(refreshDate),
           loadHistory(refreshDate),
           loadWeeklySummary(refreshDate),
+          loadQuickAddSuggestions(),
         ])
       } catch (error) {
         const completedAt = Date.now()
@@ -2683,6 +2779,7 @@ function App() {
       loadTimeline,
       loadWeekTimeline,
       loadHistory,
+      loadQuickAddSuggestions,
       loadWeeklySummary,
       trimSubmissionQueue,
     ],
@@ -3602,6 +3699,7 @@ function App() {
           loadTimeline(selectedDateRef.current),
           loadWeekTimeline(selectedDateRef.current),
           loadWeeklySummary(selectedDateRef.current),
+          loadQuickAddSuggestions(),
         ])
         setCalendarReviewCandidates((previous) =>
           previous.map((candidate) =>
@@ -3655,6 +3753,7 @@ function App() {
         loadTimeline(selectedDateRef.current),
         loadWeekTimeline(selectedDateRef.current),
         loadWeeklySummary(selectedDateRef.current),
+        loadQuickAddSuggestions(),
       ])
       setCalendarReviewCandidates((previous) =>
         previous.map((candidate) =>
@@ -3710,6 +3809,7 @@ function App() {
         loadTimeline(selectedDateRef.current),
         loadWeekTimeline(selectedDateRef.current),
         loadWeeklySummary(selectedDateRef.current),
+        loadQuickAddSuggestions(),
       ])
       const createdEntryIdByCandidateId = new Map(
         candidatesToSave.map((candidate, index) => [
@@ -4220,7 +4320,6 @@ function App() {
         updateSelectedDate(date, { clearSelection: false })
         setSelectedEntryId(null)
         setEntryDraft(null)
-        setHighlightedEntryId(result.id)
         pendingAutoCenterDateRef.current = null
 
         const [entries] = await Promise.all([
@@ -4228,10 +4327,12 @@ function App() {
           loadWeekTimeline(date),
           loadHistory(date),
           loadWeeklySummary(date),
+          loadQuickAddSuggestions(),
         ])
         invalidateMonthSummaries([monthKey])
         const createdEntry = entries.find((entry) => entry.id === result.id)
         if (createdEntry) {
+          setHighlightedEntryId(result.id)
           scrollDayTimelineToEntry(createdEntry)
         }
         setSuccessMessage(`Added ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
@@ -4241,6 +4342,7 @@ function App() {
       invalidateMonthSummaries,
       isBusy,
       loadHistory,
+      loadQuickAddSuggestions,
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
@@ -4347,6 +4449,7 @@ function App() {
           loadTimeline(date),
           loadWeekTimeline(date),
           loadWeeklySummary(date),
+          loadQuickAddSuggestions(),
         ])
         invalidateMonthSummaries([monthKeyFromDate(date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
@@ -4358,7 +4461,16 @@ function App() {
         setSuccessMessage('Timeline entry created.')
       })
     },
-    [invalidateMonthSummaries, loadTimeline, loadWeekTimeline, loadWeeklySummary, runAction, timelineWindow, updateSelectedDate],
+    [
+      invalidateMonthSummaries,
+      loadQuickAddSuggestions,
+      loadTimeline,
+      loadWeekTimeline,
+      loadWeeklySummary,
+      runAction,
+      timelineWindow,
+      updateSelectedDate,
+    ],
   )
 
   const onCreateTimelineEntryFromContextMenu = () => {
@@ -4580,6 +4692,7 @@ function App() {
         loadTimeline(refreshDate),
         loadWeekTimeline(refreshDate),
         loadWeeklySummary(refreshDate),
+        loadQuickAddSuggestions(),
       ])
       invalidateMonthSummaries([previousMonthKey, nextMonthKey])
       const nextDraftEndState = buildEntryDraftEndState(endMinute)
@@ -4620,6 +4733,7 @@ function App() {
           loadTimeline(selectedDateRef.current),
           loadWeekTimeline(selectedDateRef.current),
           loadWeeklySummary(selectedDateRef.current),
+          loadQuickAddSuggestions(),
         ])
 
         window.requestAnimationFrame(() => {
@@ -5212,7 +5326,7 @@ function App() {
   }
 
   const timelineEditorPanel = (
-    <aside className={`timeline-editor ${entryDraft ? '' : 'is-empty'}`}>
+    <aside className={`timeline-editor ${entryDraft ? '' : 'is-empty'}`} data-testid="agent-qa-timeline-editor">
       <div className="timeline-editor-header">
         <h3>Edit Entry</h3>
         {entryDraft ? (
@@ -5229,7 +5343,7 @@ function App() {
         ) : null}
       </div>
       {entryDraft ? (
-        <form className="stack" onSubmit={onSaveEntryDraft}>
+        <form className="stack" onSubmit={onSaveEntryDraft} data-testid="agent-qa-timeline-editor-form">
           <label>
             Date
             <input
@@ -5340,6 +5454,7 @@ function App() {
           <label>
             Description
             <textarea
+              aria-label="Entry description"
               rows={4}
               value={entryDraft.description}
               onChange={(event) =>
@@ -6011,7 +6126,7 @@ function App() {
     document.body,
   ) : null
 
-  if (!tauriRuntime) {
+  if (!appRuntime) {
     return (
       <div className="runtime-shell">
         <h1>OmniSheet</h1>
@@ -6022,18 +6137,17 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-testid="omnisheet-app-shell">
       <div className={`workspace-shell ${activeView === 'timeline' ? 'with-timeline' : 'without-timeline'}`}>
-        <aside
-          className={`sidebar-panel ${isQuickAddExpanded ? 'quick-add-overlay-open' : ''}`}
-          ref={sidebarPanelRef}
-        >
+        <aside className="sidebar-panel">
           <section className="sidebar-section sidebar-capture">
             <div className="sidebar-section-header">
               <h2>Submit an entry</h2>
             </div>
-            <form onSubmit={onSubmitCapture} className="stack">
+            <form onSubmit={onSubmitCapture} className="stack" data-testid="agent-qa-entry-form">
               <textarea
+                aria-label="Entry message"
+                data-testid="agent-qa-entry-message"
                 value={captureMessage}
                 onChange={(event) => {
                   const nextValue = event.target.value
@@ -6110,133 +6224,116 @@ function App() {
               </div>
             ) : null}
 
-            <div
-              ref={quickAddPanelRef}
-              className={`quick-blocks-panel ${isQuickAddExpanded ? 'quick-add-expanded' : ''}`}
-              aria-label="Quick Add"
-              style={{
-                '--quick-add-expanded-height': quickAddExpandedHeight
-                  ? `${quickAddExpandedHeight}px`
-                  : undefined,
-              } as CSSProperties}
-            >
-              <div className="quick-blocks-header">
-                <div>
-                  <h3>Quick Add</h3>
-                </div>
+            <div className="quick-add-panel" aria-label="Quick Add">
+              <div className="quick-add-header">
+                <h3>Quick Add</h3>
+                {isQuickAddSuggestionsLoading ? <span>Updating</span> : null}
               </div>
-              {quickBlockEngagements.length === 0 ? (
-                <p className="quick-blocks-empty">No active engagements yet.</p>
+              <input
+                className="quick-add-search"
+                type="search"
+                value={quickAddSearch}
+                onChange={(event) => setQuickAddSearch(event.target.value)}
+                placeholder="Search activities"
+                aria-label="Search quick add activities"
+              />
+              {quickAddSuggestionsError ? (
+                <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
+              ) : null}
+              {quickAddActivityGroups.length === 0 ? (
+                <p className="quick-add-empty">
+                  {allQuickAddActivities.length === 0
+                    ? 'No active activities yet.'
+                    : 'No matching activities.'}
+                </p>
               ) : (
-                <div className="quick-blocks-list">
-                  {quickBlockEngagements.map((engagement) => {
-                    const engagementColor = engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
-                    const isExpanded = activeQuickBlockEngagementId === engagement.id
-                    const isPinned = quickBlockPinnedEngagementId === engagement.id
+                <div className="quick-add-list">
+                  {quickAddActivityGroups.map((group) => {
+                    const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
 
                     return (
-                      <div
-                        key={engagement.id}
-                        className={`quick-block-engagement ${isExpanded ? 'expanded' : ''} ${isPinned ? 'pinned' : ''}`}
-                        onMouseEnter={() => {
-                          if (!quickBlockPinnedEngagementId) {
-                            setQuickBlockExpandedEngagementId(engagement.id)
-                          }
-                        }}
-                        onMouseLeave={() => {
-                          if (!quickBlockPinnedEngagementId) {
-                            setQuickBlockExpandedEngagementId(null)
-                          }
-                        }}
-                        onFocus={() => {
-                          if (!quickBlockPinnedEngagementId) {
-                            setQuickBlockExpandedEngagementId(engagement.id)
-                          }
-                        }}
+                      <section
+                        key={group.engagement.id}
+                        className="quick-add-group"
+                        style={{
+                          '--quick-add-color': engagementColor,
+                        } as CSSProperties}
                       >
-                        <button
-                          type="button"
-                          className="quick-block-engagement-button"
-                          onClick={() => {
-                            setQuickBlockPinnedEngagementId((previous) =>
-                              previous === engagement.id ? null : engagement.id,
-                            )
-                            setQuickBlockExpandedEngagementId(engagement.id)
-                          }}
-                          aria-expanded={isExpanded}
-                          style={{
-                            '--quick-block-color': engagementColor,
-                          } as CSSProperties}
-                        >
-                          <span className="quick-block-color" aria-hidden="true" />
-                          <span className="quick-block-engagement-main">
-                            <strong>{engagement.code || engagement.name}</strong>
-                            <span>{engagement.code ? engagement.name : engagement.client || 'Engagement'}</span>
+                        <div className="quick-add-group-header">
+                          <span className="quick-add-group-dot" aria-hidden="true" />
+                          <span className="quick-add-group-main">
+                            <strong>{group.engagement.code || group.engagement.name}</strong>
+                            <span>
+                              {group.engagement.code
+                                ? group.engagement.name
+                                : group.engagement.client || 'Engagement'}
+                            </span>
                           </span>
-                          <span className="quick-block-count">{engagement.activities.length}</span>
-                        </button>
+                        </div>
+                        <div className="quick-add-grid">
+                          {group.activities.map(({ activity, engagement, usageCount, lastUsedAt }) => {
+                            const activityColor = activity.colorHex ?? engagementColor
+                            const isDraggingActivity =
+                              quickBlockDragState?.activityId === activity.id
+                              && quickBlockDragState.engagementId === engagement.id
+                            const durationMinutes = isDraggingActivity
+                              ? quickBlockDragState.durationMinutes
+                              : TIMELINE_MANUAL_CREATE_DURATION_MINUTES
+                            const activityLabel = activity.code || activity.name
+                            const activityDetail = activity.code ? activity.name : 'Activity'
 
-                        {isExpanded ? (
-                          <div className="quick-block-activities">
-                            {engagement.activities.length === 0 ? (
-                              <p className="quick-blocks-empty">No active activities.</p>
-                            ) : (
-                              engagement.activities.map((activity) => {
-                                const activityColor = activity.colorHex ?? engagementColor
-                                const isDraggingActivity =
-                                  quickBlockDragState?.activityId === activity.id
-                                  && quickBlockDragState.engagementId === engagement.id
-                                const durationMinutes = isDraggingActivity
-                                  ? quickBlockDragState.durationMinutes
-                                  : TIMELINE_MANUAL_CREATE_DURATION_MINUTES
-
-                                return (
-                                  <button
-                                    key={activity.id}
-                                    type="button"
-                                    className={`quick-block-activity ${isDraggingActivity ? 'dragging' : ''}`}
-                                    onPointerDown={(event) =>
-                                      onQuickBlockActivityPointerDown(event, engagement, activity)
-                                    }
-                                    onPointerMove={onQuickBlockActivityPointerMove}
-                                    onPointerUp={(event) =>
-                                      onQuickBlockActivityPointerUp(event, engagement, activity)
-                                    }
-                                    onPointerCancel={onQuickBlockActivityPointerCancel}
-                                    onKeyDown={(event) => {
-                                      if (event.key === 'Enter' || event.key === ' ') {
-                                        event.preventDefault()
-                                        createQuickBlockEntry(
-                                          engagement,
-                                          activity,
-                                          TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
-                                        )
-                                      }
-                                    }}
-                                    disabled={isBusy}
-                                    style={{
-                                      '--quick-block-color': activityColor,
-                                      '--quick-block-duration-progress': `${quickBlockDurationProgress(durationMinutes)}%`,
-                                    } as CSSProperties}
-                                  >
-                                    <span className="quick-block-activity-name">
-                                      {formatEntityDisplayLabel(activity.name, activity.code)}
-                                    </span>
-                                    <span className="quick-block-duration">
-                                      {formatQuickBlockDuration(durationMinutes)}
-                                    </span>
-                                    {isDraggingActivity ? (
-                                      <span className="quick-block-duration-track" aria-hidden="true">
-                                        <span />
-                                      </span>
-                                    ) : null}
-                                  </button>
-                                )
-                              })
-                            )}
-                          </div>
-                        ) : null}
-                      </div>
+                            return (
+                              <button
+                                key={activity.id}
+                                type="button"
+                                className={`quick-add-tile ${isDraggingActivity ? 'dragging' : ''}`}
+                                onPointerDown={(event) =>
+                                  onQuickBlockActivityPointerDown(event, engagement, activity)
+                                }
+                                onPointerMove={onQuickBlockActivityPointerMove}
+                                onPointerUp={(event) =>
+                                  onQuickBlockActivityPointerUp(event, engagement, activity)
+                                }
+                                onPointerCancel={onQuickBlockActivityPointerCancel}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault()
+                                    createQuickBlockEntry(
+                                      engagement,
+                                      activity,
+                                      TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
+                                    )
+                                  }
+                                }}
+                                disabled={isBusy}
+                                aria-label={`Add ${formatEntityDisplayLabel(activity.name, activity.code)}`}
+                                title={
+                                  usageCount > 0 && lastUsedAt
+                                    ? `${formatEntityDisplayLabel(activity.name, activity.code)} - used ${usageCount} time${usageCount === 1 ? '' : 's'}`
+                                    : formatEntityDisplayLabel(activity.name, activity.code)
+                                }
+                                style={{
+                                  '--quick-add-color': activityColor,
+                                  '--quick-add-duration-progress': `${quickBlockDurationProgress(durationMinutes)}%`,
+                                } as CSSProperties}
+                              >
+                                <span className="quick-add-tile-main">
+                                  <strong>{activityLabel}</strong>
+                                  <span>{activityDetail}</span>
+                                </span>
+                                <span className="quick-add-duration">
+                                  {formatQuickBlockDuration(durationMinutes)}
+                                </span>
+                                {isDraggingActivity ? (
+                                  <span className="quick-add-duration-track" aria-hidden="true">
+                                    <span />
+                                  </span>
+                                ) : null}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </section>
                     )
                   })}
                 </div>
@@ -6327,7 +6424,7 @@ function App() {
         </aside>
 
         <main className="app-main">
-          <div className="segmented-control" role="tablist" aria-label="Main views">
+          <div className="segmented-control" role="tablist" aria-label="Main views" data-testid="agent-qa-main-tabs">
             {SEGMENTED_VIEWS.map((view) => (
               <button
                 key={view.id}
@@ -6435,6 +6532,7 @@ function App() {
                 className={`timeline-grid ${timelineDragState?.isDragging ? 'dragging' : ''}`}
                 role="list"
                 aria-label="Timeline entries"
+                data-testid="agent-qa-day-timeline"
                 aria-busy={isTimelineLoading}
                 ref={timelineGridRef}
               >
@@ -6658,6 +6756,7 @@ function App() {
                 } as CSSProperties}
                 role="list"
                 aria-label="Week timeline entries"
+                data-testid="agent-qa-week-timeline"
                 aria-busy={isWeekTimelineLoading}
                 ref={weekTimelineGridRef}
               >
@@ -7459,7 +7558,7 @@ function App() {
                 <p>Click to expand and review/edit the related activities.</p>
               </div>
 
-              <div className="code-list" aria-label="Existing engagements and activities">
+              <div className="code-list" aria-label="Existing engagements and activities" data-testid="agent-qa-code-list">
                 {engagements.length === 0 ? (
                   <p className="code-list-empty">No engagements yet. Create one to get started.</p>
                 ) : (

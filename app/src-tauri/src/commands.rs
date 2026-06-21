@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use tauri::{Manager, State};
 use uuid::Uuid;
 
+use crate::agent_qa;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::macos_permissions;
@@ -23,15 +24,15 @@ use crate::models::{
     Engagement, EngagementType, EngagementUpsertInput, HistoryListResult, IdInput, IdResult,
     InterpretResult, InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry,
     MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
-    SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
-    SettingsSetOpenAiModelInput, SettingsSetTimelinePreferencesInput,
-    SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
-    SummaryExportResult, SummaryExportWeeklyExcelInput, SummaryLayoutColumn, SummaryLayoutFieldKey,
-    SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput, TimelineDaySummary,
-    TimelineEntry, TimelineMonthSummaryInput, TimelineTotalBreakdown, TimelineUpdateInput,
-    TimelineUpdateMode, TimelineWeekView, TimelineWeekViewDay, TimelineWeeklySummary,
-    TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult, TranscriptionModelId,
-    Warning, WarningType,
+    QuickAddSuggestionInput, QuickAddSuggestionResult, SettingsSetCalendarBulkModelInput,
+    SettingsSetCalendarBulkPreferencesInput, SettingsSetOpenAiModelInput,
+    SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
+    StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
+    SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
+    TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
+    TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
+    TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput,
+    TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -2028,6 +2029,159 @@ fn record_backend_event_with_state(
     }
 }
 
+fn run_agent_qa_interpret_text_message(
+    state: &State<'_, AppState>,
+    input: &InterpretTextInput,
+    correlation_id: String,
+    started_at: Instant,
+) -> Result<InterpretResult, String> {
+    let command = "interpret_text_message";
+    let selected_openai_model = input.open_ai_model.unwrap_or(OpenAiModelId::Gpt5Nano);
+    let parsed_timestamp = parse_client_timestamp(&input.client_timestamp_iso);
+    let selected_date = parse_date(input.client_local_date.trim())
+        .unwrap_or_else(|| parsed_timestamp.date_naive())
+        .format("%Y-%m-%d")
+        .to_string();
+    let raw_message_id = Uuid::new_v4().to_string();
+    let interpreted_entries_json = json!({
+        "agentQa": true,
+        "entries": [
+            {
+                "date": selected_date.clone(),
+                "startTime": "16:00",
+                "endTime": "16:30",
+                "description": format!("QA interpreted: {}", input.raw_text.trim()),
+                "confidence": 0.97
+            }
+        ]
+    })
+    .to_string();
+
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    connection
+        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+    let write_result: Result<(Vec<String>, Vec<String>), String> = (|| {
+        agent_qa::seed_reference_data(&connection).map_err(|error| error.to_string())?;
+        db::insert_raw_message(
+            &connection,
+            &raw_message_id,
+            input.raw_text.trim(),
+            &interpreted_entries_json,
+            selected_openai_model.api_name(),
+            capture_source_label(input.capture_source.unwrap_or(CaptureSourceId::Text)),
+            input.transcription_model.map(|model| model.api_name()),
+            input.transcription_duration_ms,
+            0.97,
+            parsed_timestamp.timestamp(),
+            1,
+            1,
+            1,
+            0,
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let normalized_entry = NormalizedEntry {
+            date: selected_date.clone(),
+            start_minute: 16 * 60,
+            end_minute: 16 * 60 + 30,
+            duration_minutes: 30,
+            description: format!("QA interpreted: {}", input.raw_text.trim()),
+            user_submission_text: input.raw_text.trim().to_string(),
+            confidence: 0.97,
+            engagement_ref: None,
+            activity_ref: None,
+        };
+        let entry_id = db::insert_timesheet_entry(
+            &connection,
+            &raw_message_id,
+            &normalized_entry,
+            Some(agent_qa::APPLE_ENGAGEMENT_ID),
+            Some(agent_qa::CONTROL_TESTING_ACTIVITY_ID),
+            false,
+            false,
+            false,
+            None,
+            Some(1),
+            Some(1),
+            capture_source_label(input.capture_source.unwrap_or(CaptureSourceId::Text)),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let _ = db::recompute_overlap_warnings(&connection, &selected_date)
+            .map_err(|error| error.to_string())?;
+        let touched_month_keys = month_key_from_iso_date(&selected_date)
+            .map(|month| vec![month])
+            .unwrap_or_default();
+
+        Ok((vec![entry_id], touched_month_keys))
+    })();
+
+    let (created_entry_ids, touched_month_keys) = match write_result {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                Some(input.raw_text.trim()),
+                json!({ "agentQa": true, "message": message }),
+            );
+            return Err(format_command_error(&correlation_id, message));
+        }
+    };
+
+    connection
+        .execute_batch("COMMIT")
+        .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+    record_backend_event(
+        &connection,
+        state.inner(),
+        &correlation_id,
+        "command_success",
+        command,
+        "ok",
+        Some(duration_ms(started_at)),
+        Some(input.raw_text.trim()),
+        json!({
+            "agentQa": true,
+            "rawMessageId": raw_message_id,
+            "createdEntryCount": created_entry_ids.len(),
+            "touchedMonthKeys": touched_month_keys.clone(),
+            "model": selected_openai_model.api_name(),
+            "modelLabel": selected_openai_model.display_label(),
+            "llmDurationMs": 10,
+        }),
+    );
+
+    Ok(InterpretResult {
+        correlation_id,
+        raw_message_id,
+        created_entry_ids,
+        interpreted_entry_count: 1,
+        unique_entry_count: 1,
+        saved_entry_count: 1,
+        truncated_entry_count: 0,
+        contains_multiple_events: false,
+        touched_month_keys,
+        warnings: vec![],
+        normalization_notes: vec![
+            "Agent QA mock interpretation used deterministic fixture.".to_string()
+        ],
+        model_used: selected_openai_model,
+        model_used_label: selected_openai_model.display_label().to_string(),
+        llm_duration_ms: 10,
+    })
+}
+
 fn llm_attempt_event_status(attempt: &openai::LlmAttemptTelemetry) -> &'static str {
     if attempt.outcome == "success" {
         "ok"
@@ -3191,6 +3345,19 @@ pub fn history_list(
     list_history_for_date(&connection, &input.date)
 }
 
+#[tauri::command]
+pub fn quick_add_suggestions(
+    state: State<'_, AppState>,
+    input: QuickAddSuggestionInput,
+) -> Result<QuickAddSuggestionResult, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    let limit = input.limit.unwrap_or(12).clamp(1, 100);
+    let suggestions =
+        db::list_quick_add_suggestions(&connection, limit).map_err(|error| error.to_string())?;
+
+    Ok(QuickAddSuggestionResult { suggestions })
+}
+
 fn list_history_for_date(connection: &Connection, date: &str) -> Result<HistoryListResult, String> {
     let (start_date, end_date_exclusive) = timeline_week_bounds(date)?;
     let week_start = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
@@ -3477,6 +3644,35 @@ pub async fn calendar_extract_events(
           "ignoreAllDayEvents": input.ignore_all_day_events,
         }),
     );
+
+    if agent_qa::is_enabled() {
+        let selected_openai_model = input
+            .open_ai_model
+            .unwrap_or_else(OpenAiModelId::default_calendar_bulk_model);
+        let result = agent_qa::mock_calendar_extract_result(
+            &input,
+            correlation_id.clone(),
+            selected_openai_model,
+        );
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_success",
+            command,
+            "ok",
+            Some(duration_ms(started_at)),
+            None,
+            json!({
+              "agentQa": true,
+              "candidateCount": result.candidates.len(),
+              "ignoredCandidateCount": result.ignored_candidate_count,
+              "model": selected_openai_model.api_name(),
+              "modelLabel": selected_openai_model.display_label(),
+              "llmDurationMs": result.llm_duration_ms,
+            }),
+        );
+        return Ok(result);
+    }
 
     let image_base64 = normalize_image_base64(&input.image_base64).map_err(|message| {
         record_backend_event_with_state(
@@ -4093,6 +4289,28 @@ pub async fn transcribe_audio_clip(
         }),
     );
 
+    if agent_qa::is_enabled() {
+        let result = agent_qa::mock_transcription_result(&input);
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_success",
+            command,
+            "ok",
+            Some(duration_ms(started_at)),
+            None,
+            json!({
+              "agentQa": true,
+              "audioDurationMs": result.audio_duration_ms,
+              "transcriptLength": result.transcript_text.len(),
+              "transcriptionModel": result.transcription_model_used.api_name(),
+              "transcriptionModelLabel": result.transcription_model_used.display_label(),
+              "transcriptionDurationMs": result.transcription_duration_ms,
+            }),
+        );
+        return Ok(result);
+    }
+
     let encoded_audio = input
         .audio_base64
         .trim()
@@ -4356,6 +4574,10 @@ pub async fn interpret_text_message(
             json!({ "message": message }),
         );
         return Err(format_command_error(&correlation_id, message));
+    }
+
+    if agent_qa::is_enabled() {
+        return run_agent_qa_interpret_text_message(&state, &input, correlation_id, started_at);
     }
 
     let parsed_timestamp = parse_client_timestamp(&input.client_timestamp_iso);

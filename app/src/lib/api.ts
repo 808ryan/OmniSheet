@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 
-import { isTauriRuntime } from './runtime'
+import { mockInvokeCommand } from './agentMockApi'
+import { isAgentMockRuntime, isTauriRuntime } from './runtime'
 import type {
   ActivityUpsertInput,
   AppCommandErrorShape,
@@ -21,6 +22,8 @@ import type {
   InterpretTextInput,
   MicrophonePermissionResult,
   OpenAiModelId,
+  QuickAddSuggestionInput,
+  QuickAddSuggestionResult,
   SettingsStatus,
   SettingsCalendarBulkPreferencesInput,
   SettingsTimelinePreferencesInput,
@@ -100,6 +103,11 @@ function extractErrorMessage(error: unknown): string {
 }
 
 async function recordFrontendDiagnostic(input: DiagnosticsRecordInput): Promise<void> {
+  if (isAgentMockRuntime()) {
+    await mockInvokeCommand<void>('diagnostics_record_frontend_event', { input })
+    return
+  }
+
   if (!isTauriRuntime()) {
     return
   }
@@ -120,6 +128,10 @@ async function invokeCommand<T>(
   args?: Record<string, unknown>,
   options?: InvokeCommandOptions,
 ): Promise<T> {
+  if (isAgentMockRuntime()) {
+    return mockInvokeCommand<T>(command, args)
+  }
+
   if (!isTauriRuntime()) {
     throw new Error('Tauri runtime is required. Use `npm run tauri dev`.')
   }
@@ -303,6 +315,12 @@ export function timelineCreateEntry(input: TimelineCreateInput): Promise<IdResul
 
 export function historyList(input: DateInput): Promise<HistoryListResult> {
   return invokeCommand<HistoryListResult>('history_list', { input })
+}
+
+export function quickAddSuggestions(
+  input: QuickAddSuggestionInput = {},
+): Promise<QuickAddSuggestionResult> {
+  return invokeCommand<QuickAddSuggestionResult>('quick_add_suggestions', { input })
 }
 
 export function timelineDeleteEntry(id: string): Promise<void> {
