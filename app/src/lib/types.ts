@@ -315,6 +315,21 @@ export interface TimelineCreateInput {
   description?: string | null
 }
 
+export interface QuickAddSuggestionInput {
+  limit?: number
+}
+
+export interface QuickAddSuggestion {
+  engagementId: string
+  activityId: string
+  usageCount: number
+  lastUsedAt: number | null
+}
+
+export interface QuickAddSuggestionResult {
+  suggestions: QuickAddSuggestion[]
+}
+
 export interface HistoryListResult {
   weekStartDate: string
   weekEndDate: string

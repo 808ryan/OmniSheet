@@ -729,6 +729,27 @@ pub struct TimelineCreateInput {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddSuggestionInput {
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddSuggestion {
+    pub engagement_id: String,
+    pub activity_id: String,
+    pub usage_count: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddSuggestionResult {
+    pub suggestions: Vec<QuickAddSuggestion>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdResult {
