@@ -37,7 +37,6 @@ app/src-tauri/target/
 
 build/
 coverage/
-app/test-results/
 /Proposed_Plan.md
 implementation_status.md
 /Brainstorming.txt

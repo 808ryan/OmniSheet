@@ -5326,7 +5326,7 @@ function App() {
   }
 
   const timelineEditorPanel = (
-    <aside className={`timeline-editor ${entryDraft ? '' : 'is-empty'}`} data-testid="agent-qa-timeline-editor">
+    <aside className={`timeline-editor ${entryDraft ? '' : 'is-empty'}`}>
       <div className="timeline-editor-header">
         <h3>Edit Entry</h3>
         {entryDraft ? (
@@ -5343,7 +5343,7 @@ function App() {
         ) : null}
       </div>
       {entryDraft ? (
-        <form className="stack" onSubmit={onSaveEntryDraft} data-testid="agent-qa-timeline-editor-form">
+        <form className="stack" onSubmit={onSaveEntryDraft}>
           <label>
             Date
             <input
@@ -6144,10 +6144,9 @@ function App() {
             <div className="sidebar-section-header">
               <h2>Submit an entry</h2>
             </div>
-            <form onSubmit={onSubmitCapture} className="stack" data-testid="agent-qa-entry-form">
+            <form onSubmit={onSubmitCapture} className="stack">
               <textarea
                 aria-label="Entry message"
-                data-testid="agent-qa-entry-message"
                 value={captureMessage}
                 onChange={(event) => {
                   const nextValue = event.target.value
@@ -6424,7 +6423,7 @@ function App() {
         </aside>
 
         <main className="app-main">
-          <div className="segmented-control" role="tablist" aria-label="Main views" data-testid="agent-qa-main-tabs">
+          <div className="segmented-control" role="tablist" aria-label="Main views">
             {SEGMENTED_VIEWS.map((view) => (
               <button
                 key={view.id}
@@ -6532,7 +6531,6 @@ function App() {
                 className={`timeline-grid ${timelineDragState?.isDragging ? 'dragging' : ''}`}
                 role="list"
                 aria-label="Timeline entries"
-                data-testid="agent-qa-day-timeline"
                 aria-busy={isTimelineLoading}
                 ref={timelineGridRef}
               >
@@ -6756,7 +6754,6 @@ function App() {
                 } as CSSProperties}
                 role="list"
                 aria-label="Week timeline entries"
-                data-testid="agent-qa-week-timeline"
                 aria-busy={isWeekTimelineLoading}
                 ref={weekTimelineGridRef}
               >
@@ -7558,7 +7555,7 @@ function App() {
                 <p>Click to expand and review/edit the related activities.</p>
               </div>
 
-              <div className="code-list" aria-label="Existing engagements and activities" data-testid="agent-qa-code-list">
+              <div className="code-list" aria-label="Existing engagements and activities">
                 {engagements.length === 0 ? (
                   <p className="code-list-empty">No engagements yet. Create one to get started.</p>
                 ) : (

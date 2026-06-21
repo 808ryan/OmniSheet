@@ -1,4 +1,3 @@
-mod agent_qa;
 mod commands;
 mod db;
 mod error;
@@ -29,23 +28,8 @@ pub fn run() {
 
     builder
         .setup(|app| {
-            if agent_qa::is_enabled() && !db::database_path_is_overridden() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Agent QA mode requires OMNISHEET_DATABASE_PATH so real user data is not modified.",
-                )
-                .into());
-            }
-
             let connection = db::init_database(&app.handle())?;
             let session_id = Uuid::new_v4().to_string();
-            if agent_qa::is_enabled() {
-                if agent_qa::should_reset_database() {
-                    agent_qa::reset_and_seed_database(&connection, &session_id)?;
-                } else {
-                    agent_qa::seed_reference_data(&connection)?;
-                }
-            }
             let http_client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(90))

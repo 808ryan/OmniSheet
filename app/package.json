@@ -8,11 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "agent:check": "npm run lint && npm run build && cargo test --manifest-path src-tauri/Cargo.toml",
-    "agent:browser": "playwright test --config playwright.agent.config.ts",
-    "agent:tauri": "node scripts/agent-tauri-dev.mjs",
-    "agent:qa": "npm run agent:check && npm run agent:browser"
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
@@ -21,7 +17,6 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
-    "@playwright/test": "^1.61.0",
     "@tauri-apps/cli": "^2.10.0",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
