@@ -1571,7 +1571,8 @@ button.danger:hover:not(:disabled) {
 }
 
 .timeline-grid {
-  --timeline-gutter-left: 4.5rem;
+  --timeline-gutter-left: 4.25rem;
+  --timeline-entry-left: 4.0625rem;
   --timeline-gutter-right: 0.45rem;
   position: relative;
   border-radius: 14px;
@@ -1616,11 +1617,12 @@ button.danger:hover:not(:disabled) {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--timeline-gutter-left);
+  left: var(--timeline-entry-left);
   right: var(--timeline-gutter-right);
 }
 
 .timeline-current-time-indicator {
+  --timeline-current-time-label-gap: 0.9rem;
   position: absolute;
   height: 0;
   pointer-events: none;
@@ -1631,7 +1633,7 @@ button.danger:hover:not(:disabled) {
   content: '';
   position: absolute;
   left: 0;
-  right: 0;
+  right: -1px;
   top: 0;
   border-top: 2px solid #dc2626;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
@@ -1640,10 +1642,11 @@ button.danger:hover:not(:disabled) {
 .timeline-current-time-indicator::after {
   content: '';
   position: absolute;
-  left: -4px;
-  top: -4px;
+  left: 0;
+  top: 0;
   width: 9px;
   height: 9px;
+  transform: translate(-50%, -50%);
   border-radius: 999px;
   background: #dc2626;
   box-shadow:
@@ -1653,12 +1656,20 @@ button.danger:hover:not(:disabled) {
 
 .timeline-current-time-indicator-day {
   left: var(--timeline-gutter-left);
-  right: var(--timeline-gutter-right);
+  right: 0;
+}
+
+.timeline-current-time-indicator-day::before {
+  left: calc(-1px - var(--timeline-current-time-label-gap));
+}
+
+.timeline-current-time-indicator-day::after {
+  display: none;
 }
 
 .timeline-current-time-label {
   position: absolute;
-  right: calc(100% + 0.36rem);
+  right: calc(100% + var(--timeline-current-time-label-gap));
   top: 0;
   min-width: 3.25rem;
   transform: translateY(-50%);
@@ -1680,7 +1691,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .week-timeline-grid {
-  --week-timeline-gutter-left: 68px;
+  --week-timeline-gutter-left: 60px;
   --week-timeline-day-width: 176px;
   --week-timeline-header-height: 64px;
   overflow: auto;
@@ -1821,10 +1832,13 @@ button.danger:hover:not(:disabled) {
 
 .week-timeline-frozen-hour-mark span {
   position: absolute;
-  left: 0.4rem;
+  left: 50%;
   top: -0.58rem;
+  transform: translateX(-50%);
   background: rgba(248, 251, 255, 0.98);
   padding: 0 0.25rem;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .week-timeline-day-column {
@@ -4144,11 +4158,12 @@ button.danger:hover:not(:disabled) {
   }
 
   .timeline-grid {
-    --timeline-gutter-left: 3.8rem;
+    --timeline-gutter-left: 3.6rem;
+    --timeline-entry-left: 3.4125rem;
   }
 
   .week-timeline-grid {
-    --week-timeline-gutter-left: 58px;
+    --week-timeline-gutter-left: 52px;
     --week-timeline-day-width: 154px;
   }
 
