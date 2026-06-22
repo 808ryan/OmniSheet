@@ -728,7 +728,7 @@ pub fn list_quick_add_suggestions(
     conn: &Connection,
     limit: i64,
 ) -> AppResult<Vec<QuickAddSuggestion>> {
-    let safe_limit = limit.clamp(1, 100);
+    let safe_limit = if limit < 1 { -1 } else { limit.clamp(1, 500) };
     let mut statement = conn.prepare(
         r#"
       SELECT

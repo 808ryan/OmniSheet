@@ -466,14 +466,14 @@ const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
-const QUICK_ADD_DEFAULT_LIMIT = 12
 const QUICK_BLOCK_DURATION_STEP_MINUTES = 30
 const QUICK_BLOCK_MAX_DURATION_MINUTES = 8 * HOUR_IN_MINUTES
 const QUICK_BLOCK_DRAG_STEP_PX = 22
 const WEEK_TIMELINE_HEADER_HEIGHT = 64
-const WEEK_TIMELINE_GUTTER_LEFT = 68
+const WEEK_TIMELINE_GUTTER_LEFT = 60
 const WEEK_TIMELINE_DAY_WIDTH = 176
-const COMPACT_WEEK_TIMELINE_GUTTER_LEFT = 58
+const WEEK_TIMELINE_ENTRY_COLUMN_INSET = 4
+const COMPACT_WEEK_TIMELINE_GUTTER_LEFT = 52
 const COMPACT_WEEK_TIMELINE_DAY_WIDTH = 154
 const WEEK_TIMELINE_COMPACT_MEDIA_QUERY = '(max-width: 720px)'
 const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
@@ -674,9 +674,11 @@ function ResponsiveCodeTagList({ tags, itemKeyPrefix }: ResponsiveCodeTagListPro
 function App() {
   const tauriRuntime = isTauriRuntime()
   const appRuntime = isAppRuntime()
-  const todayDate = useMemo(() => formatDate(new Date()), [])
+  const [timelineClock, setTimelineClock] = useState(() => new Date())
+  const todayDate = useMemo(() => formatDate(timelineClock), [timelineClock])
 
   const [activeView, setActiveView] = useState<View>('timeline')
+  const [timelineAutoCenterRequestKey, setTimelineAutoCenterRequestKey] = useState(0)
   const [isBusy, setIsBusy] = useState(false)
   const [isTimelineLoading, setIsTimelineLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -758,6 +760,7 @@ function App() {
   const calendarFileInputRef = useRef<HTMLInputElement | null>(null)
   const calendarDropZoneRef = useRef<HTMLDivElement | null>(null)
   const calendarReviewAutoCenterKeyRef = useRef<string | null>(null)
+  const weekCurrentTimeAutoCenterKeyRef = useRef<string | null>(null)
   const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
@@ -1009,10 +1012,6 @@ function App() {
     }
 
     for (const item of allQuickAddActivities) {
-      if (values.length >= QUICK_ADD_DEFAULT_LIMIT) {
-        break
-      }
-
       const key = quickAddActivityKey(item.engagement.id, item.activity.id)
       if (seenKeys.has(key)) {
         continue
@@ -1022,7 +1021,7 @@ function App() {
       seenKeys.add(key)
     }
 
-    return values.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+    return values
   }, [allQuickAddActivities, quickAddActivityByKey, quickAddSuggestedKeys])
   const visibleQuickAddActivities = useMemo(() => {
     const searchTerms = quickAddSearch
@@ -1311,6 +1310,20 @@ function App() {
   )
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
+  const currentTimelineMinute = (
+    timelineClock.getHours() * HOUR_IN_MINUTES
+    + timelineClock.getMinutes()
+  )
+  const currentTimelineTop = (
+    TIMELINE_CANVAS_TOP_PADDING
+    + (currentTimelineMinute - timelineWindow.startMinute) * PIXELS_PER_MINUTE
+  )
+  const currentTimelineLabel = minuteToLabel(currentTimelineMinute)
+  const isCurrentTimelineMinuteVisible =
+    currentTimelineMinute >= timelineWindow.startMinute
+    && currentTimelineMinute <= timelineWindow.endMinute
+  const shouldShowDayCurrentTimeIndicator =
+    selectedDate === todayDate && isCurrentTimelineMinuteVisible
   const timelineHeaderDate = useMemo(
     () => formatTimelineHeaderDate(selectedDate),
     [selectedDate],
@@ -1463,6 +1476,12 @@ function App() {
       (positionedEntry) => positionedEntry.entry.id === timelineDragState.entryId,
     ) ?? null
   }, [baselinePositionedWeekTimelineEntries, timelineDragState])
+  const currentWeekTimelineDayIndex = useMemo(
+    () => weekTimelineDays.findIndex((day) => day.date === todayDate),
+    [todayDate, weekTimelineDays],
+  )
+  const shouldShowWeekCurrentTimeIndicator =
+    currentWeekTimelineDayIndex >= 0 && isCurrentTimelineMinuteVisible
 
   const timelineHourMarks = useMemo(() => {
     const marks: number[] = []
@@ -1854,7 +1873,7 @@ function App() {
     setQuickAddSuggestionsError(null)
 
     try {
-      const value = await quickAddSuggestions({ limit: QUICK_ADD_DEFAULT_LIMIT })
+      const value = await quickAddSuggestions()
       setQuickAddSuggestionItems(value.suggestions)
       setQuickAddSuggestedKeys((previous) => {
         const incomingKeys = value.suggestions.map((suggestion) =>
@@ -1862,17 +1881,13 @@ function App() {
         )
 
         if (previous.length === 0) {
-          return incomingKeys.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+          return incomingKeys
         }
 
-        const next = previous.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+        const next = previous.slice()
         const seenKeys = new Set(next)
 
         for (const key of incomingKeys) {
-          if (next.length >= QUICK_ADD_DEFAULT_LIMIT) {
-            break
-          }
-
           if (!seenKeys.has(key)) {
             next.push(key)
             seenKeys.add(key)
@@ -1959,6 +1974,31 @@ function App() {
     loadQuickAddSuggestions,
     tauriRuntime,
   ])
+
+  useEffect(() => {
+    let timeoutId: ReturnType<typeof window.setTimeout> | null = null
+
+    const scheduleNextMinuteTick = () => {
+      const now = new Date()
+      const millisecondsUntilNextMinute = (
+        (HOUR_IN_MINUTES - now.getSeconds()) * 1000
+        - now.getMilliseconds()
+      )
+
+      timeoutId = window.setTimeout(() => {
+        setTimelineClock(new Date())
+        scheduleNextMinuteTick()
+      }, Math.max(1000, millisecondsUntilNextMinute + 20))
+    }
+
+    scheduleNextMinuteTick()
+
+    return () => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!appRuntime) {
@@ -2441,6 +2481,17 @@ function App() {
     }
 
     const frame = window.requestAnimationFrame(() => {
+      if (selectedDate === todayDate && isCurrentTimelineMinuteVisible) {
+        const clampedScrollTop = centerTimelinePositionScrollTop(grid, currentTimelineTop)
+
+        grid.scrollTo({
+          top: clampedScrollTop,
+          behavior: 'auto',
+        })
+        pendingAutoCenterDateRef.current = null
+        return
+      }
+
       if (baselinePositionedTimelineEntries.length === 0) {
         grid.scrollTop = 0
         pendingAutoCenterDateRef.current = null
@@ -2455,8 +2506,7 @@ function App() {
         - (grid.clientHeight / 2)
         + (earliestEntry.height / 2)
       )
-      const maxScrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
-      const clampedScrollTop = Math.min(Math.max(0, targetTop), maxScrollTop)
+      const clampedScrollTop = clampTimelineScrollTop(grid, targetTop)
 
       grid.scrollTo({
         top: clampedScrollTop,
@@ -2468,7 +2518,70 @@ function App() {
     return () => {
       window.cancelAnimationFrame(frame)
     }
-  }, [activeView, baselinePositionedTimelineEntries, selectedDate])
+  }, [
+    activeView,
+    baselinePositionedTimelineEntries,
+    currentTimelineTop,
+    isCurrentTimelineMinuteVisible,
+    selectedDate,
+    timelineAutoCenterRequestKey,
+    todayDate,
+  ])
+
+  useEffect(() => {
+    if (activeView !== 'week') {
+      return
+    }
+
+    if (!isCurrentTimelineMinuteVisible || currentWeekTimelineDayIndex < 0) {
+      weekCurrentTimeAutoCenterKeyRef.current = null
+      return
+    }
+
+    const grid = weekTimelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const weekStartDate = weekTimelineDays[0]?.date ?? selectedDate
+    const weekEndDate = weekTimelineDays[6]?.date ?? selectedDate
+    const autoCenterKey = [
+      weekStartDate,
+      weekEndDate,
+      todayDate,
+      timelineAutoCenterRequestKey,
+    ].join(':')
+
+    if (weekCurrentTimeAutoCenterKeyRef.current === autoCenterKey) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const currentTimeTopInGrid =
+        weekTimelineLayoutMetrics.headerHeight + currentTimelineTop
+      const clampedScrollTop = centerTimelinePositionScrollTop(grid, currentTimeTopInGrid)
+
+      grid.scrollTo({
+        top: clampedScrollTop,
+        behavior: 'auto',
+      })
+      weekCurrentTimeAutoCenterKeyRef.current = autoCenterKey
+    })
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+    }
+  }, [
+    activeView,
+    currentTimelineTop,
+    currentWeekTimelineDayIndex,
+    isCurrentTimelineMinuteVisible,
+    selectedDate,
+    timelineAutoCenterRequestKey,
+    todayDate,
+    weekTimelineDays,
+    weekTimelineLayoutMetrics.headerHeight,
+  ])
 
   useEffect(() => {
     if (!isCalendarBulkModalOpen || calendarBulkTab !== 'review') {
@@ -2604,6 +2717,11 @@ function App() {
     setTimelineContextMenu(null)
     setTimelineDragStateWithRef(() => null)
   }, [setTimelineDragStateWithRef])
+
+  const requestTimelineAutoCenter = useCallback((date: string) => {
+    pendingAutoCenterDateRef.current = date
+    setTimelineAutoCenterRequestKey((previous) => previous + 1)
+  }, [])
 
   const updateSelectedDate = useCallback((
     nextDate: string,
@@ -4143,11 +4261,23 @@ function App() {
   }
 
   const onJumpToToday = () => {
-    onSetDate(formatDate(new Date()))
+    const nextDate = formatDate(new Date())
+    if (nextDate === selectedDateRef.current) {
+      requestTimelineAutoCenter(nextDate)
+      return
+    }
+
+    onSetDate(nextDate)
   }
 
   const onJumpToThisWeek = () => {
-    updateSelectedDate(formatDate(new Date()))
+    const nextDate = formatDate(new Date())
+    if (nextDate === selectedDateRef.current) {
+      requestTimelineAutoCenter(nextDate)
+      return
+    }
+
+    updateSelectedDate(nextDate)
   }
 
   const onSelectCalendarDate = (nextDate: string) => {
@@ -5435,6 +5565,10 @@ function App() {
       clearTimelineSelection()
     }
 
+    if (view === 'timeline' || view === 'week') {
+      requestTimelineAutoCenter(selectedDateRef.current)
+    }
+
     setActiveView(view)
   }
 
@@ -6704,6 +6838,16 @@ function App() {
                     </div>
                   ))}
 
+                  {shouldShowDayCurrentTimeIndicator ? (
+                    <div
+                      className="timeline-current-time-indicator timeline-current-time-indicator-day"
+                      style={{ top: currentTimelineTop }}
+                      aria-hidden="true"
+                    >
+                      <span className="timeline-current-time-label">{currentTimelineLabel}</span>
+                    </div>
+                  ) : null}
+
                   <div className="timeline-entry-layer">
                     {draggedEntryOriginPosition
                       ? (() => {
@@ -7017,6 +7161,22 @@ function App() {
                         aria-hidden="true"
                       />
                     ))}
+
+                    {shouldShowWeekCurrentTimeIndicator ? (
+                      <div
+                        className="timeline-current-time-indicator week-timeline-current-time-indicator"
+                        style={{
+                          top: currentTimelineTop,
+                          left:
+                            weekTimelineLayoutMetrics.gutterLeft
+                            + (currentWeekTimelineDayIndex * weekTimelineLayoutMetrics.dayWidth),
+                          width: weekTimelineLayoutMetrics.dayWidth,
+                        }}
+                        aria-hidden="true"
+                      >
+                        <span className="timeline-current-time-label">{currentTimelineLabel}</span>
+                      </div>
+                    ) : null}
 
                     <div className="week-timeline-entry-layer">
                       {draggedWeekEntryOriginPosition && timelineDragState?.surface === 'week'
@@ -9973,6 +10133,18 @@ function currentRoundedTimelineEndMinute(): number {
   )
 }
 
+function clampTimelineScrollTop(grid: HTMLDivElement, targetTop: number): number {
+  const maxScrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
+  return Math.min(Math.max(0, targetTop), maxScrollTop)
+}
+
+function centerTimelinePositionScrollTop(
+  grid: HTMLDivElement,
+  positionTop: number,
+): number {
+  return clampTimelineScrollTop(grid, positionTop - (grid.clientHeight / 2))
+}
+
 function clampStartMinuteForDuration(
   startMinute: number,
   durationMinutes: number,
@@ -10250,14 +10422,20 @@ function positionWeekTimelineEntries(
     )
 
     dayPositions.forEach((positionedEntry) => {
+      const dayEntryLeft = layoutMetrics.gutterLeft + (dayIndex * layoutMetrics.dayWidth)
+      const usableDayWidth = Math.max(
+        1,
+        layoutMetrics.dayWidth - (WEEK_TIMELINE_ENTRY_COLUMN_INSET * 2),
+      )
+
       positionedEntries.push({
         ...positionedEntry,
         dayIndex,
         left:
-          layoutMetrics.gutterLeft
-          + (dayIndex * layoutMetrics.dayWidth)
-          + ((positionedEntry.leftPercent / 100) * layoutMetrics.dayWidth),
-        width: (positionedEntry.widthPercent / 100) * layoutMetrics.dayWidth,
+          dayEntryLeft
+          + WEEK_TIMELINE_ENTRY_COLUMN_INSET
+          + ((positionedEntry.leftPercent / 100) * usableDayWidth),
+        width: (positionedEntry.widthPercent / 100) * usableDayWidth,
       })
     })
   })
