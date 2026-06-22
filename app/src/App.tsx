@@ -466,14 +466,14 @@ const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
-const QUICK_ADD_DEFAULT_LIMIT = 12
 const QUICK_BLOCK_DURATION_STEP_MINUTES = 30
 const QUICK_BLOCK_MAX_DURATION_MINUTES = 8 * HOUR_IN_MINUTES
 const QUICK_BLOCK_DRAG_STEP_PX = 22
 const WEEK_TIMELINE_HEADER_HEIGHT = 64
-const WEEK_TIMELINE_GUTTER_LEFT = 68
+const WEEK_TIMELINE_GUTTER_LEFT = 60
 const WEEK_TIMELINE_DAY_WIDTH = 176
-const COMPACT_WEEK_TIMELINE_GUTTER_LEFT = 58
+const WEEK_TIMELINE_ENTRY_COLUMN_INSET = 4
+const COMPACT_WEEK_TIMELINE_GUTTER_LEFT = 52
 const COMPACT_WEEK_TIMELINE_DAY_WIDTH = 154
 const WEEK_TIMELINE_COMPACT_MEDIA_QUERY = '(max-width: 720px)'
 const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
@@ -1012,10 +1012,6 @@ function App() {
     }
 
     for (const item of allQuickAddActivities) {
-      if (values.length >= QUICK_ADD_DEFAULT_LIMIT) {
-        break
-      }
-
       const key = quickAddActivityKey(item.engagement.id, item.activity.id)
       if (seenKeys.has(key)) {
         continue
@@ -1025,7 +1021,7 @@ function App() {
       seenKeys.add(key)
     }
 
-    return values.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+    return values
   }, [allQuickAddActivities, quickAddActivityByKey, quickAddSuggestedKeys])
   const visibleQuickAddActivities = useMemo(() => {
     const searchTerms = quickAddSearch
@@ -1877,7 +1873,7 @@ function App() {
     setQuickAddSuggestionsError(null)
 
     try {
-      const value = await quickAddSuggestions({ limit: QUICK_ADD_DEFAULT_LIMIT })
+      const value = await quickAddSuggestions()
       setQuickAddSuggestionItems(value.suggestions)
       setQuickAddSuggestedKeys((previous) => {
         const incomingKeys = value.suggestions.map((suggestion) =>
@@ -1885,17 +1881,13 @@ function App() {
         )
 
         if (previous.length === 0) {
-          return incomingKeys.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+          return incomingKeys
         }
 
-        const next = previous.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+        const next = previous.slice()
         const seenKeys = new Set(next)
 
         for (const key of incomingKeys) {
-          if (next.length >= QUICK_ADD_DEFAULT_LIMIT) {
-            break
-          }
-
           if (!seenKeys.has(key)) {
             next.push(key)
             seenKeys.add(key)
@@ -10430,14 +10422,20 @@ function positionWeekTimelineEntries(
     )
 
     dayPositions.forEach((positionedEntry) => {
+      const dayEntryLeft = layoutMetrics.gutterLeft + (dayIndex * layoutMetrics.dayWidth)
+      const usableDayWidth = Math.max(
+        1,
+        layoutMetrics.dayWidth - (WEEK_TIMELINE_ENTRY_COLUMN_INSET * 2),
+      )
+
       positionedEntries.push({
         ...positionedEntry,
         dayIndex,
         left:
-          layoutMetrics.gutterLeft
-          + (dayIndex * layoutMetrics.dayWidth)
-          + ((positionedEntry.leftPercent / 100) * layoutMetrics.dayWidth),
-        width: (positionedEntry.widthPercent / 100) * layoutMetrics.dayWidth,
+          dayEntryLeft
+          + WEEK_TIMELINE_ENTRY_COLUMN_INSET
+          + ((positionedEntry.leftPercent / 100) * usableDayWidth),
+        width: (positionedEntry.widthPercent / 100) * usableDayWidth,
       })
     })
   })

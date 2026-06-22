@@ -3197,7 +3197,7 @@ pub fn quick_add_suggestions(
     input: QuickAddSuggestionInput,
 ) -> Result<QuickAddSuggestionResult, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-    let limit = input.limit.unwrap_or(12).clamp(1, 100);
+    let limit = input.limit.map_or(-1, |value| value.clamp(1, 500));
     let suggestions =
         db::list_quick_add_suggestions(&connection, limit).map_err(|error| error.to_string())?;
 

@@ -44,6 +44,10 @@ export function minuteToLabel(totalMinutes: number): string {
   const minutes = normalizedMinutes % 60
   const suffix = hours24 >= 12 ? 'PM' : 'AM'
   const hours12 = hours24 % 12 || 12
+  if (minutes === 0) {
+    return `${hours12} ${suffix}`
+  }
+
   return `${hours12}:${`${minutes}`.padStart(2, '0')} ${suffix}`
 }
 
