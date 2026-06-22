@@ -674,9 +674,11 @@ function ResponsiveCodeTagList({ tags, itemKeyPrefix }: ResponsiveCodeTagListPro
 function App() {
   const tauriRuntime = isTauriRuntime()
   const appRuntime = isAppRuntime()
-  const todayDate = useMemo(() => formatDate(new Date()), [])
+  const [timelineClock, setTimelineClock] = useState(() => new Date())
+  const todayDate = useMemo(() => formatDate(timelineClock), [timelineClock])
 
   const [activeView, setActiveView] = useState<View>('timeline')
+  const [timelineAutoCenterRequestKey, setTimelineAutoCenterRequestKey] = useState(0)
   const [isBusy, setIsBusy] = useState(false)
   const [isTimelineLoading, setIsTimelineLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -758,6 +760,7 @@ function App() {
   const calendarFileInputRef = useRef<HTMLInputElement | null>(null)
   const calendarDropZoneRef = useRef<HTMLDivElement | null>(null)
   const calendarReviewAutoCenterKeyRef = useRef<string | null>(null)
+  const weekCurrentTimeAutoCenterKeyRef = useRef<string | null>(null)
   const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
@@ -1311,6 +1314,20 @@ function App() {
   )
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
+  const currentTimelineMinute = (
+    timelineClock.getHours() * HOUR_IN_MINUTES
+    + timelineClock.getMinutes()
+  )
+  const currentTimelineTop = (
+    TIMELINE_CANVAS_TOP_PADDING
+    + (currentTimelineMinute - timelineWindow.startMinute) * PIXELS_PER_MINUTE
+  )
+  const currentTimelineLabel = minuteToLabel(currentTimelineMinute)
+  const isCurrentTimelineMinuteVisible =
+    currentTimelineMinute >= timelineWindow.startMinute
+    && currentTimelineMinute <= timelineWindow.endMinute
+  const shouldShowDayCurrentTimeIndicator =
+    selectedDate === todayDate && isCurrentTimelineMinuteVisible
   const timelineHeaderDate = useMemo(
     () => formatTimelineHeaderDate(selectedDate),
     [selectedDate],
@@ -1463,6 +1480,12 @@ function App() {
       (positionedEntry) => positionedEntry.entry.id === timelineDragState.entryId,
     ) ?? null
   }, [baselinePositionedWeekTimelineEntries, timelineDragState])
+  const currentWeekTimelineDayIndex = useMemo(
+    () => weekTimelineDays.findIndex((day) => day.date === todayDate),
+    [todayDate, weekTimelineDays],
+  )
+  const shouldShowWeekCurrentTimeIndicator =
+    currentWeekTimelineDayIndex >= 0 && isCurrentTimelineMinuteVisible
 
   const timelineHourMarks = useMemo(() => {
     const marks: number[] = []
@@ -1961,6 +1984,31 @@ function App() {
   ])
 
   useEffect(() => {
+    let timeoutId: ReturnType<typeof window.setTimeout> | null = null
+
+    const scheduleNextMinuteTick = () => {
+      const now = new Date()
+      const millisecondsUntilNextMinute = (
+        (HOUR_IN_MINUTES - now.getSeconds()) * 1000
+        - now.getMilliseconds()
+      )
+
+      timeoutId = window.setTimeout(() => {
+        setTimelineClock(new Date())
+        scheduleNextMinuteTick()
+      }, Math.max(1000, millisecondsUntilNextMinute + 20))
+    }
+
+    scheduleNextMinuteTick()
+
+    return () => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     if (!appRuntime) {
       return
     }
@@ -2441,6 +2489,17 @@ function App() {
     }
 
     const frame = window.requestAnimationFrame(() => {
+      if (selectedDate === todayDate && isCurrentTimelineMinuteVisible) {
+        const clampedScrollTop = centerTimelinePositionScrollTop(grid, currentTimelineTop)
+
+        grid.scrollTo({
+          top: clampedScrollTop,
+          behavior: 'auto',
+        })
+        pendingAutoCenterDateRef.current = null
+        return
+      }
+
       if (baselinePositionedTimelineEntries.length === 0) {
         grid.scrollTop = 0
         pendingAutoCenterDateRef.current = null
@@ -2455,8 +2514,7 @@ function App() {
         - (grid.clientHeight / 2)
         + (earliestEntry.height / 2)
       )
-      const maxScrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
-      const clampedScrollTop = Math.min(Math.max(0, targetTop), maxScrollTop)
+      const clampedScrollTop = clampTimelineScrollTop(grid, targetTop)
 
       grid.scrollTo({
         top: clampedScrollTop,
@@ -2468,7 +2526,70 @@ function App() {
     return () => {
       window.cancelAnimationFrame(frame)
     }
-  }, [activeView, baselinePositionedTimelineEntries, selectedDate])
+  }, [
+    activeView,
+    baselinePositionedTimelineEntries,
+    currentTimelineTop,
+    isCurrentTimelineMinuteVisible,
+    selectedDate,
+    timelineAutoCenterRequestKey,
+    todayDate,
+  ])
+
+  useEffect(() => {
+    if (activeView !== 'week') {
+      return
+    }
+
+    if (!isCurrentTimelineMinuteVisible || currentWeekTimelineDayIndex < 0) {
+      weekCurrentTimeAutoCenterKeyRef.current = null
+      return
+    }
+
+    const grid = weekTimelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const weekStartDate = weekTimelineDays[0]?.date ?? selectedDate
+    const weekEndDate = weekTimelineDays[6]?.date ?? selectedDate
+    const autoCenterKey = [
+      weekStartDate,
+      weekEndDate,
+      todayDate,
+      timelineAutoCenterRequestKey,
+    ].join(':')
+
+    if (weekCurrentTimeAutoCenterKeyRef.current === autoCenterKey) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const currentTimeTopInGrid =
+        weekTimelineLayoutMetrics.headerHeight + currentTimelineTop
+      const clampedScrollTop = centerTimelinePositionScrollTop(grid, currentTimeTopInGrid)
+
+      grid.scrollTo({
+        top: clampedScrollTop,
+        behavior: 'auto',
+      })
+      weekCurrentTimeAutoCenterKeyRef.current = autoCenterKey
+    })
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+    }
+  }, [
+    activeView,
+    currentTimelineTop,
+    currentWeekTimelineDayIndex,
+    isCurrentTimelineMinuteVisible,
+    selectedDate,
+    timelineAutoCenterRequestKey,
+    todayDate,
+    weekTimelineDays,
+    weekTimelineLayoutMetrics.headerHeight,
+  ])
 
   useEffect(() => {
     if (!isCalendarBulkModalOpen || calendarBulkTab !== 'review') {
@@ -2604,6 +2725,11 @@ function App() {
     setTimelineContextMenu(null)
     setTimelineDragStateWithRef(() => null)
   }, [setTimelineDragStateWithRef])
+
+  const requestTimelineAutoCenter = useCallback((date: string) => {
+    pendingAutoCenterDateRef.current = date
+    setTimelineAutoCenterRequestKey((previous) => previous + 1)
+  }, [])
 
   const updateSelectedDate = useCallback((
     nextDate: string,
@@ -4143,11 +4269,23 @@ function App() {
   }
 
   const onJumpToToday = () => {
-    onSetDate(formatDate(new Date()))
+    const nextDate = formatDate(new Date())
+    if (nextDate === selectedDateRef.current) {
+      requestTimelineAutoCenter(nextDate)
+      return
+    }
+
+    onSetDate(nextDate)
   }
 
   const onJumpToThisWeek = () => {
-    updateSelectedDate(formatDate(new Date()))
+    const nextDate = formatDate(new Date())
+    if (nextDate === selectedDateRef.current) {
+      requestTimelineAutoCenter(nextDate)
+      return
+    }
+
+    updateSelectedDate(nextDate)
   }
 
   const onSelectCalendarDate = (nextDate: string) => {
@@ -5435,6 +5573,10 @@ function App() {
       clearTimelineSelection()
     }
 
+    if (view === 'timeline' || view === 'week') {
+      requestTimelineAutoCenter(selectedDateRef.current)
+    }
+
     setActiveView(view)
   }
 
@@ -6704,6 +6846,16 @@ function App() {
                     </div>
                   ))}
 
+                  {shouldShowDayCurrentTimeIndicator ? (
+                    <div
+                      className="timeline-current-time-indicator timeline-current-time-indicator-day"
+                      style={{ top: currentTimelineTop }}
+                      aria-hidden="true"
+                    >
+                      <span className="timeline-current-time-label">{currentTimelineLabel}</span>
+                    </div>
+                  ) : null}
+
                   <div className="timeline-entry-layer">
                     {draggedEntryOriginPosition
                       ? (() => {
@@ -7017,6 +7169,22 @@ function App() {
                         aria-hidden="true"
                       />
                     ))}
+
+                    {shouldShowWeekCurrentTimeIndicator ? (
+                      <div
+                        className="timeline-current-time-indicator week-timeline-current-time-indicator"
+                        style={{
+                          top: currentTimelineTop,
+                          left:
+                            weekTimelineLayoutMetrics.gutterLeft
+                            + (currentWeekTimelineDayIndex * weekTimelineLayoutMetrics.dayWidth),
+                          width: weekTimelineLayoutMetrics.dayWidth,
+                        }}
+                        aria-hidden="true"
+                      >
+                        <span className="timeline-current-time-label">{currentTimelineLabel}</span>
+                      </div>
+                    ) : null}
 
                     <div className="week-timeline-entry-layer">
                       {draggedWeekEntryOriginPosition && timelineDragState?.surface === 'week'
@@ -9971,6 +10139,18 @@ function currentRoundedTimelineEndMinute(): number {
       snapMinute(currentMinute, TIMELINE_DRAG_SNAP_MINUTES),
     ),
   )
+}
+
+function clampTimelineScrollTop(grid: HTMLDivElement, targetTop: number): number {
+  const maxScrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
+  return Math.min(Math.max(0, targetTop), maxScrollTop)
+}
+
+function centerTimelinePositionScrollTop(
+  grid: HTMLDivElement,
+  positionTop: number,
+): number {
+  return clampTimelineScrollTop(grid, positionTop - (grid.clientHeight / 2))
 }
 
 function clampStartMinuteForDuration(
