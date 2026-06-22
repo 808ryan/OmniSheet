@@ -1657,12 +1657,18 @@ button.danger:hover:not(:disabled) {
 }
 
 .timeline-current-time-indicator-day {
-  left: var(--timeline-gutter-left);
+  left: 0;
   right: 0;
+  display: flex;
+  align-items: center;
 }
 
 .timeline-current-time-indicator-day::before {
-  left: calc(-1px - var(--timeline-current-time-label-gap));
+  position: static;
+  order: 2;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 0;
 }
 
 .timeline-current-time-indicator-day::after {
@@ -1683,16 +1689,24 @@ button.danger:hover:not(:disabled) {
   box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
   padding: 0.13rem 0.22rem;
   font-size: 0.76rem;
-  font-weight: 600;
+  font-weight: 400;
   font-variant-numeric: tabular-nums;
-  line-height: 1;
+  line-height: 1.1;
   text-align: center;
   white-space: nowrap;
 }
 
 .timeline-current-time-indicator-day .timeline-current-time-label {
-  left: calc(0.2rem - var(--timeline-gutter-left));
+  position: relative;
+  left: auto;
+  right: auto;
+  top: auto;
+  order: 1;
+  flex: 0 0 auto;
+  width: max-content;
   min-width: 0;
+  margin-left: 0.2rem;
+  transform: none;
 }
 
 .week-panel {
