@@ -5733,7 +5733,7 @@ function App() {
           <div className="timeline-entry-actions">
             <button type="submit" className="button-soft-primary" disabled={isBusy}>
               <span className="control-icon save-icon" aria-hidden="true" />
-              Save Entry
+              Update
             </button>
             <button
               type="button"
@@ -5742,7 +5742,7 @@ function App() {
               disabled={isBusy || isTimelineDeleteBusy}
             >
               <span className="control-icon trash-icon" aria-hidden="true" />
-              Delete Entry
+              Delete
             </button>
           </div>
         </form>
