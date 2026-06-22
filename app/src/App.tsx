@@ -1318,7 +1318,7 @@ function App() {
     TIMELINE_CANVAS_TOP_PADDING
     + (currentTimelineMinute - timelineWindow.startMinute) * PIXELS_PER_MINUTE
   )
-  const currentTimelineLabel = minuteToLabel(currentTimelineMinute)
+  const currentTimelineLabel = minuteToCurrentTimeLabel(currentTimelineMinute)
   const isCurrentTimelineMinuteVisible =
     currentTimelineMinute >= timelineWindow.startMinute
     && currentTimelineMinute <= timelineWindow.endMinute
@@ -9797,6 +9797,14 @@ function formatTimelineHeaderDate(date: string): TimelineHeaderDate {
       weekday: 'long',
     }).format(value),
   }
+}
+
+function minuteToCurrentTimeLabel(totalMinutes: number): string {
+  const normalizedMinutes = ((Math.floor(totalMinutes) % 1440) + 1440) % 1440
+  const hours24 = Math.floor(normalizedMinutes / HOUR_IN_MINUTES)
+  const minutes = normalizedMinutes % HOUR_IN_MINUTES
+  const hours12 = hours24 % 12 || 12
+  return `${hours12}:${`${minutes}`.padStart(2, '0')}`
 }
 
 function formatSummaryNotesForClipboard(notes: TimelineWeeklySummaryNote[]): string {
