@@ -22,6 +22,7 @@
   --danger-soft: rgba(180, 35, 24, 0.1);
   --danger-soft-pressed: rgba(180, 35, 24, 0.16);
   --sidebar-width: 288px;
+  --timeline-editor-width: 304px;
   --glass-shadow: 0 20px 40px rgba(16, 24, 40, 0.09);
   --glass-inset: inset 0 1px 0 rgba(255, 255, 255, 0.56);
 }
@@ -1552,7 +1553,7 @@ button.danger:hover:not(:disabled) {
 
 .timeline-layout {
   display: grid;
-  grid-template-columns: minmax(420px, 1fr) minmax(300px, 360px);
+  grid-template-columns: minmax(420px, 1fr) var(--timeline-editor-width);
   gap: 1rem;
   min-height: 0;
 }
@@ -1562,7 +1563,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .week-timeline-layout.has-editor {
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+  grid-template-columns: minmax(0, 1fr) var(--timeline-editor-width);
 }
 
 .timeline-layout > * {
@@ -1572,7 +1573,7 @@ button.danger:hover:not(:disabled) {
 
 .timeline-grid {
   --timeline-gutter-left: 4.25rem;
-  --timeline-entry-left: 4.3125rem;
+  --timeline-entry-left: 4.8125rem;
   --timeline-gutter-right: 0.45rem;
   position: relative;
   border-radius: 14px;
@@ -1622,7 +1623,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .timeline-current-time-indicator {
-  --timeline-current-time-color: #dc2626;
+  --timeline-current-time-color: var(--calendar-selected);
   --timeline-current-time-label-gap: 0.15rem;
   position: absolute;
   height: 0;
@@ -1678,7 +1679,7 @@ button.danger:hover:not(:disabled) {
   border: 2px solid var(--timeline-current-time-color);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.98);
-  color: #b91c1c;
+  color: var(--timeline-current-time-color);
   box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
   padding: 0.13rem 0.22rem;
   font-size: 0.76rem;
@@ -4167,7 +4168,7 @@ button.danger:hover:not(:disabled) {
 
   .timeline-grid {
     --timeline-gutter-left: 3.6rem;
-    --timeline-entry-left: 3.6625rem;
+    --timeline-entry-left: 4.1625rem;
   }
 
   .week-timeline-grid {
