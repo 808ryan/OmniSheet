@@ -154,6 +154,12 @@ interface QuickAddActivityGroup {
   activities: QuickAddActivityView[]
 }
 
+interface QuickAddScrollMetrics {
+  canScroll: boolean
+  thumbTopPct: number
+  thumbHeightPct: number
+}
+
 interface VoiceDraftMetadata {
   captureSource: 'voice'
   capturedAtMs: number
@@ -705,6 +711,11 @@ function App() {
   const [quickAddSuggestedKeys, setQuickAddSuggestedKeys] = useState<string[]>([])
   const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickBlockDragState | null>(null)
+  const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickAddScrollMetrics>({
+    canScroll: false,
+    thumbTopPct: 0,
+    thumbHeightPct: 100,
+  })
   const [isCalendarBulkModalOpen, setIsCalendarBulkModalOpen] = useState(false)
   const [calendarBulkTab, setCalendarBulkTab] = useState<CalendarBulkTab>('submission')
   const [calendarSelectedFileName, setCalendarSelectedFileName] = useState<string | null>(null)
@@ -753,6 +764,7 @@ function App() {
   const selectedDateRef = useRef(selectedDate)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
   const quickBlockDragStateRef = useRef<QuickBlockDragState | null>(null)
+  const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
   const timelineEntriesRef = useRef<TimelineEntry[]>([])
   const suppressTimelineClickRef = useRef(false)
   const inFlightSubmissionIdsRef = useRef<Set<string>>(new Set())
@@ -1057,6 +1069,86 @@ function App() {
 
     return groups
   }, [visibleQuickAddActivities])
+  const updateQuickAddScrollMetrics = useCallback(() => {
+    const node = quickAddScrollRef.current
+
+    if (!node) {
+      setQuickAddScrollMetrics((previous) => (
+        previous.canScroll
+          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
+          : previous
+      ))
+      return
+    }
+
+    const maxScrollTop = Math.max(node.scrollHeight - node.clientHeight, 0)
+    const canScroll = maxScrollTop > 1
+
+    if (!canScroll || node.scrollHeight <= 0 || node.clientHeight <= 0) {
+      setQuickAddScrollMetrics((previous) => (
+        previous.canScroll
+          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
+          : previous
+      ))
+      return
+    }
+
+    const thumbHeightPct = Math.min(100, Math.max((node.clientHeight / node.scrollHeight) * 100, 18))
+    const maxThumbTopPct = Math.max(100 - thumbHeightPct, 0)
+    const thumbTopPct = Math.min(maxThumbTopPct, Math.max(0, (node.scrollTop / maxScrollTop) * maxThumbTopPct))
+
+    setQuickAddScrollMetrics((previous) => {
+      if (
+        previous.canScroll === canScroll
+        && Math.abs(previous.thumbTopPct - thumbTopPct) < 0.2
+        && Math.abs(previous.thumbHeightPct - thumbHeightPct) < 0.2
+      ) {
+        return previous
+      }
+
+      return {
+        canScroll,
+        thumbTopPct,
+        thumbHeightPct,
+      }
+    })
+  }, [])
+  useLayoutEffect(() => {
+    updateQuickAddScrollMetrics()
+
+    const node = quickAddScrollRef.current
+    if (!node) {
+      return undefined
+    }
+
+    let animationFrame: number | null = null
+    const scheduleUpdate = () => {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+      }
+
+      animationFrame = window.requestAnimationFrame(updateQuickAddScrollMetrics)
+    }
+
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(scheduleUpdate)
+
+    resizeObserver?.observe(node)
+    if (node.firstElementChild) {
+      resizeObserver?.observe(node.firstElementChild)
+    }
+
+    window.addEventListener('resize', scheduleUpdate)
+
+    return () => {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+      }
+      resizeObserver?.disconnect()
+      window.removeEventListener('resize', scheduleUpdate)
+    }
+  }, [quickAddActivityGroups, updateQuickAddScrollMetrics])
   const summaryViewColumns = useMemo(
     () => buildSummaryViewColumns(selectedSummaryLayoutPreset),
     [selectedSummaryLayoutPreset],
@@ -6280,99 +6372,119 @@ function App() {
                     : 'No matching activities.'}
                 </p>
               ) : (
-                <div className="quick-add-list">
-                  {quickAddActivityGroups.map((group) => {
-                    const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
+                <div className="quick-add-scroll-frame">
+                  <div
+                    ref={quickAddScrollRef}
+                    className="quick-add-scroll"
+                    onScroll={updateQuickAddScrollMetrics}
+                  >
+                    <div className="quick-add-list">
+                      {quickAddActivityGroups.map((group) => {
+                        const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
 
-                    return (
-                      <section
-                        key={group.engagement.id}
-                        className="quick-add-group"
-                        style={{
-                          '--quick-add-color': engagementColor,
-                        } as CSSProperties}
-                      >
-                        <div
-                          className="quick-add-group-header"
-                          title={formatEntityDisplayLabel(
-                            group.engagement.name,
-                            group.engagement.code,
-                            'Engagement',
-                          )}
-                        >
-                          <span>{formatEntityPrimaryLabel(
-                            group.engagement.name,
-                            group.engagement.code,
-                            'Engagement',
-                          )}</span>
-                        </div>
-                        <div className="quick-add-grid">
-                          {group.activities.map(({ activity, engagement, usageCount, lastUsedAt }) => {
-                            const activityColor = activity.colorHex ?? engagementColor
-                            const isDraggingActivity =
-                              quickBlockDragState?.activityId === activity.id
-                              && quickBlockDragState.engagementId === engagement.id
-                            const durationMinutes = isDraggingActivity
-                              ? quickBlockDragState.durationMinutes
-                              : TIMELINE_MANUAL_CREATE_DURATION_MINUTES
-                            const activityLabel = activity.name || activity.code
-                            const fullActivityLabel = formatEntityDisplayLabel(activity.name, activity.code)
+                        return (
+                          <section
+                            key={group.engagement.id}
+                            className="quick-add-group"
+                            style={{
+                              '--quick-add-color': engagementColor,
+                            } as CSSProperties}
+                          >
+                            <div
+                              className="quick-add-group-header"
+                              title={formatEntityDisplayLabel(
+                                group.engagement.name,
+                                group.engagement.code,
+                                'Engagement',
+                              )}
+                            >
+                              <span>{formatEntityPrimaryLabel(
+                                group.engagement.name,
+                                group.engagement.code,
+                                'Engagement',
+                              )}</span>
+                            </div>
+                            <div className="quick-add-grid">
+                              {group.activities.map(({ activity, engagement, usageCount, lastUsedAt }) => {
+                                const activityColor = activity.colorHex ?? engagementColor
+                                const isDraggingActivity =
+                                  quickBlockDragState?.activityId === activity.id
+                                  && quickBlockDragState.engagementId === engagement.id
+                                const durationMinutes = isDraggingActivity
+                                  ? quickBlockDragState.durationMinutes
+                                  : TIMELINE_MANUAL_CREATE_DURATION_MINUTES
+                                const activityLabel = activity.name || activity.code
+                                const fullActivityLabel = formatEntityDisplayLabel(activity.name, activity.code)
 
-                            return (
-                              <button
-                                key={activity.id}
-                                type="button"
-                                className={`quick-add-tile ${isDraggingActivity ? 'dragging' : ''}`}
-                                onPointerDown={(event) =>
-                                  onQuickBlockActivityPointerDown(event, engagement, activity)
-                                }
-                                onPointerMove={onQuickBlockActivityPointerMove}
-                                onPointerUp={(event) =>
-                                  onQuickBlockActivityPointerUp(event, engagement, activity)
-                                }
-                                onPointerCancel={onQuickBlockActivityPointerCancel}
-                                onKeyDown={(event) => {
-                                  if (event.key === 'Enter' || event.key === ' ') {
-                                    event.preventDefault()
-                                    createQuickBlockEntry(
-                                      engagement,
-                                      activity,
-                                      TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
-                                    )
-                                  }
-                                }}
-                                disabled={isBusy}
-                                aria-label={`Add ${fullActivityLabel} for ${formatQuickBlockDuration(durationMinutes)}`}
-                                title={
-                                  usageCount > 0 && lastUsedAt
-                                    ? `${fullActivityLabel} - used ${usageCount} time${usageCount === 1 ? '' : 's'}`
-                                    : fullActivityLabel
-                                }
-                                style={{
-                                  '--quick-add-color': activityColor,
-                                  '--quick-add-duration-progress': `${quickBlockDurationProgress(durationMinutes)}%`,
-                                } as CSSProperties}
-                              >
-                                <span className="quick-add-tile-main">
-                                  <strong>{activityLabel}</strong>
-                                </span>
-                                {isDraggingActivity ? (
-                                  <span className="quick-add-duration">
-                                    {formatQuickBlockDuration(durationMinutes)}
-                                  </span>
-                                ) : null}
-                                {isDraggingActivity ? (
-                                  <span className="quick-add-duration-track" aria-hidden="true">
-                                    <span />
-                                  </span>
-                                ) : null}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      </section>
-                    )
-                  })}
+                                return (
+                                  <button
+                                    key={activity.id}
+                                    type="button"
+                                    className={`quick-add-tile ${isDraggingActivity ? 'dragging' : ''}`}
+                                    onPointerDown={(event) =>
+                                      onQuickBlockActivityPointerDown(event, engagement, activity)
+                                    }
+                                    onPointerMove={onQuickBlockActivityPointerMove}
+                                    onPointerUp={(event) =>
+                                      onQuickBlockActivityPointerUp(event, engagement, activity)
+                                    }
+                                    onPointerCancel={onQuickBlockActivityPointerCancel}
+                                    onKeyDown={(event) => {
+                                      if (event.key === 'Enter' || event.key === ' ') {
+                                        event.preventDefault()
+                                        createQuickBlockEntry(
+                                          engagement,
+                                          activity,
+                                          TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
+                                        )
+                                      }
+                                    }}
+                                    disabled={isBusy}
+                                    aria-label={`Add ${fullActivityLabel} for ${formatQuickBlockDuration(durationMinutes)}`}
+                                    title={
+                                      usageCount > 0 && lastUsedAt
+                                        ? `${fullActivityLabel} - used ${usageCount} time${usageCount === 1 ? '' : 's'}`
+                                        : fullActivityLabel
+                                    }
+                                    style={{
+                                      '--quick-add-color': activityColor,
+                                      '--quick-add-duration-progress': `${quickBlockDurationProgress(durationMinutes)}%`,
+                                    } as CSSProperties}
+                                  >
+                                    <span className="quick-add-tile-main">
+                                      <strong>{activityLabel}</strong>
+                                    </span>
+                                    {isDraggingActivity ? (
+                                      <span className="quick-add-duration">
+                                        {formatQuickBlockDuration(durationMinutes)}
+                                      </span>
+                                    ) : null}
+                                    {isDraggingActivity ? (
+                                      <span className="quick-add-duration-track" aria-hidden="true">
+                                        <span />
+                                      </span>
+                                    ) : null}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </section>
+                        )
+                      })}
+                    </div>
+                  </div>
+                  {quickAddScrollMetrics.canScroll ? (
+                    <div
+                      className="quick-add-scroll-indicator"
+                      aria-hidden="true"
+                      style={{
+                        '--quick-add-scroll-thumb-top': `${quickAddScrollMetrics.thumbTopPct}%`,
+                        '--quick-add-scroll-thumb-height': `${quickAddScrollMetrics.thumbHeightPct}%`,
+                      } as CSSProperties}
+                    >
+                      <span />
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
