@@ -113,10 +113,15 @@
 
 .sidebar-capture {
   min-height: 0;
-  align-content: start;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  align-content: stretch;
   overflow: auto;
   position: relative;
   z-index: 2;
+}
+
+.sidebar-capture:has(> .capture-history-notice) {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 
 .sidebar-capture textarea {
@@ -195,16 +200,18 @@
 }
 
 .quick-add-panel {
+  --quick-add-scroll-lane: 0.75rem;
   border-top: 1px solid rgba(158, 176, 205, 0.38);
   padding: 0.62rem 0 0;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: 0.5rem;
   min-height: 0;
-  max-height: 20rem;
+  height: 100%;
   background: transparent;
   box-shadow: none;
-  overflow: hidden;
+  overflow: visible;
+  container-type: inline-size;
 }
 
 .quick-add-header {
@@ -225,6 +232,7 @@
   border-radius: 11px;
   border: 1px solid rgba(158, 176, 205, 0.58);
   padding: 0.38rem 0.55rem;
+  box-sizing: border-box;
   background: rgba(255, 255, 255, 0.78);
   color: var(--ink);
   font-size: 0.76rem;
@@ -237,14 +245,71 @@
   outline-offset: 0;
 }
 
-.quick-add-list {
+.quick-add-scroll-frame {
+  position: relative;
   min-height: 0;
+  height: 100%;
+  overflow: visible;
+}
+
+.quick-add-scroll {
+  width: calc(100% + var(--quick-add-scroll-lane));
+  width: calc(100cqw + var(--quick-add-scroll-lane));
+  min-height: 0;
+  height: 100%;
+  margin-right: calc(-1 * var(--quick-add-scroll-lane));
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-right: 0;
+  box-sizing: border-box;
+  scrollbar-width: none;
+}
+
+.quick-add-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.quick-add-scroll-indicator {
+  position: absolute;
+  top: 0.16rem;
+  right: -0.56rem;
+  bottom: 0.16rem;
+  width: 0.22rem;
+  border-radius: 999px;
+  background: rgba(16, 34, 63, 0.08);
+  pointer-events: none;
+  opacity: 0.88;
+}
+
+.quick-add-scroll-indicator span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--quick-add-scroll-thumb-top);
+  height: var(--quick-add-scroll-thumb-height);
+  min-height: 1.35rem;
+  border-radius: 999px;
+  background: rgba(16, 34, 63, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.34);
+  transition:
+    top 80ms linear,
+    height 120ms ease,
+    background-color 120ms ease;
+}
+
+.quick-add-scroll-frame:hover .quick-add-scroll-indicator span {
+  background: rgba(16, 34, 63, 0.44);
+}
+
+.quick-add-list {
+  width: 100%;
+  width: 100cqw;
+  box-sizing: border-box;
   display: grid;
   gap: 0.52rem;
   align-content: start;
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding-right: 0;
 }
 
 .quick-add-group {
@@ -339,9 +404,15 @@
 }
 
 .quick-add-tile-main strong {
-  display: block;
-  font-size: 0.78rem;
-  line-height: 1.1;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.08;
   text-align: center;
 }
 
