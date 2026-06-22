@@ -29,11 +29,11 @@ pub fn run() {
     builder
         .setup(|app| {
             let connection = db::init_database(&app.handle())?;
+            let session_id = Uuid::new_v4().to_string();
             let http_client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(90))
                 .build()?;
-            let session_id = Uuid::new_v4().to_string();
             let app_version = app.package_info().version.to_string();
 
             app.manage(AppState {
@@ -54,7 +54,9 @@ pub fn run() {
             commands::settings_get_status,
             commands::settings_set_openai_key,
             commands::settings_set_openai_model,
+            commands::settings_set_calendar_bulk_model,
             commands::settings_set_timeline_preferences,
+            commands::settings_set_calendar_bulk_preferences,
             commands::settings_set_transcription_model,
             commands::summary_layout_state_get,
             commands::summary_layout_state_set,
@@ -65,12 +67,16 @@ pub fn run() {
             commands::activity_delete,
             commands::timeline_list_for_date,
             commands::timeline_list_for_week_view,
+            commands::history_list,
+            commands::quick_add_suggestions,
             commands::timeline_month_summary,
             commands::timeline_weekly_summary,
             commands::summary_export_weekly_excel,
             commands::timeline_update_entry,
             commands::timeline_create_entry,
             commands::timeline_delete_entry,
+            commands::calendar_extract_events,
+            commands::calendar_import_entries,
             commands::transcribe_audio_clip,
             commands::voice_request_microphone_permission,
             commands::interpret_text_message,

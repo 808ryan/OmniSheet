@@ -4,6 +4,10 @@ import { isTauriRuntime } from './runtime'
 import type {
   ActivityUpsertInput,
   AppCommandErrorShape,
+  CalendarExtractInput,
+  CalendarExtractResult,
+  CalendarImportInput,
+  CalendarImportResult,
   DateInput,
   DiagnosticsBundle,
   DiagnosticsEvent,
@@ -11,12 +15,16 @@ import type {
   DiagnosticsRecordInput,
   Engagement,
   EngagementUpsertInput,
+  HistoryListResult,
   IdResult,
   InterpretResult,
   InterpretTextInput,
   MicrophonePermissionResult,
   OpenAiModelId,
+  QuickAddSuggestionInput,
+  QuickAddSuggestionResult,
   SettingsStatus,
+  SettingsCalendarBulkPreferencesInput,
   SettingsTimelinePreferencesInput,
   SummaryExportResult,
   SummaryExportWeeklyExcelInput,
@@ -187,6 +195,12 @@ export function settingsSetOpenAiModel(model: OpenAiModelId): Promise<void> {
   })
 }
 
+export function settingsSetCalendarBulkModel(model: OpenAiModelId): Promise<void> {
+  return invokeCommand<void>('settings_set_calendar_bulk_model', {
+    input: { model },
+  })
+}
+
 export function settingsSetTranscriptionModel(model: TranscriptionModelId): Promise<void> {
   return invokeCommand<void>('settings_set_transcription_model', {
     input: { model },
@@ -197,6 +211,12 @@ export function settingsSetTimelinePreferences(
   input: SettingsTimelinePreferencesInput,
 ): Promise<void> {
   return invokeCommand<void>('settings_set_timeline_preferences', { input })
+}
+
+export function settingsSetCalendarBulkPreferences(
+  input: SettingsCalendarBulkPreferencesInput,
+): Promise<void> {
+  return invokeCommand<void>('settings_set_calendar_bulk_preferences', { input })
 }
 
 export function summaryLayoutStateGet(): Promise<SummaryLayoutState> {
@@ -283,10 +303,28 @@ export function timelineCreateEntry(input: TimelineCreateInput): Promise<IdResul
   return invokeCommand<IdResult>('timeline_create_entry', { input })
 }
 
+export function historyList(input: DateInput): Promise<HistoryListResult> {
+  return invokeCommand<HistoryListResult>('history_list', { input })
+}
+
+export function quickAddSuggestions(
+  input: QuickAddSuggestionInput = {},
+): Promise<QuickAddSuggestionResult> {
+  return invokeCommand<QuickAddSuggestionResult>('quick_add_suggestions', { input })
+}
+
 export function timelineDeleteEntry(id: string): Promise<void> {
   return invokeCommand<void>('timeline_delete_entry', {
     input: { id },
   })
+}
+
+export function calendarExtractEvents(input: CalendarExtractInput): Promise<CalendarExtractResult> {
+  return invokeCommand<CalendarExtractResult>('calendar_extract_events', { input })
+}
+
+export function calendarImportEntries(input: CalendarImportInput): Promise<CalendarImportResult> {
+  return invokeCommand<CalendarImportResult>('calendar_import_entries', { input })
 }
 
 export function diagnosticsList(

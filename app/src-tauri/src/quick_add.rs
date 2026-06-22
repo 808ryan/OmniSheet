@@ -1,12 +1,17 @@
 use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{Color, Effect, EffectState, EffectsBuilder};
 use tauri::{
-    App, AppHandle, LogicalPosition, Manager, Rect, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    App, AppHandle, LogicalPosition, Manager, Rect, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 const QUICK_ADD_LABEL: &str = "quick-add";
 const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_MENU_SHOW_MAIN_ID: &str = "show-main";
+const TRAY_MENU_SHOW_QUICK_ADD_ID: &str = "show-quick-add";
+const TRAY_MENU_EXIT_ID: &str = "exit-app";
 const QUICK_ADD_WIDTH: f64 = 340.0;
 const QUICK_ADD_HEIGHT: f64 = 228.0;
 const QUICK_ADD_TRAY_GAP: f64 = 8.0;
@@ -20,12 +25,30 @@ pub struct QuickAddTrayState {
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let app_handle = app.handle().clone();
     create_quick_add_window(&app_handle)?;
+    install_main_window_close_to_tray(&app_handle);
+
+    let tray_menu = build_tray_menu(&app_handle)?;
 
     let tray_icon = TrayIconBuilder::with_id("quick-add-tray")
         .icon(build_circle_plus_icon())
         .icon_as_template(true)
         .tooltip("Add timesheet entry")
+        .menu(&tray_menu)
         .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_MENU_SHOW_MAIN_ID => {
+                if let Err(error) = show_main_window(app) {
+                    log::error!("failed to show main window from tray menu: {error}");
+                }
+            }
+            TRAY_MENU_SHOW_QUICK_ADD_ID => {
+                if let Err(error) = show_quick_add_window(app) {
+                    log::error!("failed to show quick add window from tray menu: {error}");
+                }
+            }
+            TRAY_MENU_EXIT_ID => app.exit(0),
+            _ => {}
+        })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -48,24 +71,68 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
 
 #[tauri::command]
 pub fn quick_add_hide_window(app: AppHandle) -> Result<(), String> {
+    hide_quick_add_window(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn quick_add_show_main_window(app: AppHandle) -> Result<(), String> {
+    show_main_window(&app).map_err(|error| error.to_string())
+}
+
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let show_main = MenuItem::with_id(
+        app,
+        TRAY_MENU_SHOW_MAIN_ID,
+        "Show OmniSheet",
+        true,
+        None::<&str>,
+    )?;
+    let show_quick_add = MenuItem::with_id(
+        app,
+        TRAY_MENU_SHOW_QUICK_ADD_ID,
+        "Add timesheet entry",
+        true,
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let exit = MenuItem::with_id(app, TRAY_MENU_EXIT_ID, "Exit", true, None::<&str>)?;
+
+    Menu::with_items(app, &[&show_main, &show_quick_add, &separator, &exit])
+}
+
+fn install_main_window_close_to_tray(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        log::warn!("main window not found while installing close-to-tray behavior");
+        return;
+    };
+    let main_window = window.clone();
+
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            if let Err(error) = main_window.hide() {
+                log::error!("failed to hide main window on close request: {error}");
+            }
+        }
+    });
+}
+
+fn hide_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(QUICK_ADD_LABEL) {
-        window.hide().map_err(|error| error.to_string())?;
+        window.hide()?;
     }
 
     Ok(())
 }
 
-#[tauri::command]
-pub fn quick_add_show_main_window(app: AppHandle) -> Result<(), String> {
+fn show_main_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        window.show().map_err(|error| error.to_string())?;
-        window.unminimize().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
+        window.show()?;
+        window.unminimize()?;
+        window.set_focus()?;
     }
 
-    if let Some(window) = app.get_webview_window(QUICK_ADD_LABEL) {
-        window.hide().map_err(|error| error.to_string())?;
-    }
+    hide_quick_add_window(app)?;
 
     Ok(())
 }
@@ -113,6 +180,22 @@ fn toggle_quick_add_window(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()
 
     position_quick_add_window(&window, tray_rect)?;
     window.show()?;
+    window.set_focus()?;
+
+    Ok(())
+}
+
+fn show_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
+    let window = match app.get_webview_window(QUICK_ADD_LABEL) {
+        Some(window) => window,
+        None => create_quick_add_window(app)?,
+    };
+
+    if !window.is_visible()? {
+        position_quick_add_window_without_tray_rect(&window)?;
+        window.show()?;
+    }
+
     window.set_focus()?;
 
     Ok(())
@@ -173,6 +256,34 @@ fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::
     let position = LogicalPosition::new(
         clamp_to_window_bounds(preferred_x, min_x, max_x),
         clamp_to_window_bounds(preferred_y, min_y, max_y),
+    );
+
+    window.set_position(position)
+}
+
+fn position_quick_add_window_without_tray_rect(window: &WebviewWindow) -> tauri::Result<()> {
+    let monitor = match window.current_monitor()? {
+        Some(monitor) => Some(monitor),
+        None => window.primary_monitor()?,
+    };
+
+    let Some(monitor) = monitor else {
+        return window.center();
+    };
+
+    let scale_factor = monitor.scale_factor();
+    let work_area = monitor.work_area();
+    let work_area_position = work_area.position.to_logical::<f64>(scale_factor);
+    let work_area_size = work_area.size.to_logical::<f64>(scale_factor);
+    let min_x = work_area_position.x + QUICK_ADD_SCREEN_MARGIN;
+    let max_x =
+        work_area_position.x + work_area_size.width - QUICK_ADD_WIDTH - QUICK_ADD_SCREEN_MARGIN;
+    let min_y = work_area_position.y + QUICK_ADD_SCREEN_MARGIN;
+    let max_y =
+        work_area_position.y + work_area_size.height - QUICK_ADD_HEIGHT - QUICK_ADD_SCREEN_MARGIN;
+    let position = LogicalPosition::new(
+        clamp_to_window_bounds(max_x, min_x, max_x),
+        clamp_to_window_bounds(max_y, min_y, max_y),
     );
 
     window.set_position(position)

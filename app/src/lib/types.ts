@@ -1,7 +1,7 @@
 export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
-export type OpenAiModelId = 'gpt-5-nano' | 'gpt-4.1-nano'
+export type OpenAiModelId = 'gpt-5.4' | 'gpt-5.4-mini' | 'gpt-5-nano' | 'gpt-4.1-nano'
 export type TranscriptionModelId = 'gpt-4o-mini-transcribe' | 'whisper-1'
-export type CaptureSourceId = 'text' | 'voice'
+export type CaptureSourceId = 'text' | 'voice' | 'calendar'
 
 export interface OpenAiModelOption {
   id: OpenAiModelId
@@ -26,11 +26,14 @@ export interface Activity {
   updatedAt: number
 }
 
+export type EngagementType = 'external' | 'internal'
+
 export interface Engagement {
   id: string
   code: string | null
   name: string
   client: string | null
+  engagementType: EngagementType
   colorHex: string | null
   tags: string[]
   describeWhenToUse: string | null
@@ -45,6 +48,7 @@ export interface EngagementUpsertInput {
   code?: string | null
   name: string
   client?: string | null
+  engagementType?: EngagementType
   colorHex?: string | null
   tags: string[]
   describeWhenToUse: string
@@ -151,6 +155,7 @@ export interface TimelineEntry {
   activityId: string | null
   engagementCode: string | null
   engagementName: string | null
+  engagementType: EngagementType | null
   activityCode: string | null
   activityName: string | null
   usedActivityFallback: boolean
@@ -164,6 +169,8 @@ export interface TimelineEntry {
   transcriptionModelUsed: TranscriptionModelId | null
   transcriptionModelUsedLabel: string | null
   warningFlags: WarningType[]
+  createdAt: number
+  updatedAt: number
 }
 
 export interface TimelineDaySummary {
@@ -179,6 +186,15 @@ export interface TimelineWeeklySummary {
   rows: TimelineWeeklySummaryRow[]
   dayTotalMinutes: number[]
   weekTotalMinutes: number
+  dayTotalBreakdowns: TimelineTotalBreakdown[]
+  weekTotalBreakdown: TimelineTotalBreakdown
+}
+
+export interface TimelineTotalBreakdown {
+  primaryMinutes: number
+  externalMinutes: number
+  internalMinutes: number
+  uncategorizedMinutes: number
 }
 
 export interface TimelineWeeklySummaryDay {
@@ -193,6 +209,7 @@ export interface TimelineWeeklySummaryRow {
   activityName: string
   engagementName: string
   clientName: string
+  engagementType: EngagementType | null
   isUncategorized: boolean
   cells: TimelineWeeklySummaryCell[]
   rowTotalMinutes: number
@@ -293,6 +310,50 @@ export interface TimelineCreateInput {
   date: string
   startMinute: number
   endMinute: number
+  engagementId?: string | null
+  activityId?: string | null
+  description?: string | null
+}
+
+export interface QuickAddSuggestionInput {
+  limit?: number
+}
+
+export interface QuickAddSuggestion {
+  engagementId: string
+  activityId: string
+  usageCount: number
+  lastUsedAt: number | null
+}
+
+export interface QuickAddSuggestionResult {
+  suggestions: QuickAddSuggestion[]
+}
+
+export interface HistoryListResult {
+  weekStartDate: string
+  weekEndDate: string
+  submissions: HistorySubmission[]
+  entries: TimelineEntry[]
+}
+
+export interface HistorySubmission {
+  id: string
+  rawText: string
+  captureSource: string
+  status: string
+  messageTimestamp: number
+  createdAt: number
+  interpretedEntryCount: number
+  uniqueEntryCount: number
+  savedEntryCount: number
+  truncatedEntryCount: number
+  containsMultipleEvents: boolean
+  confidence: number
+  modelUsed: OpenAiModelId | null
+  modelUsedLabel: string | null
+  transcriptionModelUsed: TranscriptionModelId | null
+  transcriptionModelUsedLabel: string | null
 }
 
 export interface SettingsStatus {
@@ -303,15 +364,106 @@ export interface SettingsStatus {
   lastError: string | null
   selectedOpenAiModel: OpenAiModelId
   availableOpenAiModels: OpenAiModelOption[]
+  selectedCalendarBulkModel: OpenAiModelId
   selectedTranscriptionModel: TranscriptionModelId
   availableTranscriptionModels: TranscriptionModelOption[]
   timelineExcludeUncategorizedFromDailyTotals: boolean
   timelineShowUncategorizedDailyTotal: boolean
+  timelineIncludeExternalInTotals: boolean
+  timelineIncludeInternalInTotals: boolean
+  timelineSeparateEngagementTypeTotals: boolean
+  calendarBulkIgnoredKeywords: string[]
+  calendarBulkIgnoreAllDayEvents: boolean
 }
 
 export interface SettingsTimelinePreferencesInput {
   timelineExcludeUncategorizedFromDailyTotals: boolean
   timelineShowUncategorizedDailyTotal: boolean
+  timelineIncludeExternalInTotals: boolean
+  timelineIncludeInternalInTotals: boolean
+  timelineSeparateEngagementTypeTotals: boolean
+}
+
+export interface SettingsCalendarBulkPreferencesInput {
+  calendarBulkIgnoredKeywords: string[]
+  calendarBulkIgnoreAllDayEvents: boolean
+}
+
+export interface CalendarExtractInput {
+  imageBase64: string
+  mimeType: string
+  clientTimestampIso: string
+  timezone: string
+  clientLocalDate: string
+  clientLocalTime: string
+  clientUtcOffsetMinutes: number
+  selectedDate: string
+  openAiModel?: OpenAiModelId
+  ignoredKeywords: string[]
+  ignoreAllDayEvents: boolean
+}
+
+export interface CalendarExtractResult {
+  correlationId: string
+  candidates: CalendarExtractCandidate[]
+  ignoredCandidateCount: number
+  modelUsed: OpenAiModelId
+  modelUsedLabel: string
+  llmDurationMs: number
+}
+
+export interface CalendarExtractCandidate {
+  id: string
+  date: string
+  startMinute: number
+  endMinute: number
+  durationMinutes: number
+  timeEvidence: string | null
+  description: string
+  extractedText: string
+  sourceText: string
+  confidence: number
+  engagementId: string | null
+  activityId: string | null
+  engagementCode: string | null
+  engagementName: string | null
+  engagementType?: EngagementType | null
+  activityCode: string | null
+  activityName: string | null
+  warningFlags: WarningType[]
+  isAllDay: boolean
+  isIgnored: boolean
+  ignoredReason: string | null
+  needsDateConfirmation: boolean
+  needsTimeConfirmation: boolean
+}
+
+export interface CalendarImportInput {
+  clientTimestampIso: string
+  timezone: string
+  clientLocalDate: string
+  clientLocalTime: string
+  clientUtcOffsetMinutes: number
+  entries: CalendarImportEntryInput[]
+}
+
+export interface CalendarImportEntryInput {
+  date: string
+  startMinute: number
+  endMinute: number
+  description: string
+  extractedText: string
+  engagementId: string | null
+  activityId: string | null
+  confidence: number
+}
+
+export interface CalendarImportResult {
+  correlationId: string
+  rawMessageId: string
+  createdEntryIds: string[]
+  touchedMonthKeys: string[]
+  warnings: Warning[]
 }
 
 export interface DiagnosticsListInput {

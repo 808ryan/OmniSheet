@@ -28,6 +28,9 @@ Thumbs.db
 # Claude
 .claude/
 
+# Codex
+.codex/
+
 # Tauri / Rust
 app/src-tauri/target/
 **/Cargo.lock

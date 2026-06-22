@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
+  ClipboardEvent as ReactClipboardEvent,
   CSSProperties,
   FormEvent,
   MouseEvent as ReactMouseEvent,
@@ -11,15 +12,21 @@ import { listen } from '@tauri-apps/api/event'
 import {
   activityDelete,
   activityUpsert,
+  calendarExtractEvents,
+  calendarImportEntries,
   diagnosticsCopyBundle,
   diagnosticsRecordFrontendEvent,
   diagnosticsList,
   engagementDelete,
   engagementList,
   engagementUpsert,
+  historyList,
   interpretTextMessage,
   isAppCommandError,
+  quickAddSuggestions,
   settingsGetStatus,
+  settingsSetCalendarBulkModel,
+  settingsSetCalendarBulkPreferences,
   settingsSetOpenAiKey,
   settingsSetOpenAiModel,
   settingsSetTimelinePreferences,
@@ -37,7 +44,7 @@ import {
   timelineUpdateEntry,
   voiceRequestMicrophonePermission,
 } from './lib/api'
-import { isTauriRuntime } from './lib/runtime'
+import { isAppRuntime, isTauriRuntime } from './lib/runtime'
 import { QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
 import {
   buildDefaultSummaryLayoutState,
@@ -59,11 +66,15 @@ import {
 } from './lib/time'
 import type {
   Activity,
+  CalendarExtractCandidate,
   CaptureSourceId,
   DiagnosticsEvent,
   Engagement,
+  EngagementType,
+  HistoryListResult,
   MicrophonePermissionStatus,
   OpenAiModelId,
+  QuickAddSuggestion,
   SettingsStatus,
   SummaryLayoutColumn,
   SummaryLayoutFieldKey,
@@ -71,6 +82,7 @@ import type {
   SummaryLayoutState,
   TimelineDaySummary,
   TimelineEntry,
+  TimelineTotalBreakdown,
   TimelineWeekView,
   TimelineWeeklySummary,
   TimelineWeeklySummaryNote,
@@ -79,10 +91,11 @@ import type {
 } from './lib/types'
 import deleteIcon from './assets/icons/delete.svg'
 import editIcon from './assets/icons/edit.svg'
+import calendarIcon from './assets/icons/calendar.svg'
 import microphoneIcon from './assets/icons/microphone.svg'
 import './App.css'
 
-type View = 'timeline' | 'week' | 'codes' | 'settings' | 'diagnostics' | 'summary'
+type View = 'timeline' | 'week' | 'history' | 'codes' | 'settings' | 'diagnostics' | 'summary'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 type CodeEditorSurface =
@@ -90,7 +103,7 @@ type CodeEditorSurface =
   | 'edit-engagement'
   | 'create-activity'
   | 'edit-activity'
-type TimelineSurface = 'day' | 'week'
+type TimelineSurface = 'day' | 'week' | 'calendar-review'
 
 type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
 
@@ -118,6 +131,35 @@ interface SubmissionQueueItem {
   transcriptionDurationMs?: number
 }
 
+interface QuickBlockDragState {
+  engagementId: string
+  activityId: string
+  activityName: string
+  pointerId: number
+  originClientX: number
+  currentClientX: number
+  durationMinutes: number
+  isDragging: boolean
+}
+
+interface QuickAddActivityView {
+  engagement: Engagement
+  activity: Activity
+  usageCount: number
+  lastUsedAt: number | null
+}
+
+interface QuickAddActivityGroup {
+  engagement: Engagement
+  activities: QuickAddActivityView[]
+}
+
+interface QuickAddScrollMetrics {
+  canScroll: boolean
+  thumbTopPct: number
+  thumbHeightPct: number
+}
+
 interface VoiceDraftMetadata {
   captureSource: 'voice'
   capturedAtMs: number
@@ -139,6 +181,7 @@ interface EngagementFormState {
   code: string
   name: string
   client: string
+  engagementType: EngagementType
   colorHex: string
   describeWhenToUse: string
   tags: string
@@ -165,6 +208,20 @@ interface EntryDraft {
   startTime: string
   endTime: string
   preserveEndOfDay: boolean
+}
+
+type CalendarBulkTab = 'submission' | 'review'
+type CalendarCandidateReviewState = 'pending' | 'accepted' | 'rejected' | 'ignored'
+
+interface CalendarReviewCandidate extends CalendarExtractCandidate {
+  reviewState: CalendarCandidateReviewState
+  savedEntryId?: string | null
+  savedEntryDate?: string | null
+}
+
+interface CalendarStagedImage {
+  imageBase64: string
+  mimeType: string
 }
 
 interface TimelineWindow {
@@ -234,12 +291,6 @@ interface TimelineLabel {
   tier: TimelineLabelTier
 }
 
-interface TimelineTotalBreakdown {
-  primaryMinutes: number
-  categorizedMinutes: number
-  uncategorizedMinutes: number
-}
-
 interface MiniCalendarProps {
   selectedDate: string
   visibleMonth: string
@@ -269,6 +320,7 @@ type TimelineContextMenuKind = 'entry' | 'empty'
 type TimelineContextMenuState =
   | {
     kind: 'entry'
+    surface: TimelineSurface
     entryId: string
     createDate: string
     createStartMinute: number
@@ -277,6 +329,7 @@ type TimelineContextMenuState =
   }
   | {
     kind: 'empty'
+    surface: TimelineSurface
     createDate: string
     createStartMinute: number
     x: number
@@ -366,6 +419,7 @@ const EMPTY_ENGAGEMENT_FORM: EngagementFormState = {
   code: '',
   name: '',
   client: '',
+  engagementType: 'external',
   colorHex: '',
   describeWhenToUse: '',
   tags: '',
@@ -384,6 +438,11 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
 
 function getDefaultActivityEngagementId(engagements: Engagement[]): string {
   return engagements[0]?.id ?? ''
+}
+
+function inferEngagementTypeFromCode(code: string | null | undefined): EngagementType {
+  const firstCharacter = code?.trim().charAt(0).toUpperCase()
+  return firstCharacter === 'I' || firstCharacter === 'A' ? 'internal' : 'external'
 }
 
 function buildEmptyActivityForm(engagementId: string): ActivityFormState {
@@ -407,6 +466,10 @@ const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
+const QUICK_ADD_DEFAULT_LIMIT = 12
+const QUICK_BLOCK_DURATION_STEP_MINUTES = 30
+const QUICK_BLOCK_MAX_DURATION_MINUTES = 8 * HOUR_IN_MINUTES
+const QUICK_BLOCK_DRAG_STEP_PX = 22
 const WEEK_TIMELINE_HEADER_HEIGHT = 64
 const WEEK_TIMELINE_GUTTER_LEFT = 68
 const WEEK_TIMELINE_DAY_WIDTH = 176
@@ -420,7 +483,9 @@ const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
 const END_OF_DAY_INPUT_SENTINEL = '23:59'
 const MAX_CONCURRENT_SUBMISSIONS = 5
 const MAX_FINISHED_QUEUE_HISTORY = 10
+const CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD = 0.75
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5-nano'
+const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-5.4'
 const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-4o-mini-transcribe'
 const MAX_VOICE_RECORDING_DURATION_MS = 120_000
 const PREFERRED_VOICE_MIME_TYPES = [
@@ -431,9 +496,15 @@ const PREFERRED_VOICE_MIME_TYPES = [
   'audio/ogg',
   'audio/wav',
 ] as const
+
+function quickAddActivityKey(engagementId: string, activityId: string): string {
+  return `${engagementId}:${activityId}`
+}
+
 const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'timeline', label: 'Day' },
   { id: 'week', label: 'Week' },
+  { id: 'history', label: 'History' },
   { id: 'codes', label: 'Codes' },
   { id: 'settings', label: 'Settings' },
   { id: 'diagnostics', label: 'Diagnostics' },
@@ -602,6 +673,7 @@ function ResponsiveCodeTagList({ tags, itemKeyPrefix }: ResponsiveCodeTagListPro
 
 function App() {
   const tauriRuntime = isTauriRuntime()
+  const appRuntime = isAppRuntime()
   const todayDate = useMemo(() => formatDate(new Date()), [])
 
   const [activeView, setActiveView] = useState<View>('timeline')
@@ -614,6 +686,8 @@ function App() {
   const [openAiKey, setOpenAiKey] = useState('')
   const [selectedOpenAiModelDraft, setSelectedOpenAiModelDraft] =
     useState<OpenAiModelId>(DEFAULT_OPENAI_MODEL)
+  const [selectedCalendarBulkModelDraft, setSelectedCalendarBulkModelDraft] =
+    useState<OpenAiModelId>(DEFAULT_CALENDAR_BULK_MODEL)
   const [selectedTranscriptionModelDraft, setSelectedTranscriptionModelDraft] =
     useState<TranscriptionModelId>(DEFAULT_TRANSCRIPTION_MODEL)
 
@@ -623,6 +697,7 @@ function App() {
   const [expandedEngagementId, setExpandedEngagementId] = useState<string | null>(null)
   const [engagementForm, setEngagementForm] =
     useState<EngagementFormState>(EMPTY_ENGAGEMENT_FORM)
+  const [hasManualEngagementTypeSelection, setHasManualEngagementTypeSelection] = useState(false)
   const [activityForm, setActivityForm] = useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
 
   const [captureMessage, setCaptureMessage] = useState('')
@@ -630,13 +705,36 @@ function App() {
   const [voiceCaptureState, setVoiceCaptureState] = useState<VoiceCaptureState>('idle')
   const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
-  const [isSubmissionQueueOpen, setIsSubmissionQueueOpen] = useState(false)
+  const [lastSubmissionNotice, setLastSubmissionNotice] = useState<string | null>(null)
+  const [quickAddSearch, setQuickAddSearch] = useState('')
+  const [quickAddSuggestionItems, setQuickAddSuggestionItems] = useState<QuickAddSuggestion[]>([])
+  const [quickAddSuggestedKeys, setQuickAddSuggestedKeys] = useState<string[]>([])
+  const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
+  const [quickBlockDragState, setQuickBlockDragState] = useState<QuickBlockDragState | null>(null)
+  const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickAddScrollMetrics>({
+    canScroll: false,
+    thumbTopPct: 0,
+    thumbHeightPct: 100,
+  })
+  const [isCalendarBulkModalOpen, setIsCalendarBulkModalOpen] = useState(false)
+  const [calendarBulkTab, setCalendarBulkTab] = useState<CalendarBulkTab>('submission')
+  const [calendarSelectedFileName, setCalendarSelectedFileName] = useState<string | null>(null)
+  const [calendarImagePreviewUrl, setCalendarImagePreviewUrl] = useState<string | null>(null)
+  const [calendarStagedImage, setCalendarStagedImage] = useState<CalendarStagedImage | null>(null)
+  const [calendarUploadStatusMessage, setCalendarUploadStatusMessage] = useState<string | null>(null)
+  const [calendarUploadErrorMessage, setCalendarUploadErrorMessage] = useState<string | null>(null)
+  const [calendarIsExtracting, setCalendarIsExtracting] = useState(false)
+  const [calendarIsImporting, setCalendarIsImporting] = useState(false)
+  const [calendarReviewCandidates, setCalendarReviewCandidates] = useState<CalendarReviewCandidate[]>([])
+  const [selectedCalendarCandidateId, setSelectedCalendarCandidateId] = useState<string | null>(null)
+  const [calendarIgnoredKeywordDraft, setCalendarIgnoredKeywordDraft] = useState('lunch')
 
   const [selectedDate, setSelectedDate] = useState(todayDate)
   const [visibleMonth, setVisibleMonth] = useState(() => monthKeyFromDate(todayDate))
   const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([])
   const [weekTimeline, setWeekTimeline] = useState<TimelineWeekView | null>(null)
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
+  const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
@@ -655,12 +753,18 @@ function App() {
   const activityEngagementSelectRef = useRef<HTMLSelectElement | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
   const weekTimelineGridRef = useRef<HTMLDivElement | null>(null)
+  const calendarReviewTimelineGridRef = useRef<HTMLDivElement | null>(null)
   const timelineContextMenuRef = useRef<HTMLDivElement | null>(null)
+  const calendarFileInputRef = useRef<HTMLInputElement | null>(null)
+  const calendarDropZoneRef = useRef<HTMLDivElement | null>(null)
+  const calendarReviewAutoCenterKeyRef = useRef<string | null>(null)
   const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
   const selectedDateRef = useRef(selectedDate)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
+  const quickBlockDragStateRef = useRef<QuickBlockDragState | null>(null)
+  const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
   const timelineEntriesRef = useRef<TimelineEntry[]>([])
   const suppressTimelineClickRef = useRef(false)
   const inFlightSubmissionIdsRef = useRef<Set<string>>(new Set())
@@ -675,6 +779,9 @@ function App() {
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
+  const [historyData, setHistoryData] = useState<HistoryListResult | null>(null)
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState<string | null>(null)
   const [weeklySummary, setWeeklySummary] = useState<TimelineWeeklySummary | null>(null)
   const [isWeeklySummaryLoading, setIsWeeklySummaryLoading] = useState(false)
   const [weeklySummaryError, setWeeklySummaryError] = useState<string | null>(null)
@@ -836,6 +943,212 @@ function App() {
     }
     return values
   }, [engagements])
+  const quickAddSuggestionByKey = useMemo(() => {
+    const values = new Map<string, QuickAddSuggestion>()
+    for (const suggestion of quickAddSuggestionItems) {
+      values.set(quickAddActivityKey(suggestion.engagementId, suggestion.activityId), suggestion)
+    }
+
+    return values
+  }, [quickAddSuggestionItems])
+  const allQuickAddActivities = useMemo<QuickAddActivityView[]>(() => {
+    const values: QuickAddActivityView[] = []
+    for (const engagement of engagements) {
+      if (!engagement.isActive) {
+        continue
+      }
+
+      for (const activity of engagement.activities) {
+        if (!activity.isActive) {
+          continue
+        }
+
+        const suggestion = quickAddSuggestionByKey.get(quickAddActivityKey(engagement.id, activity.id))
+        values.push({
+          engagement,
+          activity,
+          usageCount: suggestion?.usageCount ?? 0,
+          lastUsedAt: suggestion?.lastUsedAt ?? null,
+        })
+      }
+    }
+
+    return values
+  }, [engagements, quickAddSuggestionByKey])
+  const quickAddActivityByKey = useMemo(() => {
+    const values = new Map<string, QuickAddActivityView>()
+    for (const item of allQuickAddActivities) {
+      values.set(quickAddActivityKey(item.engagement.id, item.activity.id), item)
+    }
+
+    return values
+  }, [allQuickAddActivities])
+  useEffect(() => {
+    setQuickAddSuggestedKeys((previous) => {
+      if (previous.length === 0) {
+        return previous
+      }
+
+      const next = previous.filter((key) => quickAddActivityByKey.has(key))
+
+      return next.length === previous.length ? previous : next
+    })
+  }, [quickAddActivityByKey])
+  const suggestedQuickAddActivities = useMemo(() => {
+    const values: QuickAddActivityView[] = []
+    const seenKeys = new Set<string>()
+
+    for (const key of quickAddSuggestedKeys) {
+      const item = quickAddActivityByKey.get(key)
+      if (!item || seenKeys.has(key)) {
+        continue
+      }
+
+      values.push(item)
+      seenKeys.add(key)
+    }
+
+    for (const item of allQuickAddActivities) {
+      if (values.length >= QUICK_ADD_DEFAULT_LIMIT) {
+        break
+      }
+
+      const key = quickAddActivityKey(item.engagement.id, item.activity.id)
+      if (seenKeys.has(key)) {
+        continue
+      }
+
+      values.push(item)
+      seenKeys.add(key)
+    }
+
+    return values.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+  }, [allQuickAddActivities, quickAddActivityByKey, quickAddSuggestedKeys])
+  const visibleQuickAddActivities = useMemo(() => {
+    const searchTerms = quickAddSearch
+      .trim()
+      .toLocaleLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+
+    if (searchTerms.length === 0) {
+      return suggestedQuickAddActivities
+    }
+
+    return allQuickAddActivities.filter(({ engagement, activity }) => {
+      const haystack = [
+        engagement.code,
+        engagement.name,
+        activity.code,
+        activity.name,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLocaleLowerCase()
+
+      return searchTerms.every((term) => haystack.includes(term))
+    })
+  }, [allQuickAddActivities, quickAddSearch, suggestedQuickAddActivities])
+  const quickAddActivityGroups = useMemo<QuickAddActivityGroup[]>(() => {
+    const groups: QuickAddActivityGroup[] = []
+    const groupByEngagementId = new Map<string, QuickAddActivityGroup>()
+
+    for (const item of visibleQuickAddActivities) {
+      let group = groupByEngagementId.get(item.engagement.id)
+      if (!group) {
+        group = {
+          engagement: item.engagement,
+          activities: [],
+        }
+        groupByEngagementId.set(item.engagement.id, group)
+        groups.push(group)
+      }
+
+      group.activities.push(item)
+    }
+
+    return groups
+  }, [visibleQuickAddActivities])
+  const updateQuickAddScrollMetrics = useCallback(() => {
+    const node = quickAddScrollRef.current
+
+    if (!node) {
+      setQuickAddScrollMetrics((previous) => (
+        previous.canScroll
+          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
+          : previous
+      ))
+      return
+    }
+
+    const maxScrollTop = Math.max(node.scrollHeight - node.clientHeight, 0)
+    const canScroll = maxScrollTop > 1
+
+    if (!canScroll || node.scrollHeight <= 0 || node.clientHeight <= 0) {
+      setQuickAddScrollMetrics((previous) => (
+        previous.canScroll
+          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
+          : previous
+      ))
+      return
+    }
+
+    const thumbHeightPct = Math.min(100, Math.max((node.clientHeight / node.scrollHeight) * 100, 18))
+    const maxThumbTopPct = Math.max(100 - thumbHeightPct, 0)
+    const thumbTopPct = Math.min(maxThumbTopPct, Math.max(0, (node.scrollTop / maxScrollTop) * maxThumbTopPct))
+
+    setQuickAddScrollMetrics((previous) => {
+      if (
+        previous.canScroll === canScroll
+        && Math.abs(previous.thumbTopPct - thumbTopPct) < 0.2
+        && Math.abs(previous.thumbHeightPct - thumbHeightPct) < 0.2
+      ) {
+        return previous
+      }
+
+      return {
+        canScroll,
+        thumbTopPct,
+        thumbHeightPct,
+      }
+    })
+  }, [])
+  useLayoutEffect(() => {
+    updateQuickAddScrollMetrics()
+
+    const node = quickAddScrollRef.current
+    if (!node) {
+      return undefined
+    }
+
+    let animationFrame: number | null = null
+    const scheduleUpdate = () => {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+      }
+
+      animationFrame = window.requestAnimationFrame(updateQuickAddScrollMetrics)
+    }
+
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(scheduleUpdate)
+
+    resizeObserver?.observe(node)
+    if (node.firstElementChild) {
+      resizeObserver?.observe(node.firstElementChild)
+    }
+
+    window.addEventListener('resize', scheduleUpdate)
+
+    return () => {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame)
+      }
+      resizeObserver?.disconnect()
+      window.removeEventListener('resize', scheduleUpdate)
+    }
+  }, [quickAddActivityGroups, updateQuickAddScrollMetrics])
   const summaryViewColumns = useMemo(
     () => buildSummaryViewColumns(selectedSummaryLayoutPreset),
     [selectedSummaryLayoutPreset],
@@ -868,6 +1181,29 @@ function App() {
 
     return [...processing, ...pending, ...finished]
   }, [submissionQueue])
+  const liveHistoryQueueItems = useMemo(
+    () =>
+      submissionQueueDisplayItems.filter((item) =>
+        item.state === 'pending' || item.state === 'running' || item.state === 'error',
+      ),
+    [submissionQueueDisplayItems],
+  )
+  const persistedHistoryEntries = useMemo(
+    () =>
+      [...(historyData?.entries ?? [])].sort((left, right) => {
+        if (left.createdAt !== right.createdAt) {
+          return right.createdAt - left.createdAt
+        }
+
+        if (left.date !== right.date) {
+          return right.date.localeCompare(left.date)
+        }
+
+        return right.startMinute - left.startMinute
+      }),
+    [historyData],
+  )
+  const persistedHistorySubmissions = historyData?.submissions ?? []
 
   const recordVoiceDiagnostic = useCallback((
     eventType: string,
@@ -946,15 +1282,33 @@ function App() {
     }
 
     setSubmissionQueue((previous) => [...previous, queueItem])
-    setIsSubmissionQueueOpen(true)
+    setLastSubmissionNotice('Queued. View in History.')
   }, [settingsStatus])
 
   const timelineExcludeUncategorizedFromDailyTotals =
     settingsStatus?.timelineExcludeUncategorizedFromDailyTotals ?? true
   const timelineShowUncategorizedDailyTotal =
     settingsStatus?.timelineShowUncategorizedDailyTotal ?? true
+  const timelineIncludeExternalInTotals =
+    settingsStatus?.timelineIncludeExternalInTotals ?? true
+  const timelineIncludeInternalInTotals =
+    settingsStatus?.timelineIncludeInternalInTotals ?? false
+  const timelineSeparateEngagementTypeTotals =
+    settingsStatus?.timelineSeparateEngagementTypeTotals ?? true
   const shouldShowTimelineUncategorizedDailyTotal =
     timelineExcludeUncategorizedFromDailyTotals && timelineShowUncategorizedDailyTotal
+  const timelineTotalPreferences = useMemo(
+    () => ({
+      includeExternalInTotals: timelineIncludeExternalInTotals,
+      includeInternalInTotals: timelineIncludeInternalInTotals,
+      excludeUncategorizedFromTotals: timelineExcludeUncategorizedFromDailyTotals,
+    }),
+    [
+      timelineExcludeUncategorizedFromDailyTotals,
+      timelineIncludeExternalInTotals,
+      timelineIncludeInternalInTotals,
+    ],
+  )
 
   const timelineWindow = FULL_DAY_TIMELINE_WINDOW
   const timelineHeaderDate = useMemo(
@@ -990,9 +1344,9 @@ function App() {
   const timelineDayTotalBreakdown = useMemo(
     () => buildTimelineTotalBreakdown(
       timelineEntriesForLayout,
-      timelineExcludeUncategorizedFromDailyTotals,
+      timelineTotalPreferences,
     ),
-    [timelineEntriesForLayout, timelineExcludeUncategorizedFromDailyTotals],
+    [timelineEntriesForLayout, timelineTotalPreferences],
   )
   const shouldShowTimelineDayUncategorizedDailyTotal =
     shouldShowTimelineUncategorizedDailyTotal
@@ -1043,13 +1397,26 @@ function App() {
     () => buildTimelineDayTotalBreakdowns(
       weekTimelineEntriesForLayout,
       weekTimelineDays,
-      timelineExcludeUncategorizedFromDailyTotals,
+      timelineTotalPreferences,
     ),
     [
-      timelineExcludeUncategorizedFromDailyTotals,
+      timelineTotalPreferences,
       weekTimelineDays,
       weekTimelineEntriesForLayout,
     ],
+  )
+  const weekTimelineTotalBreakdown = useMemo(
+    () => buildTimelineTotalBreakdown(
+      weekTimelineEntriesForLayout,
+      timelineTotalPreferences,
+    ),
+    [timelineTotalPreferences, weekTimelineEntriesForLayout],
+  )
+  const displayedSummaryWeekTotalBreakdown = useMemo(
+    () => weeklySummary
+      ? finalizeTimelineTotalBreakdown(weeklySummary.weekTotalBreakdown, timelineTotalPreferences)
+      : null,
+    [timelineTotalPreferences, weeklySummary],
   )
   const baselinePositionedWeekTimelineEntries = useMemo(
     () => positionWeekTimelineEntries(
@@ -1142,6 +1509,120 @@ function App() {
     return values
   }, [engagements])
 
+  const calendarPendingCandidates = useMemo(
+    () => calendarReviewCandidates.filter((candidate) => candidate.reviewState === 'pending'),
+    [calendarReviewCandidates],
+  )
+  const calendarVisibleCandidates = useMemo(
+    () =>
+      calendarReviewCandidates.filter((candidate) =>
+        candidate.reviewState === 'pending' || candidate.reviewState === 'accepted',
+      ),
+    [calendarReviewCandidates],
+  )
+  const calendarTimelineCandidates = useMemo(
+    () =>
+      calendarReviewCandidates.filter((candidate) =>
+        candidate.reviewState === 'pending' || candidate.reviewState === 'accepted',
+      ),
+    [calendarReviewCandidates],
+  )
+  const calendarAcceptedCandidates = useMemo(
+    () => calendarReviewCandidates.filter((candidate) => candidate.reviewState === 'accepted'),
+    [calendarReviewCandidates],
+  )
+  const calendarIgnoredCandidates = useMemo(
+    () =>
+      calendarReviewCandidates.filter((candidate) =>
+        candidate.reviewState === 'ignored' || candidate.reviewState === 'rejected',
+      ),
+    [calendarReviewCandidates],
+  )
+  const selectedCalendarCandidate = useMemo(
+    () =>
+      calendarVisibleCandidates.find((candidate) => candidate.id === selectedCalendarCandidateId)
+      ?? calendarVisibleCandidates[0]
+      ?? null,
+    [calendarVisibleCandidates, selectedCalendarCandidateId],
+  )
+  const selectedCalendarCandidateIndex = useMemo(
+    () =>
+      selectedCalendarCandidate
+        ? calendarVisibleCandidates.findIndex((candidate) => candidate.id === selectedCalendarCandidate.id)
+        : -1,
+    [calendarVisibleCandidates, selectedCalendarCandidate],
+  )
+  const calendarSelectedDate = selectedCalendarCandidate?.date ?? selectedDate
+  const calendarCandidatesForSelectedDate = useMemo(
+    () =>
+      calendarTimelineCandidates.filter((candidate) => candidate.date === calendarSelectedDate),
+    [calendarSelectedDate, calendarTimelineCandidates],
+  )
+  const calendarReviewTimelineEntries = useMemo(
+    () => calendarCandidatesForSelectedDate.map((candidate) =>
+      calendarCandidateToTimelineEntry(candidate),
+    ),
+    [calendarCandidatesForSelectedDate],
+  )
+  const calendarReviewDragState =
+    timelineDragState?.surface === 'calendar-review' ? timelineDragState : null
+  const calendarReviewEntriesForLayout = useMemo(
+    () => applyDragPreviewToTimelineEntries(calendarReviewTimelineEntries, calendarReviewDragState),
+    [calendarReviewDragState, calendarReviewTimelineEntries],
+  )
+  const baselinePositionedCalendarReviewEntries = useMemo(
+    () => positionTimelineEntries(calendarReviewTimelineEntries, timelineWindow),
+    [calendarReviewTimelineEntries, timelineWindow],
+  )
+  const calendarReviewAutoCenterKey = useMemo(
+    () => [
+      calendarSelectedDate,
+      ...calendarCandidatesForSelectedDate.map((candidate) => candidate.id),
+    ].join('|'),
+    [calendarCandidatesForSelectedDate, calendarSelectedDate],
+  )
+  const positionedCalendarReviewEntries = useMemo(
+    () => positionTimelineEntries(
+      calendarReviewEntriesForLayout,
+      timelineWindow,
+      {
+        ...(calendarReviewDragState?.isDragging
+          ? {
+              lockedEntryId: calendarReviewDragState.entryId,
+              lockedLaneIndex: calendarReviewDragState.lockedLaneIndex,
+            }
+          : {}),
+      },
+    ),
+    [calendarReviewDragState, calendarReviewEntriesForLayout, timelineWindow],
+  )
+  const selectedCalendarCandidateActivities = useMemo(() => {
+    if (!selectedCalendarCandidate?.engagementId) {
+      return [] as Activity[]
+    }
+
+    return engagements.find(
+      (engagement) => engagement.id === selectedCalendarCandidate.engagementId,
+    )?.activities ?? []
+  }, [engagements, selectedCalendarCandidate])
+  const selectedCalendarCandidateHasBlockingIssue =
+    selectedCalendarCandidate
+      ? hasCalendarCandidateBlockingIssue(selectedCalendarCandidate)
+      : false
+  const selectedCalendarCandidateCanSave = Boolean(
+    selectedCalendarCandidate
+    && !selectedCalendarCandidateHasBlockingIssue
+    && (
+      selectedCalendarCandidate.reviewState !== 'accepted'
+      || selectedCalendarCandidate.savedEntryId
+    ),
+  )
+  const calendarReadyToSaveCandidates = useMemo(
+    () =>
+      calendarPendingCandidates.filter((candidate) => !hasCalendarCandidateBlockingIssue(candidate)),
+    [calendarPendingCandidates],
+  )
+
   const selectedActivityEngagement = useMemo(
     () => engagements.find((engagement) => engagement.id === activityForm.engagementId) ?? null,
     [activityForm.engagementId, engagements],
@@ -1173,6 +1654,7 @@ function App() {
 
   const openCreateEngagementEditor = useCallback(() => {
     setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    setHasManualEngagementTypeSelection(false)
     setCodeEditorSurface('create-engagement')
     setEditorActivationKey((previous) => previous + 1)
   }, [])
@@ -1190,6 +1672,7 @@ function App() {
   const closeCodeEditor = useCallback(() => {
     if (isEngagementEditorOpen) {
       setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+      setHasManualEngagementTypeSelection(false)
     }
 
     if (isActivityEditorOpen) {
@@ -1248,6 +1731,7 @@ function App() {
       const engagementStillExists = engagements.some((engagement) => engagement.id === engagementForm.id)
       if (!engagementStillExists) {
         setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+        setHasManualEngagementTypeSelection(false)
         setCodeEditorSurface(null)
       }
       return
@@ -1321,7 +1805,9 @@ function App() {
     const status = await settingsGetStatus()
     setSettingsStatus(status)
     setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+    setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
     setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
+    setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
   }, [])
 
   const loadSummaryLayoutState = useCallback(async () => {
@@ -1356,6 +1842,50 @@ function App() {
     const summary = await timelineWeeklySummary({ date })
     setWeeklySummary(summary)
     return summary
+  }, [])
+
+  const loadHistory = useCallback(async (date: string) => {
+    const value = await historyList({ date })
+    setHistoryData(value)
+    return value
+  }, [])
+
+  const loadQuickAddSuggestions = useCallback(async () => {
+    setQuickAddSuggestionsError(null)
+
+    try {
+      const value = await quickAddSuggestions({ limit: QUICK_ADD_DEFAULT_LIMIT })
+      setQuickAddSuggestionItems(value.suggestions)
+      setQuickAddSuggestedKeys((previous) => {
+        const incomingKeys = value.suggestions.map((suggestion) =>
+          quickAddActivityKey(suggestion.engagementId, suggestion.activityId),
+        )
+
+        if (previous.length === 0) {
+          return incomingKeys.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+        }
+
+        const next = previous.slice(0, QUICK_ADD_DEFAULT_LIMIT)
+        const seenKeys = new Set(next)
+
+        for (const key of incomingKeys) {
+          if (next.length >= QUICK_ADD_DEFAULT_LIMIT) {
+            break
+          }
+
+          if (!seenKeys.has(key)) {
+            next.push(key)
+            seenKeys.add(key)
+          }
+        }
+
+        return next
+      })
+      return value
+    } catch (error) {
+      setQuickAddSuggestionsError(extractErrorMessage(error))
+      return null
+    }
   }, [])
 
   const invalidateMonthSummaries = useCallback((monthKeys: string[]) => {
@@ -1405,6 +1935,7 @@ function App() {
           loadTimeline(refreshDate),
           loadWeekTimeline(refreshDate),
           loadWeeklySummary(refreshDate),
+          loadQuickAddSuggestions(),
         ])
       },
     ).then((nextUnlisten) => {
@@ -1425,11 +1956,12 @@ function App() {
     loadTimeline,
     loadWeekTimeline,
     loadWeeklySummary,
+    loadQuickAddSuggestions,
     tauriRuntime,
   ])
 
   useEffect(() => {
-    if (!tauriRuntime) {
+    if (!appRuntime) {
       return
     }
 
@@ -1438,6 +1970,7 @@ function App() {
         setIsBusy(true)
         await Promise.all([
           loadEngagements(),
+          loadQuickAddSuggestions(),
           loadSettings(),
           loadSummaryLayoutState(),
           loadTimeline(todayDate),
@@ -1455,10 +1988,11 @@ function App() {
   }, [
     loadDiagnostics,
     loadEngagements,
+    loadQuickAddSuggestions,
     loadSettings,
     loadSummaryLayoutState,
     loadTimeline,
-    tauriRuntime,
+    appRuntime,
     todayDate,
   ])
 
@@ -1484,7 +2018,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!tauriRuntime || !hasInitializedRef.current) {
+    if (!appRuntime || !hasInitializedRef.current) {
       return
     }
 
@@ -1509,10 +2043,16 @@ function App() {
         setIsTimelineLoading(false)
       }
     })()
-  }, [loadTimeline, selectedDate, tauriRuntime])
+  }, [appRuntime, loadTimeline, selectedDate])
+
+  useEffect(() => () => {
+    if (calendarImagePreviewUrl) {
+      URL.revokeObjectURL(calendarImagePreviewUrl)
+    }
+  }, [calendarImagePreviewUrl])
 
   useEffect(() => {
-    if (!tauriRuntime) {
+    if (!appRuntime) {
       return
     }
 
@@ -1546,7 +2086,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [hasVisibleMonthSummary, loadTimelineMonthSummary, tauriRuntime, visibleMonth])
+  }, [appRuntime, hasVisibleMonthSummary, loadTimelineMonthSummary, visibleMonth])
 
   useEffect(() => {
     if (selectedEntryId && loadedTimelineEntries.every((entry) => entry.id !== selectedEntryId)) {
@@ -1554,15 +2094,20 @@ function App() {
       setEntryDraft(null)
     }
 
+    if (highlightedEntryId && loadedTimelineEntries.every((entry) => entry.id !== highlightedEntryId)) {
+      setHighlightedEntryId(null)
+    }
+
     if (
       timelineContextMenu
       && timelineContextMenu.kind === 'entry'
+      && timelineContextMenu.surface !== 'calendar-review'
       && timelineContextMenu.entryId
       && loadedTimelineEntries.every((entry) => entry.id !== timelineContextMenu.entryId)
     ) {
       setTimelineContextMenu(null)
     }
-  }, [loadedTimelineEntries, selectedEntryId, timelineContextMenu])
+  }, [highlightedEntryId, loadedTimelineEntries, selectedEntryId, timelineContextMenu])
 
   useEffect(() => {
     if (!timelineContextMenu) {
@@ -1607,15 +2152,47 @@ function App() {
   }, [timelineContextMenu])
 
   useEffect(() => {
-    if (!tauriRuntime || activeView !== 'diagnostics') {
+    if (!appRuntime || activeView !== 'diagnostics') {
       return
     }
 
     void loadDiagnostics(diagnosticsFilter)
-  }, [activeView, diagnosticsFilter, loadDiagnostics, tauriRuntime])
+  }, [activeView, appRuntime, diagnosticsFilter, loadDiagnostics])
 
   useEffect(() => {
-    if (!tauriRuntime || !hasInitializedRef.current || activeView !== 'week') {
+    if (!appRuntime || activeView !== 'history') {
+      return
+    }
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        setIsHistoryLoading(true)
+        setHistoryError(null)
+        await loadHistory(selectedDate)
+        if (cancelled) {
+          return
+        }
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+        setHistoryError(formatActionErrorMessage(error))
+      } finally {
+        if (!cancelled) {
+          setIsHistoryLoading(false)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeView, appRuntime, loadHistory, selectedDate])
+
+  useEffect(() => {
+    if (!appRuntime || !hasInitializedRef.current || activeView !== 'week') {
       return
     }
 
@@ -1647,10 +2224,10 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [activeView, loadWeekTimeline, selectedDate, tauriRuntime])
+  }, [activeView, appRuntime, loadWeekTimeline, selectedDate])
 
   useEffect(() => {
-    if (!tauriRuntime || !hasInitializedRef.current || activeView !== 'summary') {
+    if (!appRuntime || !hasInitializedRef.current || activeView !== 'summary') {
       return
     }
 
@@ -1682,10 +2259,15 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [activeView, loadWeeklySummary, selectedDate, tauriRuntime])
+  }, [activeView, appRuntime, loadWeeklySummary, selectedDate])
 
   useEffect(() => {
-    if (activeView !== 'timeline' && activeView !== 'week' && timelineContextMenu) {
+    if (
+      activeView !== 'timeline'
+      && activeView !== 'week'
+      && timelineContextMenu
+      && timelineContextMenu.surface !== 'calendar-review'
+    ) {
       setTimelineContextMenu(null)
     }
   }, [activeView, timelineContextMenu])
@@ -1889,6 +2471,55 @@ function App() {
   }, [activeView, baselinePositionedTimelineEntries, selectedDate])
 
   useEffect(() => {
+    if (!isCalendarBulkModalOpen || calendarBulkTab !== 'review') {
+      return
+    }
+
+    const grid = calendarReviewTimelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    if (calendarReviewAutoCenterKeyRef.current === calendarReviewAutoCenterKey) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      if (baselinePositionedCalendarReviewEntries.length === 0) {
+        grid.scrollTop = 0
+        calendarReviewAutoCenterKeyRef.current = calendarReviewAutoCenterKey
+        return
+      }
+
+      const earliestEntry = baselinePositionedCalendarReviewEntries.reduce((earliest, current) =>
+        current.top < earliest.top ? current : earliest,
+      )
+      const targetTop = (
+        earliestEntry.top
+        - (grid.clientHeight / 2)
+        + (earliestEntry.height / 2)
+      )
+      const maxScrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
+      const clampedScrollTop = Math.min(Math.max(0, targetTop), maxScrollTop)
+
+      grid.scrollTo({
+        top: clampedScrollTop,
+        behavior: 'auto',
+      })
+      calendarReviewAutoCenterKeyRef.current = calendarReviewAutoCenterKey
+    })
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+    }
+  }, [
+    baselinePositionedCalendarReviewEntries,
+    calendarBulkTab,
+    calendarReviewAutoCenterKey,
+    isCalendarBulkModalOpen,
+  ])
+
+  useEffect(() => {
     if (!successMessage) {
       return
     }
@@ -1908,9 +2539,20 @@ function App() {
       loadTimeline(selectedDate),
       loadWeekTimeline(selectedDate),
       loadSettings(),
+      loadHistory(selectedDate),
       loadWeeklySummary(selectedDate),
+      loadQuickAddSuggestions(),
     ])
-  }, [loadEngagements, loadSettings, loadTimeline, loadWeekTimeline, loadWeeklySummary, selectedDate])
+  }, [
+    loadEngagements,
+    loadHistory,
+    loadQuickAddSuggestions,
+    loadSettings,
+    loadTimeline,
+    loadWeekTimeline,
+    loadWeeklySummary,
+    selectedDate,
+  ])
 
   const runAction = useCallback(
     async (action: () => Promise<void>, options?: RunActionOptions) => {
@@ -1944,8 +2586,20 @@ function App() {
     [],
   )
 
+  const setQuickBlockDragStateWithRef = useCallback(
+    (updater: (previous: QuickBlockDragState | null) => QuickBlockDragState | null) => {
+      setQuickBlockDragState((previous) => {
+        const next = updater(previous)
+        quickBlockDragStateRef.current = next
+        return next
+      })
+    },
+    [],
+  )
+
   const clearTimelineSelection = useCallback(() => {
     setSelectedEntryId(null)
+    setHighlightedEntryId(null)
     setEntryDraft(null)
     setTimelineContextMenu(null)
     setTimelineDragStateWithRef(() => null)
@@ -1975,6 +2629,49 @@ function App() {
 
   const commitTimelineDragDrop = useCallback(
     (dragState: TimelineDragState) => {
+      if (dragState.surface === 'calendar-review') {
+        const candidateId = getCalendarCandidateIdFromTimelineEntryId(dragState.entryId)
+        const draggedCandidate = candidateId
+          ? calendarReviewCandidates.find((candidate) => candidate.id === candidateId)
+          : null
+        if (!candidateId || !draggedCandidate) {
+          setTimelineDragStateWithRef(() => null)
+          return
+        }
+
+        const hasMoved =
+          dragState.previewDate !== dragState.originalDate
+          || dragState.previewStartMinute !== dragState.originalStartMinute
+          || dragState.previewEndMinute !== dragState.originalEndMinute
+        if (!hasMoved) {
+          setTimelineDragStateWithRef(() => null)
+          return
+        }
+
+        const nextDurationMinutes = Math.max(
+          dragState.previewEndMinute - dragState.previewStartMinute,
+          TIMELINE_DRAG_SNAP_MINUTES,
+        )
+        setCalendarReviewCandidates((previous) =>
+          previous.map((candidate) =>
+            candidate.id === candidateId
+              ? {
+                  ...candidate,
+                  date: dragState.previewDate,
+                  startMinute: dragState.previewStartMinute,
+                  endMinute: dragState.previewEndMinute,
+                  durationMinutes: nextDurationMinutes,
+                  needsTimeConfirmation: false,
+                }
+              : candidate,
+          ),
+        )
+        setSelectedCalendarCandidateId(candidateId)
+        setCalendarUploadStatusMessage('Updated staged calendar event time.')
+        setTimelineDragStateWithRef(() => null)
+        return
+      }
+
       const draggedEntry = timelineEntriesRef.current.find((entry) => entry.id === dragState.entryId) ?? null
       if (!draggedEntry) {
         setTimelineDragStateWithRef(() => null)
@@ -2091,6 +2788,7 @@ function App() {
             loadTimeline(refreshDate),
             loadWeekTimeline(refreshDate),
             loadWeeklySummary(refreshDate),
+            loadQuickAddSuggestions(),
           ])
         } catch (error) {
           setErrorMessage(formatActionErrorMessage(error))
@@ -2100,10 +2798,12 @@ function App() {
       })()
     },
     [
+      calendarReviewCandidates,
       entryDraft,
       invalidateMonthSummaries,
       loadTimeline,
       loadWeekTimeline,
+      loadQuickAddSuggestions,
       loadWeeklySummary,
       setTimelineLanePreferences,
       setTimelineDragStateWithRef,
@@ -2177,7 +2877,9 @@ function App() {
         await Promise.allSettled([
           loadTimeline(refreshDate),
           loadWeekTimeline(refreshDate),
+          loadHistory(refreshDate),
           loadWeeklySummary(refreshDate),
+          loadQuickAddSuggestions(),
         ])
       } catch (error) {
         const completedAt = Date.now()
@@ -2205,6 +2907,8 @@ function App() {
       invalidateMonthSummaries,
       loadTimeline,
       loadWeekTimeline,
+      loadHistory,
+      loadQuickAddSuggestions,
       loadWeeklySummary,
       trimSubmissionQueue,
     ],
@@ -2499,7 +3203,7 @@ function App() {
       }
       queueItemId = queueItem.id
       setSubmissionQueue((previous) => [...previous, queueItem])
-      setIsSubmissionQueueOpen(true)
+      setLastSubmissionNotice('Voice note queued. View in History.')
 
       const transcription = await transcribeRecordedVoiceBlob(recording)
       setSubmissionQueue((previous) =>
@@ -2640,7 +3344,11 @@ function App() {
         return
       }
 
-      const grid = current.surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
+      const grid = current.surface === 'week'
+        ? weekTimelineGridRef.current
+        : current.surface === 'calendar-review'
+          ? calendarReviewTimelineGridRef.current
+          : timelineGridRef.current
       if (!grid) {
         return
       }
@@ -2777,6 +3485,498 @@ function App() {
     }
   }, [processSubmissionQueueItem, submissionQueue])
 
+  const openCalendarBulkModal = () => {
+    calendarReviewAutoCenterKeyRef.current = null
+    setIsCalendarBulkModalOpen(true)
+    setCalendarBulkTab(calendarVisibleCandidates.length > 0 ? 'review' : 'submission')
+    setCalendarUploadErrorMessage(null)
+    setCalendarUploadStatusMessage(null)
+  }
+
+  const resetCalendarBulkModal = useCallback(() => {
+    if (calendarImagePreviewUrl) {
+      URL.revokeObjectURL(calendarImagePreviewUrl)
+    }
+    setIsCalendarBulkModalOpen(false)
+    setCalendarBulkTab('submission')
+    setCalendarSelectedFileName(null)
+    setCalendarImagePreviewUrl(null)
+    setCalendarStagedImage(null)
+    setCalendarUploadStatusMessage(null)
+    setCalendarUploadErrorMessage(null)
+    setCalendarIsExtracting(false)
+    setCalendarIsImporting(false)
+    setCalendarReviewCandidates([])
+    setSelectedCalendarCandidateId(null)
+    calendarReviewAutoCenterKeyRef.current = null
+    setTimelineContextMenu(null)
+    setTimelineDragStateWithRef(() => null)
+  }, [calendarImagePreviewUrl, setTimelineDragStateWithRef])
+
+  useEffect(() => {
+    if (!isCalendarBulkModalOpen) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        resetCalendarBulkModal()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isCalendarBulkModalOpen, resetCalendarBulkModal])
+
+  const updateCalendarCandidate = (
+    id: string,
+    updater: (candidate: CalendarReviewCandidate) => CalendarReviewCandidate,
+  ) => {
+    setCalendarReviewCandidates((previous) =>
+      previous.map((candidate) => (candidate.id === id ? updater(candidate) : candidate)),
+    )
+  }
+
+  const onCreateCalendarCandidateAtMinute = (date: string, anchorMinute: number) => {
+    if (calendarIsImporting) {
+      return
+    }
+
+    const { startMinute, endMinute } = resolveManualTimelineCreateWindow(anchorMinute, timelineWindow)
+    const id = generateCalendarCandidateId()
+    const warningFlags: WarningType[] = ['unmatched']
+    const nextCandidate: CalendarReviewCandidate = {
+      id,
+      date,
+      startMinute,
+      endMinute,
+      durationMinutes: Math.max(1, endMinute - startMinute),
+      timeEvidence: null,
+      description: '',
+      extractedText: '',
+      sourceText: '',
+      confidence: 1,
+      engagementId: null,
+      activityId: null,
+      engagementCode: null,
+      engagementName: null,
+      engagementType: null,
+      activityCode: null,
+      activityName: null,
+      warningFlags,
+      isAllDay: false,
+      isIgnored: false,
+      ignoredReason: null,
+      needsDateConfirmation: false,
+      needsTimeConfirmation: false,
+      reviewState: 'pending',
+    }
+
+    setCalendarReviewCandidates((previous) => [...previous, nextCandidate])
+    setSelectedCalendarCandidateId(id)
+    setCalendarUploadStatusMessage('Added staged calendar event.')
+  }
+
+  const onDeleteCalendarCandidate = (candidateId: string) => {
+    if (calendarIsImporting) {
+      return
+    }
+
+    const nextCandidateId = resolveNextCalendarCandidateId(candidateId)
+    updateCalendarCandidate(candidateId, (candidate) => ({
+      ...candidate,
+      reviewState: 'rejected',
+    }))
+    setSelectedCalendarCandidateId((previous) =>
+      previous === candidateId ? nextCandidateId : previous,
+    )
+    setTimelineContextMenu(null)
+    setCalendarUploadStatusMessage('Deleted staged calendar event.')
+  }
+
+  const handleCalendarImageFile = async (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      setCalendarUploadErrorMessage('Choose an image file for calendar bulk add.')
+      return
+    }
+
+    try {
+      setCalendarUploadErrorMessage(null)
+      setCalendarUploadStatusMessage('Reading calendar screenshot...')
+      const imageBase64 = await blobToBase64(file)
+      const previewUrl = URL.createObjectURL(file)
+      if (calendarImagePreviewUrl) {
+        URL.revokeObjectURL(calendarImagePreviewUrl)
+      }
+      setCalendarImagePreviewUrl(previewUrl)
+      setCalendarSelectedFileName(file.name)
+      setCalendarStagedImage({
+        imageBase64,
+        mimeType: file.type || 'image/png',
+      })
+      setCalendarReviewCandidates([])
+      setSelectedCalendarCandidateId(null)
+      calendarReviewAutoCenterKeyRef.current = null
+      setCalendarUploadStatusMessage('Screenshot ready. Click Submit to extract events.')
+    } catch (error) {
+      setCalendarUploadErrorMessage(extractErrorMessage(error))
+    }
+  }
+
+  const onSubmitCalendarScreenshot = () => {
+    if (!calendarStagedImage || calendarIsExtracting) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setCalendarIsExtracting(true)
+        setCalendarUploadErrorMessage(null)
+        const submittedAt = new Date()
+        setCalendarUploadStatusMessage('Extracting events from screenshot...')
+        const result = await calendarExtractEvents({
+          imageBase64: calendarStagedImage.imageBase64,
+          mimeType: calendarStagedImage.mimeType,
+          clientTimestampIso: submittedAt.toISOString(),
+          clientLocalDate: formatDate(submittedAt),
+          clientLocalTime: formatLocalTime(submittedAt),
+          clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+          selectedDate,
+          openAiModel: settingsStatus?.selectedCalendarBulkModel ?? DEFAULT_CALENDAR_BULK_MODEL,
+          ignoredKeywords: parseCalendarIgnoredKeywordDraft(calendarIgnoredKeywordDraft),
+          ignoreAllDayEvents: settingsStatus?.calendarBulkIgnoreAllDayEvents ?? true,
+        })
+        const nextCandidates = result.candidates.map((candidate): CalendarReviewCandidate => ({
+          ...candidate,
+          reviewState: candidate.isIgnored ? 'ignored' : 'pending',
+        }))
+        const firstVisibleCandidate = nextCandidates.find((candidate) => candidate.reviewState !== 'ignored')
+        setCalendarReviewCandidates(nextCandidates)
+        setSelectedCalendarCandidateId(firstVisibleCandidate?.id ?? null)
+        calendarReviewAutoCenterKeyRef.current = null
+        setCalendarBulkTab('review')
+        setCalendarUploadStatusMessage(
+          `Found ${nextCandidates.length - result.ignoredCandidateCount} review event${
+            nextCandidates.length - result.ignoredCandidateCount === 1 ? '' : 's'
+          } using ${result.modelUsedLabel}.`,
+        )
+      } catch (error) {
+        setCalendarUploadErrorMessage(extractErrorMessage(error))
+      } finally {
+        setCalendarIsExtracting(false)
+      }
+    })()
+  }
+
+  const handleCalendarFileList = (files: FileList | File[]) => {
+    const [file] = Array.from(files)
+    if (!file) {
+      return
+    }
+
+    void handleCalendarImageFile(file)
+  }
+
+  const onCalendarPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
+    const imageItem = Array.from(event.clipboardData.items).find((item) =>
+      item.type.startsWith('image/'),
+    )
+    const file = imageItem?.getAsFile()
+    if (!file) {
+      setCalendarUploadStatusMessage('No image found in the clipboard.')
+      return
+    }
+
+    event.preventDefault()
+    void handleCalendarImageFile(file)
+  }
+
+  const onReadCalendarImageFromClipboard = async () => {
+    const clipboard = navigator.clipboard as Clipboard & {
+      read?: () => Promise<ClipboardItem[]>
+    }
+
+    if (!clipboard?.read) {
+      calendarDropZoneRef.current?.focus()
+      setCalendarUploadStatusMessage('Focus is ready. Press Ctrl+V to paste a screenshot.')
+      return
+    }
+
+    try {
+      const items = await clipboard.read()
+      for (const item of items) {
+        const imageType = item.types.find((type) => type.startsWith('image/'))
+        if (!imageType) {
+          continue
+        }
+
+        const blob = await item.getType(imageType)
+        const file = new File([blob], 'calendar-screenshot.png', { type: imageType })
+        await handleCalendarImageFile(file)
+        return
+      }
+
+      setCalendarUploadStatusMessage('No image found in the clipboard.')
+    } catch (error) {
+      calendarDropZoneRef.current?.focus()
+      setCalendarUploadStatusMessage(
+        `Clipboard image access was unavailable. Press Ctrl+V in the upload area. ${extractErrorMessage(error)}`,
+      )
+    }
+  }
+
+  const onCalendarCandidateEngagementChange = (candidateId: string, engagementId: string) => {
+    const engagement = engagements.find((candidate) => candidate.id === engagementId) ?? null
+    updateCalendarCandidate(candidateId, (candidate) => {
+      const nextCandidate = {
+        ...candidate,
+        engagementId: engagement?.id ?? null,
+        engagementCode: engagement?.code ?? null,
+        engagementName: engagement?.name ?? null,
+        activityId: null,
+        activityCode: null,
+        activityName: null,
+      }
+      return {
+        ...nextCandidate,
+        warningFlags: refreshCalendarCandidateWarnings(nextCandidate),
+      }
+    })
+  }
+
+  const onCalendarCandidateActivityChange = (candidateId: string, activityId: string) => {
+    const currentCandidate = calendarReviewCandidates.find((candidate) => candidate.id === candidateId)
+    const engagement = engagements.find(
+      (candidate) => candidate.id === currentCandidate?.engagementId,
+    ) ?? null
+    const activity = engagement?.activities.find((candidate) => candidate.id === activityId) ?? null
+    updateCalendarCandidate(candidateId, (candidate) => {
+      const nextCandidate = {
+        ...candidate,
+        activityId: activity?.id ?? null,
+        activityCode: activity?.code ?? null,
+        activityName: activity?.name ?? null,
+      }
+      return {
+        ...nextCandidate,
+        warningFlags: refreshCalendarCandidateWarnings(nextCandidate),
+      }
+    })
+  }
+
+  const onSelectAdjacentCalendarCandidate = (direction: -1 | 1) => {
+    if (calendarVisibleCandidates.length === 0 || selectedCalendarCandidateIndex < 0) {
+      return
+    }
+
+    const nextIndex = Math.min(
+      calendarVisibleCandidates.length - 1,
+      Math.max(0, selectedCalendarCandidateIndex + direction),
+    )
+    setSelectedCalendarCandidateId(calendarVisibleCandidates[nextIndex]?.id ?? null)
+  }
+
+  const resolveNextCalendarCandidateId = (currentCandidateId: string) => {
+    const currentIndex = calendarVisibleCandidates.findIndex(
+      (candidate) => candidate.id === currentCandidateId,
+    )
+    if (currentIndex < 0) {
+      return calendarVisibleCandidates[0]?.id ?? null
+    }
+
+    return (
+      calendarVisibleCandidates[currentIndex + 1]?.id
+      ?? calendarVisibleCandidates[currentIndex - 1]?.id
+      ?? null
+    )
+  }
+
+  const onSaveSelectedCalendarCandidate = () => {
+    if (!selectedCalendarCandidate || !selectedCalendarCandidateCanSave || calendarIsImporting) {
+      return
+    }
+
+    const candidateToSave = selectedCalendarCandidate
+    if (candidateToSave.reviewState === 'accepted') {
+      const savedEntryId = candidateToSave.savedEntryId
+      if (!savedEntryId) {
+        return
+      }
+
+      void runAction(async () => {
+        setCalendarIsImporting(true)
+        setCalendarUploadErrorMessage(null)
+        const previousMonthKey = monthKeyFromDate(candidateToSave.savedEntryDate ?? candidateToSave.date)
+        const nextMonthKey = monthKeyFromDate(candidateToSave.date)
+
+        await timelineUpdateEntry({
+          id: savedEntryId,
+          engagementId: candidateToSave.engagementId,
+          activityId: candidateToSave.activityId,
+          mode: 'manual',
+          date: candidateToSave.date,
+          startMinute: candidateToSave.startMinute,
+          endMinute: candidateToSave.endMinute,
+          description: candidateToSave.description,
+        })
+
+        invalidateMonthSummaries([previousMonthKey, nextMonthKey])
+        await Promise.all([
+          loadTimeline(selectedDateRef.current),
+          loadWeekTimeline(selectedDateRef.current),
+          loadWeeklySummary(selectedDateRef.current),
+          loadQuickAddSuggestions(),
+        ])
+        setCalendarReviewCandidates((previous) =>
+          previous.map((candidate) =>
+            candidate.id === candidateToSave.id
+              ? {
+                  ...candidate,
+                  savedEntryDate: candidateToSave.date,
+                }
+              : candidate,
+          ),
+        )
+        setSelectedCalendarCandidateId(candidateToSave.id)
+        setCalendarUploadStatusMessage('Updated saved calendar event.')
+      }).finally(() => {
+        setCalendarIsImporting(false)
+      })
+      return
+    }
+
+    const nextCandidateId = resolveNextCalendarCandidateId(candidateToSave.id)
+
+    void runAction(async () => {
+      setCalendarIsImporting(true)
+      setCalendarUploadErrorMessage(null)
+      const submittedAt = new Date()
+      const result = await calendarImportEntries({
+        clientTimestampIso: submittedAt.toISOString(),
+        clientLocalDate: formatDate(submittedAt),
+        clientLocalTime: formatLocalTime(submittedAt),
+        clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        entries: [
+          {
+            date: candidateToSave.date,
+            startMinute: candidateToSave.startMinute,
+            endMinute: candidateToSave.endMinute,
+            description: candidateToSave.description,
+            extractedText:
+              candidateToSave.extractedText
+              || candidateToSave.sourceText
+              || candidateToSave.description,
+            engagementId: candidateToSave.engagementId,
+            activityId: candidateToSave.activityId,
+            confidence: candidateToSave.confidence,
+          },
+        ],
+      })
+
+      invalidateMonthSummaries(result.touchedMonthKeys)
+      await Promise.all([
+        loadTimeline(selectedDateRef.current),
+        loadWeekTimeline(selectedDateRef.current),
+        loadWeeklySummary(selectedDateRef.current),
+        loadQuickAddSuggestions(),
+      ])
+      setCalendarReviewCandidates((previous) =>
+        previous.map((candidate) =>
+          candidate.id === candidateToSave.id
+            ? {
+                ...candidate,
+                reviewState: 'accepted',
+                savedEntryId: result.createdEntryIds[0] ?? null,
+                savedEntryDate: candidateToSave.date,
+              }
+            : candidate,
+        ),
+      )
+      setSelectedCalendarCandidateId(nextCandidateId)
+      setCalendarUploadStatusMessage('Saved calendar event to the timeline.')
+    }).finally(() => {
+      setCalendarIsImporting(false)
+    })
+  }
+
+  const onSaveAllReadyCalendarCandidates = () => {
+    if (calendarReadyToSaveCandidates.length === 0 || calendarIsImporting) {
+      return
+    }
+
+    const candidatesToSave = calendarReadyToSaveCandidates
+    const candidateIdsToSave = new Set(candidatesToSave.map((candidate) => candidate.id))
+
+    void runAction(async () => {
+      setCalendarIsImporting(true)
+      setCalendarUploadErrorMessage(null)
+      const submittedAt = new Date()
+      const result = await calendarImportEntries({
+        clientTimestampIso: submittedAt.toISOString(),
+        clientLocalDate: formatDate(submittedAt),
+        clientLocalTime: formatLocalTime(submittedAt),
+        clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        entries: candidatesToSave.map((candidate) => ({
+          date: candidate.date,
+          startMinute: candidate.startMinute,
+          endMinute: candidate.endMinute,
+          description: candidate.description,
+          extractedText: candidate.extractedText || candidate.sourceText || candidate.description,
+          engagementId: candidate.engagementId,
+          activityId: candidate.activityId,
+          confidence: candidate.confidence,
+        })),
+      })
+
+      invalidateMonthSummaries(result.touchedMonthKeys)
+      await Promise.all([
+        loadTimeline(selectedDateRef.current),
+        loadWeekTimeline(selectedDateRef.current),
+        loadWeeklySummary(selectedDateRef.current),
+        loadQuickAddSuggestions(),
+      ])
+      const createdEntryIdByCandidateId = new Map(
+        candidatesToSave.map((candidate, index) => [
+          candidate.id,
+          result.createdEntryIds[index] ?? null,
+        ]),
+      )
+      setCalendarReviewCandidates((previous) =>
+        previous.map((candidate) =>
+          candidateIdsToSave.has(candidate.id)
+            ? {
+                ...candidate,
+                reviewState: 'accepted',
+                savedEntryId: createdEntryIdByCandidateId.get(candidate.id) ?? null,
+                savedEntryDate: candidate.date,
+              }
+            : candidate,
+        ),
+      )
+      resetCalendarBulkModal()
+      setSuccessMessage(
+        `Saved ${result.createdEntryIds.length} calendar event${
+          result.createdEntryIds.length === 1 ? '' : 's'
+        } to the timeline.`,
+      )
+    }).finally(() => {
+      setCalendarIsImporting(false)
+    })
+  }
+
+  const onDeleteSelectedCalendarCandidate = () => {
+    if (!selectedCalendarCandidate || calendarIsImporting) {
+      return
+    }
+
+    onDeleteCalendarCandidate(selectedCalendarCandidate.id)
+  }
+
   const onSubmitCapture = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (voiceCaptureState === 'recording') {
@@ -2828,6 +4028,7 @@ function App() {
         code: engagementForm.code.trim() || null,
         name: engagementForm.name,
         client: engagementForm.client || null,
+        engagementType: engagementForm.engagementType,
         colorHex,
         describeWhenToUse,
         tags: parseTagInput(engagementForm.tags),
@@ -2835,6 +4036,7 @@ function App() {
       })
 
       setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+      setHasManualEngagementTypeSelection(false)
       await refreshAfterMutation()
       if (isEditing) {
         setCodeEditorSurface(null)
@@ -2857,11 +4059,13 @@ function App() {
   const onEditEngagement = (engagement: Engagement) => {
     setExpandedEngagementId(engagement.id)
     setCodeEditorSurface('edit-engagement')
+    setHasManualEngagementTypeSelection(false)
     setEngagementForm({
       id: engagement.id,
       code: engagement.code ?? '',
       name: engagement.name,
       client: engagement.client ?? '',
+      engagementType: engagement.engagementType,
       colorHex: engagement.colorHex ?? '',
       describeWhenToUse: engagement.describeWhenToUse ?? '',
       tags: joinTags(engagement.tags),
@@ -2960,6 +4164,7 @@ function App() {
     if (options?.syncSelectedDate) {
       updateSelectedDate(entry.date, { clearSelection: false })
     }
+    setHighlightedEntryId(null)
     setSelectedEntryId(entry.id)
     setEntryDraft(buildEntryDraft(entry))
   }
@@ -2971,6 +4176,15 @@ function App() {
     }
 
     onSelectEntry(entry)
+  }
+
+  const onSelectCalendarReviewBlock = (candidateId: string) => {
+    if (suppressTimelineClickRef.current) {
+      suppressTimelineClickRef.current = false
+      return
+    }
+
+    setSelectedCalendarCandidateId(candidateId)
   }
 
   const onSelectWeekTimelineBlock = (entry: TimelineEntry) => {
@@ -3048,6 +4262,56 @@ function App() {
     }))
   }
 
+  const onStartCalendarReviewDrag = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    entry: TimelineEntry,
+    candidateId: string,
+  ) => {
+    if (event.button !== 0 || isBusy || calendarIsImporting) {
+      return
+    }
+
+    const grid = calendarReviewTimelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const durationMinutes = Math.max(
+      entry.endMinute - entry.startMinute,
+      TIMELINE_DRAG_SNAP_MINUTES,
+    )
+    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    const pointerOffsetMinutes = Math.min(
+      durationMinutes,
+      Math.max(0, pointerMinute - entry.startMinute),
+    )
+
+    event.preventDefault()
+    suppressTimelineClickRef.current = false
+    setSelectedCalendarCandidateId(candidateId)
+    const lockedLaneIndex = baselinePositionedCalendarReviewEntries.find(
+      (positionedEntry) => positionedEntry.entry.id === entry.id,
+    )?.laneIndex ?? 0
+
+    setTimelineDragStateWithRef(() => ({
+      surface: 'calendar-review',
+      entryId: entry.id,
+      pointerId: event.pointerId,
+      initialClientX: event.clientX,
+      initialClientY: event.clientY,
+      lockedLaneIndex,
+      pointerOffsetMinutes,
+      durationMinutes,
+      originalDate: entry.date,
+      originalStartMinute: entry.startMinute,
+      originalEndMinute: entry.endMinute,
+      previewDate: entry.date,
+      previewStartMinute: entry.startMinute,
+      previewEndMinute: entry.endMinute,
+      isDragging: false,
+    }))
+  }
+
   const onOpenTimelineContextMenu = (
     event: ReactMouseEvent<HTMLButtonElement>,
     entry: TimelineEntry,
@@ -3089,12 +4353,212 @@ function App() {
     const position = clampTimelineContextMenuPosition(event.clientX, event.clientY, 'entry')
     setTimelineContextMenu({
       kind: 'entry',
+      surface,
       entryId: entry.id,
       createDate: entry.date,
       createStartMinute: startMinute,
       x: position.x,
       y: position.y,
     })
+  }
+
+  const onOpenCalendarReviewContextMenu = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    entry: TimelineEntry,
+    candidateId: string,
+  ) => {
+    event.preventDefault()
+
+    if (isBusy || calendarIsImporting || timelineDragState?.isDragging) {
+      return
+    }
+
+    event.stopPropagation()
+    setSelectedCalendarCandidateId(candidateId)
+
+    const grid = calendarReviewTimelineGridRef.current
+    const pointerMinute = grid
+      ? clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+      : entry.startMinute
+    const { startMinute } = resolveManualTimelineCreateWindow(pointerMinute, timelineWindow)
+    const position = clampTimelineContextMenuPosition(event.clientX, event.clientY, 'entry')
+    setTimelineContextMenu({
+      kind: 'entry',
+      surface: 'calendar-review',
+      entryId: candidateId,
+      createDate: entry.date,
+      createStartMinute: startMinute,
+      x: position.x,
+      y: position.y,
+    })
+  }
+
+  const scrollDayTimelineToEntry = useCallback((entry: TimelineEntry) => {
+    const runScroll = () => {
+      const grid = timelineGridRef.current
+      if (!grid) {
+        return
+      }
+
+      const top = (
+        TIMELINE_CANVAS_TOP_PADDING
+        + (entry.startMinute - timelineWindow.startMinute) * PIXELS_PER_MINUTE
+      )
+      const height = Math.max(
+        TIMELINE_DRAG_SNAP_MINUTES,
+        entry.endMinute - entry.startMinute,
+      ) * PIXELS_PER_MINUTE
+      const targetTop = top - (grid.clientHeight / 2) + (height / 2)
+      const maxScrollTop = Math.max(0, grid.scrollHeight - grid.clientHeight)
+      const clampedScrollTop = Math.min(Math.max(0, targetTop), maxScrollTop)
+
+      grid.scrollTo({
+        top: clampedScrollTop,
+        behavior: 'smooth',
+      })
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(runScroll)
+    })
+  }, [timelineWindow])
+
+  const createQuickBlockEntry = useCallback(
+    (engagement: Engagement, activity: Activity, durationMinutes: number) => {
+      if (isBusy) {
+        return
+      }
+
+      const safeDuration = clampQuickBlockDuration(durationMinutes)
+      const endMinute = currentRoundedTimelineEndMinute()
+      const startMinute = Math.max(0, endMinute - safeDuration)
+      const date = selectedDateRef.current
+      const monthKey = monthKeyFromDate(date)
+
+      void runAction(async () => {
+        const result = await timelineCreateEntry({
+          date,
+          startMinute,
+          endMinute,
+          engagementId: engagement.id,
+          activityId: activity.id,
+          description: '',
+        })
+
+        setActiveView('timeline')
+        updateSelectedDate(date, { clearSelection: false })
+        setSelectedEntryId(null)
+        setEntryDraft(null)
+        pendingAutoCenterDateRef.current = null
+
+        const [entries] = await Promise.all([
+          loadTimeline(date),
+          loadWeekTimeline(date),
+          loadHistory(date),
+          loadWeeklySummary(date),
+        ])
+        invalidateMonthSummaries([monthKey])
+        const createdEntry = entries.find((entry) => entry.id === result.id)
+        if (createdEntry) {
+          setHighlightedEntryId(result.id)
+          scrollDayTimelineToEntry(createdEntry)
+        }
+        setSuccessMessage(`Added ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
+      })
+    },
+    [
+      invalidateMonthSummaries,
+      isBusy,
+      loadHistory,
+      loadTimeline,
+      loadWeekTimeline,
+      loadWeeklySummary,
+      runAction,
+      scrollDayTimelineToEntry,
+      updateSelectedDate,
+    ],
+  )
+
+  const onQuickBlockActivityPointerDown = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    engagement: Engagement,
+    activity: Activity,
+  ) => {
+    if (event.button !== 0 || isBusy || activity.isActive === false) {
+      return
+    }
+
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setHighlightedEntryId(null)
+    setQuickBlockDragStateWithRef(() => ({
+      engagementId: engagement.id,
+      activityId: activity.id,
+      activityName: activity.name,
+      pointerId: event.pointerId,
+      originClientX: event.clientX,
+      currentClientX: event.clientX,
+      durationMinutes: TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
+      isDragging: false,
+    }))
+  }
+
+  const onQuickBlockActivityPointerMove = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    const current = quickBlockDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId) {
+      return
+    }
+
+    const nextDuration = quickBlockDurationFromDrag(
+      current.originClientX,
+      event.clientX,
+    )
+    const nextIsDragging =
+      current.isDragging
+      || Math.abs(event.clientX - current.originClientX) >= TIMELINE_DRAG_ACTIVATION_PX
+
+    setQuickBlockDragStateWithRef(() => ({
+      ...current,
+      currentClientX: event.clientX,
+      durationMinutes: nextDuration,
+      isDragging: nextIsDragging,
+    }))
+  }
+
+  const onQuickBlockActivityPointerUp = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    engagement: Engagement,
+    activity: Activity,
+  ) => {
+    const current = quickBlockDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId) {
+      return
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+
+    event.preventDefault()
+    setQuickBlockDragStateWithRef(() => null)
+    createQuickBlockEntry(engagement, activity, current.durationMinutes)
+  }
+
+  const onQuickBlockActivityPointerCancel = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    const current = quickBlockDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId) {
+      return
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+
+    setQuickBlockDragStateWithRef(() => null)
   }
 
   const onCreateTimelineEntryAtMinute = useCallback(
@@ -3112,6 +4576,7 @@ function App() {
           loadTimeline(date),
           loadWeekTimeline(date),
           loadWeeklySummary(date),
+          loadQuickAddSuggestions(),
         ])
         invalidateMonthSummaries([monthKeyFromDate(date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
@@ -3123,7 +4588,16 @@ function App() {
         setSuccessMessage('Timeline entry created.')
       })
     },
-    [invalidateMonthSummaries, loadTimeline, loadWeekTimeline, loadWeeklySummary, runAction, timelineWindow, updateSelectedDate],
+    [
+      invalidateMonthSummaries,
+      loadQuickAddSuggestions,
+      loadTimeline,
+      loadWeekTimeline,
+      loadWeeklySummary,
+      runAction,
+      timelineWindow,
+      updateSelectedDate,
+    ],
   )
 
   const onCreateTimelineEntryFromContextMenu = () => {
@@ -3134,7 +4608,26 @@ function App() {
     const date = timelineContextMenu.createDate
     const startMinute = timelineContextMenu.createStartMinute
     setTimelineContextMenu(null)
+    if (timelineContextMenu.surface === 'calendar-review') {
+      onCreateCalendarCandidateAtMinute(date, startMinute)
+      return
+    }
+
     onCreateTimelineEntryAtMinute(date, startMinute)
+  }
+
+  const onDeleteTimelineContextMenuEntry = () => {
+    if (!timelineContextMenu || timelineContextMenu.kind !== 'entry') {
+      return
+    }
+
+    const entryId = timelineContextMenu.entryId
+    if (timelineContextMenu.surface === 'calendar-review') {
+      onDeleteCalendarCandidate(entryId)
+      return
+    }
+
+    onDeleteTimelineEntry(entryId)
   }
 
   const onOpenTimelineEmptyContextMenu = (
@@ -3178,7 +4671,39 @@ function App() {
     const position = clampTimelineContextMenuPosition(event.clientX, event.clientY, 'empty')
     setTimelineContextMenu({
       kind: 'empty',
+      surface,
       createDate: pointerSlot.date,
+      createStartMinute: startMinute,
+      x: position.x,
+      y: position.y,
+    })
+  }
+
+  const onOpenCalendarReviewEmptyContextMenu = (
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) => {
+    event.preventDefault()
+
+    if (isBusy || calendarIsImporting || timelineDragState?.isDragging) {
+      return
+    }
+
+    if (isTargetWithinTimelineBlock(event.target)) {
+      return
+    }
+
+    const grid = calendarReviewTimelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    const { startMinute } = resolveManualTimelineCreateWindow(pointerMinute, timelineWindow)
+    const position = clampTimelineContextMenuPosition(event.clientX, event.clientY, 'empty')
+    setTimelineContextMenu({
+      kind: 'empty',
+      surface: 'calendar-review',
+      createDate: calendarSelectedDate,
       createStartMinute: startMinute,
       x: position.x,
       y: position.y,
@@ -3222,6 +4747,27 @@ function App() {
         minute: clientYToTimelineMinute(event.clientY, grid, timelineWindow),
       }
     onCreateTimelineEntryAtMinute(pointerSlot.date, pointerSlot.minute)
+  }
+
+  const onDoubleClickCalendarReviewEmptySpace = (
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) => {
+    if (isBusy || calendarIsImporting || timelineDragState?.isDragging) {
+      return
+    }
+
+    if (isTargetWithinTimelineBlock(event.target)) {
+      return
+    }
+
+    const grid = calendarReviewTimelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    event.preventDefault()
+    const pointerMinute = clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    onCreateCalendarCandidateAtMinute(calendarSelectedDate, pointerMinute)
   }
 
   const onSaveEntryDraft = (event: FormEvent<HTMLFormElement>) => {
@@ -3273,6 +4819,7 @@ function App() {
         loadTimeline(refreshDate),
         loadWeekTimeline(refreshDate),
         loadWeeklySummary(refreshDate),
+        loadQuickAddSuggestions(),
       ])
       invalidateMonthSummaries([previousMonthKey, nextMonthKey])
       const nextDraftEndState = buildEntryDraftEndState(endMinute)
@@ -3313,6 +4860,7 @@ function App() {
           loadTimeline(selectedDateRef.current),
           loadWeekTimeline(selectedDateRef.current),
           loadWeeklySummary(selectedDateRef.current),
+          loadQuickAddSuggestions(),
         ])
 
         window.requestAnimationFrame(() => {
@@ -3343,6 +4891,9 @@ function App() {
       setOpenAiKey('')
       const status = await settingsGetStatus()
       setSettingsStatus(status)
+      setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+      setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
 
       if (!status.hasOpenAiKey) {
         throw new Error(
@@ -3368,7 +4919,20 @@ function App() {
       const status = await settingsGetStatus()
       setSettingsStatus(status)
       setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
       setSuccessMessage('Interpretation model preference saved.')
+    })
+  }
+
+  const onSaveCalendarBulkModel = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    void runAction(async () => {
+      await settingsSetCalendarBulkModel(selectedCalendarBulkModelDraft)
+      const status = await settingsGetStatus()
+      setSettingsStatus(status)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+      setSuccessMessage('Calendar bulk add model preference saved.')
     })
   }
 
@@ -3379,6 +4943,7 @@ function App() {
       await settingsSetTranscriptionModel(selectedTranscriptionModelDraft)
       const status = await settingsGetStatus()
       setSettingsStatus(status)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
       setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
       setSuccessMessage('Speech-to-text model preference saved.')
     })
@@ -3387,9 +4952,17 @@ function App() {
   const onSaveTimelinePreferences = (
     timelineExcludeUncategorizedFromDailyTotals: boolean,
     timelineShowUncategorizedDailyTotal: boolean,
+    timelineIncludeExternalInTotals: boolean,
+    timelineIncludeInternalInTotals: boolean,
+    timelineSeparateEngagementTypeTotals: boolean,
   ) => {
     const previousStatus = settingsStatus
     if (!previousStatus) {
+      return
+    }
+
+    if (!timelineIncludeExternalInTotals && !timelineIncludeInternalInTotals) {
+      setErrorMessage('At least one of External or Internal type codes must be included in totals.')
       return
     }
 
@@ -3397,6 +4970,9 @@ function App() {
       ...previousStatus,
       timelineExcludeUncategorizedFromDailyTotals,
       timelineShowUncategorizedDailyTotal,
+      timelineIncludeExternalInTotals,
+      timelineIncludeInternalInTotals,
+      timelineSeparateEngagementTypeTotals,
     })
 
     void runAction(async () => {
@@ -3404,12 +4980,64 @@ function App() {
         await settingsSetTimelinePreferences({
           timelineExcludeUncategorizedFromDailyTotals,
           timelineShowUncategorizedDailyTotal,
+          timelineIncludeExternalInTotals,
+          timelineIncludeInternalInTotals,
+          timelineSeparateEngagementTypeTotals,
         })
         const status = await settingsGetStatus()
         setSettingsStatus(status)
         setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
+        setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
         setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
         setSuccessMessage('Timeline preferences saved.')
+      } catch (error) {
+        setSettingsStatus(previousStatus)
+        throw error
+      }
+    })
+  }
+
+  const onSaveCalendarBulkPreferences = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    void runAction(async () => {
+      const calendarBulkIgnoredKeywords = parseCalendarIgnoredKeywordDraft(calendarIgnoredKeywordDraft)
+      await settingsSetCalendarBulkPreferences({
+        calendarBulkIgnoredKeywords,
+        calendarBulkIgnoreAllDayEvents: settingsStatus?.calendarBulkIgnoreAllDayEvents ?? true,
+      })
+      const status = await settingsGetStatus()
+      setSettingsStatus(status)
+      setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+      setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
+      setSuccessMessage('Calendar bulk add preferences saved.')
+    })
+  }
+
+  const onSaveCalendarIgnoreAllDayPreference = (calendarBulkIgnoreAllDayEvents: boolean) => {
+    const previousStatus = settingsStatus
+    if (!previousStatus) {
+      return
+    }
+
+    const calendarBulkIgnoredKeywords = parseCalendarIgnoredKeywordDraft(calendarIgnoredKeywordDraft)
+    setSettingsStatus({
+      ...previousStatus,
+      calendarBulkIgnoredKeywords,
+      calendarBulkIgnoreAllDayEvents,
+    })
+
+    void runAction(async () => {
+      try {
+        await settingsSetCalendarBulkPreferences({
+          calendarBulkIgnoredKeywords,
+          calendarBulkIgnoreAllDayEvents,
+        })
+        const status = await settingsGetStatus()
+        setSettingsStatus(status)
+        setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+        setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
+        setSuccessMessage('Calendar bulk add preferences saved.')
       } catch (error) {
         setSettingsStatus(previousStatus)
         throw error
@@ -3797,6 +5425,10 @@ function App() {
     const endDate = weekTimelineDays[6]?.date ?? selectedDate
     return formatTimelineWeekRange(startDate, endDate)
   }, [selectedDate, weekTimelineDays])
+  const historyWeekRangeLabel = useMemo(() => {
+    const days = buildWeekViewDays(selectedDate)
+    return formatTimelineWeekRange(days[0]?.date ?? selectedDate, days[6]?.date ?? selectedDate)
+  }, [selectedDate])
 
   const onSelectView = (view: View) => {
     if (view === 'week' && activeView !== 'week') {
@@ -3804,6 +5436,20 @@ function App() {
     }
 
     setActiveView(view)
+  }
+
+  const onRefreshHistory = () => {
+    void (async () => {
+      try {
+        setIsHistoryLoading(true)
+        setHistoryError(null)
+        await loadHistory(selectedDate)
+      } catch (error) {
+        setHistoryError(formatActionErrorMessage(error))
+      } finally {
+        setIsHistoryLoading(false)
+      }
+    })()
   }
 
   const timelineEditorPanel = (
@@ -3935,6 +5581,7 @@ function App() {
           <label>
             Description
             <textarea
+              aria-label="Entry description"
               rows={4}
               value={entryDraft.description}
               onChange={(event) =>
@@ -4017,7 +5664,596 @@ function App() {
     </aside>
   )
 
-  if (!tauriRuntime) {
+  const calendarBulkModal = isCalendarBulkModalOpen ? createPortal(
+    <div
+      className="calendar-bulk-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !calendarIsExtracting && !calendarIsImporting) {
+          resetCalendarBulkModal()
+        }
+      }}
+    >
+      <section
+        className="calendar-bulk-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="calendar-bulk-title"
+      >
+        <header className="calendar-bulk-header">
+          <div>
+            <h3 id="calendar-bulk-title">Calendar Bulk Add</h3>
+            <p>
+              Stage calendar screenshots as reviewable time entries before importing them.
+            </p>
+          </div>
+          <div className="calendar-bulk-header-actions">
+            <p className="calendar-bulk-counter" aria-live="polite">
+              {calendarPendingCandidates.length} reviewable
+              {' '}| {calendarAcceptedCandidates.length} accepted
+              {' '}| {calendarIgnoredCandidates.length} ignored
+            </p>
+            <button
+              type="button"
+              className="timeline-editor-close"
+              aria-label="Close calendar bulk add"
+              title="Close"
+              onClick={resetCalendarBulkModal}
+              disabled={calendarIsExtracting || calendarIsImporting}
+            >
+              <span className="control-icon close-icon" aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+
+        <div className={`calendar-bulk-top-row ${calendarBulkTab === 'review' ? 'is-review' : ''}`}>
+          <div className="calendar-bulk-tabs-and-stepper">
+            <div className="segmented-control calendar-bulk-tabs" role="tablist" aria-label="Calendar bulk workflows">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarBulkTab === 'submission'}
+                className={calendarBulkTab === 'submission' ? 'active' : ''}
+                onClick={() => setCalendarBulkTab('submission')}
+              >
+                Calendar Submission
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarBulkTab === 'review'}
+                className={calendarBulkTab === 'review' ? 'active' : ''}
+                onClick={() => {
+                  calendarReviewAutoCenterKeyRef.current = null
+                  setCalendarBulkTab('review')
+                }}
+              >
+                Review Events
+              </button>
+            </div>
+
+            {calendarBulkTab === 'review' ? (
+              <div className="calendar-review-stepper">
+                <button
+                  type="button"
+                  className="timeline-arrow-button stepper-button"
+                  aria-label="Previous calendar event"
+                  title="Previous"
+                  onClick={() => onSelectAdjacentCalendarCandidate(-1)}
+                  disabled={selectedCalendarCandidateIndex <= 0}
+                >
+                  <span className="control-icon chevron-left" aria-hidden="true" />
+                </button>
+                <span>
+                  {selectedCalendarCandidateIndex >= 0
+                    ? `Event ${selectedCalendarCandidateIndex + 1} of ${calendarVisibleCandidates.length}`
+                    : 'Event 0 of 0'}
+                </span>
+                <button
+                  type="button"
+                  className="timeline-arrow-button stepper-button"
+                  aria-label="Next calendar event"
+                  title="Next"
+                  onClick={() => onSelectAdjacentCalendarCandidate(1)}
+                  disabled={
+                    selectedCalendarCandidateIndex < 0
+                    || selectedCalendarCandidateIndex >= calendarVisibleCandidates.length - 1
+                  }
+                >
+                  <span className="control-icon chevron-right" aria-hidden="true" />
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          {calendarBulkTab === 'review' ? (
+            <div className="calendar-review-actions">
+              <button
+                type="button"
+                className="ghost calendar-save-all-button"
+                onClick={onSaveAllReadyCalendarCandidates}
+                disabled={calendarReadyToSaveCandidates.length === 0 || calendarIsImporting}
+                title="Save all ready calendar events"
+              >
+                <span className="control-icon save-icon" aria-hidden="true" />
+                {calendarIsImporting ? 'Saving...' : 'Save All'}
+              </button>
+              <button
+                type="button"
+                className="button-soft-primary"
+                onClick={onSaveSelectedCalendarCandidate}
+                disabled={
+                  !selectedCalendarCandidate
+                  || !selectedCalendarCandidateCanSave
+                  || calendarIsImporting
+                }
+              >
+                <span className="control-icon save-icon" aria-hidden="true" />
+                {calendarIsImporting
+                  ? 'Saving...'
+                  : selectedCalendarCandidate?.reviewState === 'accepted'
+                    ? 'Update'
+                    : 'Save'}
+              </button>
+              <button
+                type="button"
+                className="button-soft-danger"
+                onClick={onDeleteSelectedCalendarCandidate}
+                disabled={
+                  !selectedCalendarCandidate
+                  || selectedCalendarCandidate.reviewState === 'accepted'
+                  || calendarIsImporting
+                }
+              >
+                <span className="control-icon trash-icon" aria-hidden="true" />
+                Delete
+              </button>
+            </div>
+          ) : null}
+        </div>
+
+        {calendarBulkTab === 'submission' ? (
+          <div className="calendar-submission-layout">
+            <input
+              ref={calendarFileInputRef}
+              type="file"
+              accept="image/*"
+              className="calendar-file-input"
+              onChange={(event) => {
+                if (event.target.files) {
+                  handleCalendarFileList(event.target.files)
+                }
+                event.currentTarget.value = ''
+              }}
+            />
+            <div
+              ref={calendarDropZoneRef}
+              className={`calendar-drop-zone ${calendarImagePreviewUrl ? 'has-preview' : ''}`}
+              tabIndex={0}
+              role="group"
+              aria-label="Calendar screenshot upload area"
+              aria-busy={calendarIsExtracting}
+              onClick={() => {
+                if (!calendarIsExtracting) {
+                  calendarFileInputRef.current?.click()
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  if (!calendarIsExtracting) {
+                    calendarFileInputRef.current?.click()
+                  }
+                }
+              }}
+              onPaste={onCalendarPaste}
+              onDragOver={(event) => {
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'copy'
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                handleCalendarFileList(event.dataTransfer.files)
+              }}
+            >
+              {calendarImagePreviewUrl ? (
+                <img
+                  className="calendar-drop-zone-preview"
+                  src={calendarImagePreviewUrl}
+                  alt="Calendar screenshot preview"
+                />
+              ) : (
+                <div className="calendar-drop-zone-main">
+                  <img src={calendarIcon} alt="" aria-hidden="true" />
+                  <div>
+                    <h4>Drop a calendar screenshot</h4>
+                    <p>Browse, drag an image here, or paste from the clipboard.</p>
+                  </div>
+                </div>
+              )}
+              <div className="calendar-upload-actions">
+                <button
+                  type="button"
+                  className="button-soft-primary"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    calendarFileInputRef.current?.click()
+                  }}
+                  disabled={calendarIsExtracting}
+                >
+                  <span className="control-icon plus-icon" aria-hidden="true" />
+                  Browse
+                </button>
+                <button
+                  type="button"
+                  className="ghost calendar-paste-button"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void onReadCalendarImageFromClipboard()
+                  }}
+                  disabled={calendarIsExtracting}
+                >
+                  <span className="control-icon paste-icon" aria-hidden="true" />
+                  Paste
+                </button>
+                <button
+                  type="button"
+                  className="button-soft-primary calendar-submit-button"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onSubmitCalendarScreenshot()
+                  }}
+                  disabled={!calendarStagedImage || calendarIsExtracting}
+                >
+                  <span className="control-icon save-icon" aria-hidden="true" />
+                  {calendarIsExtracting ? 'Submitting...' : 'Submit'}
+                </button>
+              </div>
+              {(calendarIsExtracting || calendarUploadStatusMessage || calendarUploadErrorMessage || calendarSelectedFileName) ? (
+                <div className="calendar-upload-feedback">
+                  {calendarSelectedFileName ? <strong>{calendarSelectedFileName}</strong> : null}
+                  {calendarIsExtracting ? (
+                    <p className="calendar-bulk-status">Extracting calendar events...</p>
+                  ) : calendarUploadStatusMessage ? (
+                    <p className="calendar-bulk-status">{calendarUploadStatusMessage}</p>
+                  ) : null}
+                  {calendarUploadErrorMessage ? (
+                    <p className="calendar-bulk-error" role="alert">{calendarUploadErrorMessage}</p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <div className="calendar-review-layout">
+            <section className="calendar-review-timeline-panel">
+              <div
+                className={`timeline-grid calendar-review-timeline ${
+                  selectedCalendarCandidate ? 'has-selection' : ''
+                } ${
+                  calendarReviewDragState?.isDragging ? 'dragging' : ''
+                }`}
+                role="list"
+                aria-label="Calendar review timeline"
+                ref={calendarReviewTimelineGridRef}
+              >
+                <div
+                  className="timeline-canvas"
+                  style={{ minHeight: `${timelineCanvasHeight}px` }}
+                  onContextMenu={onOpenCalendarReviewEmptyContextMenu}
+                  onDoubleClick={onDoubleClickCalendarReviewEmptySpace}
+                >
+                  {timelineHourMarks.map((minute) => (
+                    <div
+                      key={`calendar-review-hour-${minute}`}
+                      className="timeline-hour-mark"
+                      style={{
+                        top:
+                          TIMELINE_CANVAS_TOP_PADDING
+                          + (minute - timelineWindow.startMinute) * PIXELS_PER_MINUTE,
+                      }}
+                    >
+                      <span>{minuteToLabel(minute)}</span>
+                    </div>
+                  ))}
+
+                  <div className="timeline-entry-layer">
+                    {positionedCalendarReviewEntries.map((positionedEntry) => {
+                      const { entry } = positionedEntry
+                      const candidateId = entry.id.startsWith('calendar-')
+                        ? entry.id.slice('calendar-'.length)
+                        : null
+                      const candidate = candidateId
+                        ? calendarReviewCandidates.find((reviewCandidate) => reviewCandidate.id === candidateId)
+                        : null
+                      const blockColor = resolveTimelineBlockColor(
+                        entry,
+                        activityColorById,
+                        engagementColorById,
+                      )
+                      const blockLabel = buildTimelineBlockLabel(
+                        entry,
+                        positionedEntry.widthPercent,
+                        positionedEntry.height,
+                      )
+                      const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
+                      const blockPalette = buildTimelineBlockPalette(blockColor)
+                      const blockClassName = [
+                        'timeline-block',
+                        'calendar-review-block',
+                        `tier-${blockLabel.tier}`,
+                        candidate ? `state-${candidate.reviewState}` : 'is-existing',
+                        candidate?.id === selectedCalendarCandidate?.id ? 'selected' : '',
+                        reviewLabel ? 'needs-review' : '',
+                        candidate?.needsDateConfirmation || candidate?.needsTimeConfirmation
+                          ? 'needs-confirmation'
+                          : '',
+                      ]
+                        .filter((className) => className.length > 0)
+                        .join(' ')
+                      const blockStyle = {
+                        top: positionedEntry.top,
+                        height: positionedEntry.height,
+                        left: `${positionedEntry.leftPercent}%`,
+                        width: `${positionedEntry.widthPercent}%`,
+                        ...buildTimelineBlockCssVariables(blockPalette),
+                      } as CSSProperties
+                      const title = buildTimelineBlockTitle(
+                        blockLabel.fullLabel,
+                        entry.description,
+                        reviewLabel,
+                      )
+
+                      if (!candidate) {
+                        return null
+                      }
+
+                      const isDragPreview =
+                        calendarReviewDragState?.isDragging
+                        && calendarReviewDragState.entryId === entry.id
+                      if (isDragPreview) {
+                        return (
+                          <div
+                            key={entry.id}
+                            className={`timeline-block calendar-review-block drag-preview tier-${blockLabel.tier}`}
+                            style={blockStyle}
+                            title={title}
+                            aria-hidden="true"
+                          >
+                            <TimelineBlockContent label={blockLabel.label} />
+                          </div>
+                        )
+                      }
+
+                      if (candidate.reviewState === 'accepted') {
+                        return (
+                          <button
+                            type="button"
+                            key={entry.id}
+                            className={blockClassName}
+                            style={blockStyle}
+                            onClick={() => onSelectCalendarReviewBlock(candidate.id)}
+                            onPointerDown={(event) => onStartCalendarReviewDrag(event, entry, candidate.id)}
+                            title={title}
+                            aria-label={title}
+                          >
+                            <TimelineBlockContent label={blockLabel.label} />
+                          </button>
+                        )
+                      }
+
+                      return (
+                        <button
+                          type="button"
+                          key={entry.id}
+                          className={blockClassName}
+                          style={blockStyle}
+                          onClick={() => onSelectCalendarReviewBlock(candidate.id)}
+                          onPointerDown={(event) => onStartCalendarReviewDrag(event, entry, candidate.id)}
+                          onContextMenu={(event) => onOpenCalendarReviewContextMenu(event, entry, candidate.id)}
+                          title={title}
+                          aria-label={title}
+                          aria-haspopup="menu"
+                        >
+                          <TimelineBlockContent label={blockLabel.label} />
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <aside className={`calendar-review-editor timeline-editor ${selectedCalendarCandidate ? '' : 'is-empty'}`}>
+              <div className="timeline-editor-header">
+                <div>
+                  <h3>Review Event</h3>
+                  {selectedCalendarCandidate ? (
+                    <p className={`calendar-review-state ${selectedCalendarCandidate.reviewState}`}>
+                      {selectedCalendarCandidate.reviewState}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+
+              {selectedCalendarCandidate ? (
+                <>
+                  <div className="stack calendar-entry-form">
+                    <label>
+                      Date
+                      <input
+                        type="date"
+                        value={selectedCalendarCandidate.date}
+                        onChange={(event) => {
+                          const nextDate = event.target.value
+                          if (!nextDate) {
+                            return
+                          }
+                          updateCalendarCandidate(selectedCalendarCandidate.id, (candidate) => ({
+                            ...candidate,
+                            date: nextDate,
+                            needsDateConfirmation: false,
+                          }))
+                        }}
+                      />
+                    </label>
+                    <label>
+                      Engagement
+                      <select
+                        value={selectedCalendarCandidate.engagementId ?? ''}
+                        onChange={(event) =>
+                          onCalendarCandidateEngagementChange(
+                            selectedCalendarCandidate.id,
+                            event.target.value,
+                          )
+                        }
+                      >
+                        <option value="">Uncategorized</option>
+                        {engagements.map((engagement) => (
+                          <option key={engagement.id} value={engagement.id}>
+                            {formatEntityDisplayLabel(engagement.name, engagement.code)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Activity
+                      <select
+                        value={selectedCalendarCandidate.activityId ?? ''}
+                        onChange={(event) =>
+                          onCalendarCandidateActivityChange(
+                            selectedCalendarCandidate.id,
+                            event.target.value,
+                          )
+                        }
+                      >
+                        <option value="">Uncategorized</option>
+                        {selectedCalendarCandidateActivities.map((activity) => (
+                          <option key={activity.id} value={activity.id}>
+                            {formatEntityDisplayLabel(activity.name, activity.code)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Start
+                      <span className="time-input-shell">
+                        <input
+                          type="time"
+                          step={60}
+                          value={minuteToTimeInput(Math.min(selectedCalendarCandidate.startMinute, MINUTES_IN_DAY - 1))}
+                          onChange={(event) => {
+                            const nextStartMinute = Math.min(
+                              MINUTES_IN_DAY - 1,
+                              Math.max(0, timeInputToMinute(event.target.value)),
+                            )
+                            updateCalendarCandidate(selectedCalendarCandidate.id, (candidate) => {
+                              const nextEndMinute = Math.min(
+                                MINUTES_IN_DAY,
+                                Math.max(candidate.endMinute, nextStartMinute + 1),
+                              )
+                              return {
+                                ...candidate,
+                                startMinute: nextStartMinute,
+                                endMinute: nextEndMinute,
+                                durationMinutes: Math.max(1, nextEndMinute - nextStartMinute),
+                                needsTimeConfirmation: false,
+                              }
+                            })
+                          }}
+                        />
+                        <span className="control-icon clock-icon" aria-hidden="true" />
+                      </span>
+                    </label>
+                    <label>
+                      End
+                      <span className="time-input-shell">
+                        <input
+                          type="time"
+                          step={60}
+                          value={
+                            selectedCalendarCandidate.endMinute >= MINUTES_IN_DAY
+                              ? END_OF_DAY_INPUT_SENTINEL
+                              : minuteToTimeInput(selectedCalendarCandidate.endMinute)
+                          }
+                          onChange={(event) => {
+                            updateCalendarCandidate(selectedCalendarCandidate.id, (candidate) => {
+                              const parsedEndMinute = timeInputToMinute(event.target.value)
+                              const nextEndMinute = Math.min(
+                                MINUTES_IN_DAY,
+                                Math.max(candidate.startMinute + 1, parsedEndMinute),
+                              )
+                              return {
+                                ...candidate,
+                                endMinute: nextEndMinute,
+                                durationMinutes: Math.max(1, nextEndMinute - candidate.startMinute),
+                                needsTimeConfirmation: false,
+                              }
+                            })
+                          }}
+                        />
+                        <span className="control-icon clock-icon" aria-hidden="true" />
+                      </span>
+                    </label>
+                    <label>
+                      Description
+                      <textarea
+                        rows={4}
+                        value={selectedCalendarCandidate.description}
+                        onChange={(event) =>
+                          updateCalendarCandidate(selectedCalendarCandidate.id, (candidate) => ({
+                            ...candidate,
+                            description: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  <div className="calendar-review-diagnostics">
+                    <p>
+                      Confidence: {(selectedCalendarCandidate.confidence * 100).toFixed(0)}%
+                    </p>
+                    <p>Extracted: {selectedCalendarCandidate.extractedText}</p>
+                    {selectedCalendarCandidate.timeEvidence ? (
+                      <p>Time evidence: {selectedCalendarCandidate.timeEvidence}</p>
+                    ) : null}
+                    {selectedCalendarCandidate.needsDateConfirmation ? (
+                      <p className="calendar-bulk-warning-text">Date confirmation required.</p>
+                    ) : null}
+                    {selectedCalendarCandidate.needsTimeConfirmation ? (
+                      <p className="calendar-bulk-warning-text">Time confirmation required.</p>
+                    ) : null}
+                    {selectedCalendarCandidate.warningFlags.length > 0 ? (
+                      <div className="warning-row">
+                        {selectedCalendarCandidate.warningFlags.map((warningType) => (
+                          <WarningBadge
+                            key={`${selectedCalendarCandidate.id}-${warningType}`}
+                            type={warningType}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                </>
+              ) : (
+                <p className="timeline-editor-empty">
+                  Upload a screenshot to stage calendar events for review.
+                </p>
+              )}
+
+              {calendarUploadErrorMessage ? (
+                <p className="calendar-bulk-error" role="alert">{calendarUploadErrorMessage}</p>
+              ) : null}
+            </aside>
+          </div>
+        )}
+      </section>
+    </div>,
+    document.body,
+  ) : null
+
+  if (!appRuntime) {
     return (
       <div className="runtime-shell">
         <h1>OmniSheet</h1>
@@ -4028,16 +6264,16 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-testid="omnisheet-app-shell">
       <div className={`workspace-shell ${activeView === 'timeline' ? 'with-timeline' : 'without-timeline'}`}>
         <aside className="sidebar-panel">
           <section className="sidebar-section sidebar-capture">
             <div className="sidebar-section-header">
               <h2>Submit an entry</h2>
-              <p>Submit what you worked on.</p>
             </div>
             <form onSubmit={onSubmitCapture} className="stack">
               <textarea
+                aria-label="Entry message"
                 value={captureMessage}
                 onChange={(event) => {
                   const nextValue = event.target.value
@@ -4077,6 +6313,16 @@ function App() {
                   <img src={microphoneIcon} alt="" aria-hidden="true" />
                 </button>
                 <button
+                  type="button"
+                  className="capture-calendar-button"
+                  onClick={openCalendarBulkModal}
+                  disabled={voiceCaptureState === 'transcribing' || calendarIsExtracting}
+                  aria-label="Open calendar bulk add"
+                  title="Calendar bulk add"
+                >
+                  <img src={calendarIcon} alt="" aria-hidden="true" />
+                </button>
+                <button
                   type="submit"
                   disabled={
                     voiceCaptureState === 'transcribing'
@@ -4088,6 +6334,162 @@ function App() {
               </div>
             </form>
 
+            {lastSubmissionNotice ? (
+              <div className="capture-history-notice">
+                <span>{lastSubmissionNotice}</span>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setActiveView('history')
+                    setLastSubmissionNotice(null)
+                  }}
+                >
+                  History
+                </button>
+              </div>
+            ) : null}
+
+            <div className="quick-add-panel" aria-label="Quick Add">
+              <div className="quick-add-header">
+                <h3>Quick Add</h3>
+              </div>
+              <input
+                className="quick-add-search"
+                type="search"
+                value={quickAddSearch}
+                onChange={(event) => setQuickAddSearch(event.target.value)}
+                placeholder="Search activities"
+                aria-label="Search quick add activities"
+              />
+              {quickAddSuggestionsError ? (
+                <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
+              ) : null}
+              {quickAddActivityGroups.length === 0 ? (
+                <p className="quick-add-empty">
+                  {allQuickAddActivities.length === 0
+                    ? 'No active activities yet.'
+                    : 'No matching activities.'}
+                </p>
+              ) : (
+                <div className="quick-add-scroll-frame">
+                  <div
+                    ref={quickAddScrollRef}
+                    className="quick-add-scroll"
+                    onScroll={updateQuickAddScrollMetrics}
+                  >
+                    <div className="quick-add-list">
+                      {quickAddActivityGroups.map((group) => {
+                        const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
+
+                        return (
+                          <section
+                            key={group.engagement.id}
+                            className="quick-add-group"
+                            style={{
+                              '--quick-add-color': engagementColor,
+                            } as CSSProperties}
+                          >
+                            <div
+                              className="quick-add-group-header"
+                              title={formatEntityDisplayLabel(
+                                group.engagement.name,
+                                group.engagement.code,
+                                'Engagement',
+                              )}
+                            >
+                              <span>{formatEntityPrimaryLabel(
+                                group.engagement.name,
+                                group.engagement.code,
+                                'Engagement',
+                              )}</span>
+                            </div>
+                            <div className="quick-add-grid">
+                              {group.activities.map(({ activity, engagement, usageCount, lastUsedAt }) => {
+                                const activityColor = activity.colorHex ?? engagementColor
+                                const isDraggingActivity =
+                                  quickBlockDragState?.activityId === activity.id
+                                  && quickBlockDragState.engagementId === engagement.id
+                                const durationMinutes = isDraggingActivity
+                                  ? quickBlockDragState.durationMinutes
+                                  : TIMELINE_MANUAL_CREATE_DURATION_MINUTES
+                                const activityLabel = activity.name || activity.code
+                                const fullActivityLabel = formatEntityDisplayLabel(activity.name, activity.code)
+
+                                return (
+                                  <button
+                                    key={activity.id}
+                                    type="button"
+                                    className={`quick-add-tile ${isDraggingActivity ? 'dragging' : ''}`}
+                                    onPointerDown={(event) =>
+                                      onQuickBlockActivityPointerDown(event, engagement, activity)
+                                    }
+                                    onPointerMove={onQuickBlockActivityPointerMove}
+                                    onPointerUp={(event) =>
+                                      onQuickBlockActivityPointerUp(event, engagement, activity)
+                                    }
+                                    onPointerCancel={onQuickBlockActivityPointerCancel}
+                                    onKeyDown={(event) => {
+                                      if (event.key === 'Enter' || event.key === ' ') {
+                                        event.preventDefault()
+                                        createQuickBlockEntry(
+                                          engagement,
+                                          activity,
+                                          TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
+                                        )
+                                      }
+                                    }}
+                                    disabled={isBusy}
+                                    aria-label={`Add ${fullActivityLabel} for ${formatQuickBlockDuration(durationMinutes)}`}
+                                    title={
+                                      usageCount > 0 && lastUsedAt
+                                        ? `${fullActivityLabel} - used ${usageCount} time${usageCount === 1 ? '' : 's'}`
+                                        : fullActivityLabel
+                                    }
+                                    style={{
+                                      '--quick-add-color': activityColor,
+                                      '--quick-add-duration-progress': `${quickBlockDurationProgress(durationMinutes)}%`,
+                                    } as CSSProperties}
+                                  >
+                                    <span className="quick-add-tile-main">
+                                      <strong>{activityLabel}</strong>
+                                    </span>
+                                    {isDraggingActivity ? (
+                                      <span className="quick-add-duration">
+                                        {formatQuickBlockDuration(durationMinutes)}
+                                      </span>
+                                    ) : null}
+                                    {isDraggingActivity ? (
+                                      <span className="quick-add-duration-track" aria-hidden="true">
+                                        <span />
+                                      </span>
+                                    ) : null}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </section>
+                        )
+                      })}
+                    </div>
+                  </div>
+                  {quickAddScrollMetrics.canScroll ? (
+                    <div
+                      className="quick-add-scroll-indicator"
+                      aria-hidden="true"
+                      style={{
+                        '--quick-add-scroll-thumb-top': `${quickAddScrollMetrics.thumbTopPct}%`,
+                        '--quick-add-scroll-thumb-height': `${quickAddScrollMetrics.thumbHeightPct}%`,
+                      } as CSSProperties}
+                    >
+                      <span />
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+
+            {/*
             <div className="submission-queue">
               <button
                 type="button"
@@ -4152,6 +6554,7 @@ function App() {
                 </div>
               ) : null}
             </div>
+            */}
           </section>
 
           <section className="sidebar-section sidebar-calendar">
@@ -4225,18 +6628,20 @@ function App() {
                 </h2>
                 <p className="timeline-range">
                   {timelineHeaderDate.weekday}
-                  <span className="timeline-range-separator" aria-hidden="true">•</span>
-                  <span className="timeline-range-total">
-                    {formatTimelineHoursCompact(timelineDayTotalBreakdown.primaryMinutes)} total
-                  </span>
-                  {shouldShowTimelineDayUncategorizedDailyTotal ? (
-                    <>
+                  {buildTimelineTotalDisplaySegments(timelineDayTotalBreakdown, {
+                    includePrimaryTotal: true,
+                    separateEngagementTypeTotals: timelineSeparateEngagementTypeTotals,
+                    showUncategorizedTotal: shouldShowTimelineDayUncategorizedDailyTotal,
+                  }).map((segment) => (
+                    <Fragment key={segment.key}>
                       <span className="timeline-range-separator" aria-hidden="true">•</span>
-                      <span className="timeline-range-total timeline-range-total-secondary">
-                        {formatTimelineHoursCompact(timelineDayTotalBreakdown.uncategorizedMinutes)} uncategorized
+                      <span
+                        className={`timeline-range-total ${segment.key === 'total' ? '' : 'timeline-range-total-secondary'}`}
+                      >
+                        {segment.label}
                       </span>
-                    </>
-                  ) : null}
+                    </Fragment>
+                  ))}
                 </p>
               </div>
               <div className="timeline-controls timeline-stepper" aria-label="Day navigation">
@@ -4375,7 +6780,7 @@ function App() {
                       const blockClassName = [
                         'timeline-block',
                         `tier-${blockLabel.tier}`,
-                        selectedEntryId === entry.id ? 'selected' : '',
+                        selectedEntryId === entry.id || highlightedEntryId === entry.id ? 'selected' : '',
                         needsReview ? 'needs-review' : '',
                       ]
                         .filter((className) => className.length > 0)
@@ -4435,7 +6840,23 @@ function App() {
                 <h2 className="timeline-date-heading">
                   <strong>{weekTimelineRangeLabel}</strong>
                 </h2>
-                <p className="timeline-range">Sunday - Saturday</p>
+                <p className="timeline-range">
+                  Sunday - Saturday
+                  {buildTimelineTotalDisplaySegments(weekTimelineTotalBreakdown, {
+                    includePrimaryTotal: true,
+                    separateEngagementTypeTotals: timelineSeparateEngagementTypeTotals,
+                    showUncategorizedTotal: shouldShowTimelineDayUncategorizedDailyTotal,
+                  }).map((segment) => (
+                    <Fragment key={segment.key}>
+                      <span className="timeline-range-separator" aria-hidden="true">•</span>
+                      <span
+                        className={`timeline-range-total ${segment.key === 'total' ? '' : 'timeline-range-total-secondary'}`}
+                      >
+                        {segment.label}
+                      </span>
+                    </Fragment>
+                  ))}
+                </p>
               </div>
               <div className="timeline-controls timeline-stepper" aria-label="Week navigation">
                 <button
@@ -4504,6 +6925,10 @@ function App() {
                       const shouldShowDayUncategorizedDailyTotal =
                         shouldShowTimelineUncategorizedDailyTotal
                         && dayTotalBreakdown.uncategorizedMinutes > 0
+                      const weekDayPrimaryTotalSegments = buildWeekTimelinePrimaryTotalSegments(
+                        dayTotalBreakdown,
+                        timelineSeparateEngagementTypeTotals,
+                      )
                       const headerClassName = [
                         'week-timeline-day-header',
                         isSelectedDay ? 'is-selected' : '',
@@ -4518,9 +6943,17 @@ function App() {
                             {formatWeekTimelineDayLabel(day.date)}
                           </span>
                           <span className="week-timeline-day-total">
-                            <span>
-                              {formatTimelineHoursCompact(dayTotalBreakdown.primaryMinutes)}
-                              {shouldShowTimelineUncategorizedDailyTotal ? ' total' : ''}
+                            <span className="week-timeline-day-total-line">
+                              {weekDayPrimaryTotalSegments.map((segment, segmentIndex) => (
+                                <Fragment key={segment.key}>
+                                  {segmentIndex > 0 ? (
+                                    <span className="week-timeline-day-total-separator" aria-hidden="true">
+                                      •
+                                    </span>
+                                  ) : null}
+                                  <span>{segment.label}</span>
+                                </Fragment>
+                              ))}
                             </span>
                             {shouldShowDayUncategorizedDailyTotal ? (
                               <span className="week-timeline-day-uncategorized-total">
@@ -4661,7 +7094,7 @@ function App() {
                         const blockClassName = [
                           'timeline-block',
                           `tier-${blockLabel.tier}`,
-                          selectedEntryId === entry.id ? 'selected' : '',
+                          selectedEntryId === entry.id || highlightedEntryId === entry.id ? 'selected' : '',
                           needsReview ? 'needs-review' : '',
                         ]
                           .filter((className) => className.length > 0)
@@ -4711,6 +7144,201 @@ function App() {
               </div>
 
               {selectedEntry ? timelineEditorPanel : null}
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === 'history' ? (
+          <section className="panel history-panel">
+            <div className="history-toolbar">
+              <div className="history-title-block">
+                <h2>History</h2>
+                <p>{historyWeekRangeLabel}</p>
+              </div>
+              <div className="timeline-controls timeline-stepper" aria-label="History week navigation">
+                <button
+                  type="button"
+                  className="timeline-arrow-button stepper-button stepper-prev"
+                  aria-label="Previous week"
+                  title="Previous week"
+                  onClick={() => onSetDate(shiftDate(selectedDate, -7))}
+                  disabled={isBusy || isHistoryLoading}
+                >
+                  <span className="control-icon chevron-left" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="stepper-button stepper-center"
+                  onClick={onJumpToThisWeek}
+                  disabled={isBusy || isHistoryLoading}
+                >
+                  This Week
+                </button>
+                <button
+                  type="button"
+                  className="timeline-arrow-button stepper-button stepper-next"
+                  aria-label="Next week"
+                  title="Next week"
+                  onClick={() => onSetDate(shiftDate(selectedDate, 7))}
+                  disabled={isBusy || isHistoryLoading}
+                >
+                  <span className="control-icon chevron-right" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="ghost history-refresh-button"
+                  onClick={onRefreshHistory}
+                  disabled={isBusy || isHistoryLoading}
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+
+            {historyError ? (
+              <p className="mini-calendar-error">{historyError}</p>
+            ) : null}
+
+            <div className="history-layout" aria-busy={isHistoryLoading}>
+              <section className="history-section">
+                <div className="history-section-header">
+                  <h3>Live Queue</h3>
+                  <span>{liveHistoryQueueItems.length}</span>
+                </div>
+                {liveHistoryQueueItems.length === 0 ? (
+                  <p className="history-empty">No live queue items.</p>
+                ) : (
+                  <div className="history-list">
+                    {liveHistoryQueueItems.map((item) => (
+                      <article key={item.id} className={`history-card live ${item.state}`}>
+                        <div className="history-card-header">
+                          <div>
+                            <strong>{formatHistorySourceLabel(item.captureSource)}</strong>
+                            <span>{formatSubmissionQueueTimestamp(item.submittedAtMs)}</span>
+                          </div>
+                          <span className={`submission-queue-item-badge ${item.state}`}>
+                            {formatSubmissionQueueStateLabel(item.state)}
+                          </span>
+                        </div>
+                        <p className="history-card-text">{item.rawText}</p>
+                        <p className="history-card-status">{item.statusMessage}</p>
+                        {item.correlationId ? (
+                          <p className="history-card-meta">
+                            Correlation ID: <code>{item.correlationId}</code>
+                          </p>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="history-section">
+                <div className="history-section-header">
+                  <h3>Submissions</h3>
+                  <span>{persistedHistorySubmissions.length}</span>
+                </div>
+                {isHistoryLoading && !historyData ? (
+                  <p className="history-empty">Loading History...</p>
+                ) : persistedHistorySubmissions.length === 0 ? (
+                  <p className="history-empty">No persisted submissions this week.</p>
+                ) : (
+                  <div className="history-list">
+                    {persistedHistorySubmissions.map((submission) => (
+                      <article key={submission.id} className="history-card">
+                        <div className="history-card-header">
+                          <div>
+                            <strong>{formatHistorySourceLabel(submission.captureSource)}</strong>
+                            <span>{formatHistoryTimestamp(submission.messageTimestamp)}</span>
+                          </div>
+                          <span className="history-pill">{formatHistorySourceLabel(submission.status)}</span>
+                        </div>
+                        <p className="history-card-text">{submission.rawText}</p>
+                        <div className="history-meta-grid">
+                          <span>Created {formatHistoryTimestamp(submission.createdAt)}</span>
+                          <span>Entries {submission.savedEntryCount}/{submission.interpretedEntryCount}</span>
+                          <span>Unique {submission.uniqueEntryCount}</span>
+                          <span>Confidence {formatHistoryConfidence(submission.confidence)}</span>
+                          {submission.modelUsedLabel ? (
+                            <span>Model {submission.modelUsedLabel}</span>
+                          ) : null}
+                          {submission.transcriptionModelUsedLabel ? (
+                            <span>Transcription {submission.transcriptionModelUsedLabel}</span>
+                          ) : null}
+                          {submission.containsMultipleEvents ? (
+                            <span>Multiple events</span>
+                          ) : null}
+                          {submission.truncatedEntryCount > 0 ? (
+                            <span>Truncated {submission.truncatedEntryCount}</span>
+                          ) : null}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="history-section">
+                <div className="history-section-header">
+                  <h3>Entries</h3>
+                  <span>{persistedHistoryEntries.length}</span>
+                </div>
+                {isHistoryLoading && !historyData ? (
+                  <p className="history-empty">Loading entries...</p>
+                ) : persistedHistoryEntries.length === 0 ? (
+                  <p className="history-empty">No entries created this week.</p>
+                ) : (
+                  <div className="history-list history-entry-list">
+                    {persistedHistoryEntries.map((entry) => {
+                      const blockColor = resolveTimelineBlockColor(
+                        entry,
+                        activityColorById,
+                        engagementColorById,
+                      )
+                      const warnings = entry.warningFlags
+
+                      return (
+                        <article
+                          key={entry.id}
+                          className="history-card entry"
+                          style={{ '--history-entry-color': blockColor } as CSSProperties}
+                        >
+                          <div className="history-card-header">
+                            <div>
+                              <strong>{formatHistoryEntryTitle(entry)}</strong>
+                              <span>{formatHistoryEntryTime(entry)}</span>
+                            </div>
+                            <span className="history-pill">{formatHistorySourceLabel(entry.source)}</span>
+                          </div>
+                          <p className="history-card-text">{entry.description || 'No description'}</p>
+                          <div className="history-meta-grid">
+                            <span>Created {formatHistoryTimestamp(entry.createdAt)}</span>
+                            <span>Updated {formatHistoryTimestamp(entry.updatedAt)}</span>
+                            <span>{formatQuickBlockDuration(entry.durationMinutes)}</span>
+                            <span>Confidence {formatHistoryConfidence(entry.confidence)}</span>
+                            {entry.engagementName || entry.engagementCode ? (
+                              <span>{formatEntityDisplayLabel(entry.engagementName, entry.engagementCode)}</span>
+                            ) : null}
+                            {entry.modelUsedLabel ? (
+                              <span>Model {entry.modelUsedLabel}</span>
+                            ) : null}
+                            {entry.transcriptionModelUsedLabel ? (
+                              <span>Transcription {entry.transcriptionModelUsedLabel}</span>
+                            ) : null}
+                          </div>
+                          {warnings.length > 0 ? (
+                            <div className="history-warning-row">
+                              {warnings.map((warningType) => (
+                                <WarningBadge key={`${entry.id}-${warningType}`} type={warningType} />
+                              ))}
+                            </div>
+                          ) : null}
+                        </article>
+                      )
+                    })}
+                  </div>
+                )}
+              </section>
             </div>
           </section>
         ) : null}
@@ -4767,12 +7395,16 @@ function App() {
                             Code
                             <input
                               value={engagementForm.code}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                const nextCode = event.target.value
                                 setEngagementForm((previous) => ({
                                   ...previous,
-                                  code: event.target.value,
+                                  code: nextCode,
+                                  engagementType: hasManualEngagementTypeSelection
+                                    ? previous.engagementType
+                                    : inferEngagementTypeFromCode(nextCode),
                                 }))
-                              }
+                              }}
                             />
                           </label>
                           <label>
@@ -4819,6 +7451,32 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="code-editor-field">
+                            <span className="code-editor-field-label">Type</span>
+                            <div
+                              className="segmented-control engagement-type-segmented"
+                              role="group"
+                              aria-label="Engagement type"
+                            >
+                              {(['external', 'internal'] as const).map((engagementType) => (
+                                <button
+                                  key={engagementType}
+                                  type="button"
+                                  className={engagementForm.engagementType === engagementType ? 'active' : ''}
+                                  aria-pressed={engagementForm.engagementType === engagementType}
+                                  onClick={() => {
+                                    setHasManualEngagementTypeSelection(true)
+                                    setEngagementForm((previous) => ({
+                                      ...previous,
+                                      engagementType,
+                                    }))
+                                  }}
+                                >
+                                  {engagementType === 'external' ? 'External' : 'Internal'}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
                           <label>
                             Color
                             <div className="color-input-row">
@@ -5261,6 +7919,36 @@ function App() {
                     </button>
                   </div>
                 </form>
+                <form className="settings-preference-row" onSubmit={onSaveCalendarBulkModel}>
+                  <label htmlFor="settings-calendar-bulk-model">Calendar Bulk Add</label>
+                  <div className="settings-control-group">
+                    <select
+                      id="settings-calendar-bulk-model"
+                      value={selectedCalendarBulkModelDraft}
+                      onChange={(event) =>
+                        setSelectedCalendarBulkModelDraft(event.target.value as OpenAiModelId)
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    >
+                      {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="submit"
+                      className="settings-save-button button-soft-primary"
+                      disabled={
+                        isBusy ||
+                        settingsStatus === null ||
+                        selectedCalendarBulkModelDraft === settingsStatus.selectedCalendarBulkModel
+                      }
+                    >
+                      Save
+                    </button>
+                  </div>
+                </form>
                 <form className="settings-preference-row" onSubmit={onSaveTranscriptionModel}>
                   <label htmlFor="settings-transcription-model">Speech-to-Text</label>
                   <div className="settings-control-group">
@@ -5302,7 +7990,7 @@ function App() {
                 </div>
                 <div className="settings-preference-row settings-toggle-row">
                   <label htmlFor="settings-timeline-exclude-uncategorized">
-                    Exclude uncategorized time from daily totals
+                    Exclude uncategorized time from daily, weekly, and summary view totals
                   </label>
                   <div className="settings-toggle-group">
                     <input
@@ -5313,6 +8001,9 @@ function App() {
                         onSaveTimelinePreferences(
                           event.target.checked,
                           timelineShowUncategorizedDailyTotal,
+                          timelineIncludeExternalInTotals,
+                          timelineIncludeInternalInTotals,
+                          timelineSeparateEngagementTypeTotals,
                         )
                       }
                       disabled={isBusy || settingsStatus === null}
@@ -5321,7 +8012,7 @@ function App() {
                 </div>
                 <div className="settings-preference-row settings-toggle-row">
                   <label htmlFor="settings-timeline-show-uncategorized">
-                    Display uncategorized time alongside categorized time in daily totals
+                    Display uncategorized time alongside categorized time in daily, weekly, and summary view totals.
                   </label>
                   <div className="settings-toggle-group">
                     <input
@@ -5332,6 +8023,9 @@ function App() {
                         onSaveTimelinePreferences(
                           timelineExcludeUncategorizedFromDailyTotals,
                           event.target.checked,
+                          timelineIncludeExternalInTotals,
+                          timelineIncludeInternalInTotals,
+                          timelineSeparateEngagementTypeTotals,
                         )
                       }
                       disabled={
@@ -5339,6 +8033,127 @@ function App() {
                         settingsStatus === null ||
                         !timelineExcludeUncategorizedFromDailyTotals
                       }
+                    />
+                  </div>
+                </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-timeline-include-external">
+                    External type codes should be included in the weekly totals
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-timeline-include-external"
+                      type="checkbox"
+                      checked={timelineIncludeExternalInTotals}
+                      onChange={(event) =>
+                        onSaveTimelinePreferences(
+                          timelineExcludeUncategorizedFromDailyTotals,
+                          timelineShowUncategorizedDailyTotal,
+                          event.target.checked,
+                          timelineIncludeInternalInTotals,
+                          timelineSeparateEngagementTypeTotals,
+                        )
+                      }
+                      disabled={
+                        isBusy
+                        || settingsStatus === null
+                        || (timelineIncludeExternalInTotals && !timelineIncludeInternalInTotals)
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-timeline-include-internal">
+                    Internal type codes should be included in the weekly totals.
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-timeline-include-internal"
+                      type="checkbox"
+                      checked={timelineIncludeInternalInTotals}
+                      onChange={(event) =>
+                        onSaveTimelinePreferences(
+                          timelineExcludeUncategorizedFromDailyTotals,
+                          timelineShowUncategorizedDailyTotal,
+                          timelineIncludeExternalInTotals,
+                          event.target.checked,
+                          timelineSeparateEngagementTypeTotals,
+                        )
+                      }
+                      disabled={
+                        isBusy
+                        || settingsStatus === null
+                        || (timelineIncludeInternalInTotals && !timelineIncludeExternalInTotals)
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-timeline-separate-types">
+                    Separate out External and Internal type codes in the daily, weekly, and summary view totals.
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-timeline-separate-types"
+                      type="checkbox"
+                      checked={timelineSeparateEngagementTypeTotals}
+                      onChange={(event) =>
+                        onSaveTimelinePreferences(
+                          timelineExcludeUncategorizedFromDailyTotals,
+                          timelineShowUncategorizedDailyTotal,
+                          timelineIncludeExternalInTotals,
+                          timelineIncludeInternalInTotals,
+                          event.target.checked,
+                        )
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    />
+                  </div>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-header">
+                  <h3>Calendar Bulk Add</h3>
+                </div>
+                <form className="settings-preference-row" onSubmit={onSaveCalendarBulkPreferences}>
+                  <label htmlFor="settings-calendar-ignore-keywords">
+                    Ignored keywords
+                    <span className="field-helper">
+                      Separate words/phrases by new line, comma, or semicolons.
+                    </span>
+                  </label>
+                  <div className="settings-control-group settings-control-group-vertical">
+                    <textarea
+                      id="settings-calendar-ignore-keywords"
+                      value={calendarIgnoredKeywordDraft}
+                      onChange={(event) => setCalendarIgnoredKeywordDraft(event.target.value)}
+                      rows={4}
+                      placeholder="lunch"
+                      disabled={isBusy || settingsStatus === null}
+                    />
+                    <button
+                      type="submit"
+                      className="settings-save-button button-soft-primary"
+                      disabled={isBusy || settingsStatus === null}
+                    >
+                      Save
+                    </button>
+                  </div>
+                </form>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-calendar-ignore-all-day">
+                    Ignore all-day calendar events
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-calendar-ignore-all-day"
+                      type="checkbox"
+                      checked={settingsStatus?.calendarBulkIgnoreAllDayEvents ?? true}
+                      onChange={(event) =>
+                        onSaveCalendarIgnoreAllDayPreference(event.target.checked)
+                      }
+                      disabled={isBusy || settingsStatus === null}
                     />
                   </div>
                 </div>
@@ -5365,6 +8180,16 @@ function App() {
                       {settingsStatus
                         ? settingsStatus.availableOpenAiModels.find(
                             (model) => model.id === settingsStatus.selectedOpenAiModel,
+                          )?.label ?? 'unknown'
+                        : 'unknown'}
+                    </strong>
+                  </div>
+                  <div className="settings-status-item">
+                    <span>Calendar Bulk Add</span>
+                    <strong>
+                      {settingsStatus
+                        ? settingsStatus.availableOpenAiModels.find(
+                            (model) => model.id === settingsStatus.selectedCalendarBulkModel,
                           )?.label ?? 'unknown'
                         : 'unknown'}
                     </strong>
@@ -5559,10 +8384,26 @@ function App() {
             <div className="summary-week-total">
               <span>Week Total Hours</span>
               <strong>
-                {weeklySummary
-                  ? formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+                {displayedSummaryWeekTotalBreakdown
+                  ? `${formatTimelineHoursCompact(displayedSummaryWeekTotalBreakdown.primaryMinutes)} total`
                   : '--'}
               </strong>
+              {displayedSummaryWeekTotalBreakdown ? (
+                <span className="summary-week-total-breakdown">
+                  {buildTimelineTotalDisplaySegments(displayedSummaryWeekTotalBreakdown, {
+                    includePrimaryTotal: false,
+                    separateEngagementTypeTotals: timelineSeparateEngagementTypeTotals,
+                    showUncategorizedTotal: shouldShowTimelineUncategorizedDailyTotal,
+                  }).map((segment, segmentIndex) => (
+                    <Fragment key={segment.key}>
+                      {segmentIndex > 0 ? (
+                        <span className="summary-total-separator" aria-hidden="true">•</span>
+                      ) : null}
+                      <span>{segment.label}</span>
+                    </Fragment>
+                  ))}
+                </span>
+              ) : null}
             </div>
 
             {weeklySummaryError ? (
@@ -5635,7 +8476,15 @@ function App() {
                           ) ? 'summary-cell-wrap' : ''}
                           style={{ minWidth: column.width }}
                         >
-                          {renderSummaryFooterCell(column, columnIndex, summaryFooterLabelIndex, weeklySummary)}
+                          {renderSummaryFooterCell(
+                            column,
+                            columnIndex,
+                            summaryFooterLabelIndex,
+                            weeklySummary,
+                            timelineTotalPreferences,
+                            timelineSeparateEngagementTypeTotals,
+                            shouldShowTimelineUncategorizedDailyTotal,
+                          )}
                         </td>
                       ))}
                     </tr>
@@ -5650,6 +8499,7 @@ function App() {
           </div>
         </main>
       </div>
+      {calendarBulkModal}
       {timelineContextMenu ? createPortal(
         <div
           ref={timelineContextMenuRef}
@@ -5670,21 +8520,29 @@ function App() {
             className="timeline-context-menu-item"
             role="menuitem"
             onClick={onCreateTimelineEntryFromContextMenu}
-            disabled={isBusy || isTimelineDeleteBusy}
+            disabled={
+              timelineContextMenu.surface === 'calendar-review'
+                ? calendarIsImporting
+                : isBusy || isTimelineDeleteBusy
+            }
           >
             <span className="control-icon plus-icon" aria-hidden="true" />
-            Create new entry
+            {timelineContextMenu.surface === 'calendar-review' ? 'Create staged event' : 'Create new entry'}
           </button>
           {timelineContextMenu.kind === 'entry' && timelineContextMenu.entryId ? (
             <button
               type="button"
               className="timeline-context-menu-item is-danger"
               role="menuitem"
-              onClick={() => onDeleteTimelineEntry(timelineContextMenu.entryId)}
-              disabled={isBusy || isTimelineDeleteBusy}
+              onClick={onDeleteTimelineContextMenuEntry}
+              disabled={
+                timelineContextMenu.surface === 'calendar-review'
+                  ? calendarIsImporting
+                  : isBusy || isTimelineDeleteBusy
+              }
             >
               <span className="control-icon trash-icon" aria-hidden="true" />
-              Delete entry
+              {timelineContextMenu.surface === 'calendar-review' ? 'Delete staged event' : 'Delete entry'}
             </button>
           ) : null}
         </div>,
@@ -5827,7 +8685,13 @@ function App() {
                             </div>
                           ))}
                           <div className="summary-layout-editor-cell summary-layout-editor-footer-cell">
-                            {renderSummaryPreviewFooter(previewColumn, weeklySummary)}
+                            {renderSummaryPreviewFooter(
+                              previewColumn,
+                              weeklySummary,
+                              timelineTotalPreferences,
+                              timelineSeparateEngagementTypeTotals,
+                              shouldShowTimelineUncategorizedDailyTotal,
+                            )}
                           </div>
                         </div>
                         <button
@@ -6109,6 +8973,87 @@ function buildEntryDraft(entry: TimelineEntry): EntryDraft {
   }
 }
 
+function parseCalendarIgnoredKeywordDraft(value: string): string[] {
+  const seen = new Set<string>()
+  const keywords: string[] = []
+
+  for (const candidate of value.split(/[,\n;]/)) {
+    const normalized = candidate.trim().toLowerCase()
+    if (normalized.length === 0 || seen.has(normalized)) {
+      continue
+    }
+
+    seen.add(normalized)
+    keywords.push(normalized)
+  }
+
+  return keywords
+}
+
+function refreshCalendarCandidateWarnings(candidate: CalendarReviewCandidate): WarningType[] {
+  const warnings: WarningType[] = candidate.warningFlags.filter((warning) => warning === 'overlap')
+
+  if (candidate.confidence < CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD) {
+    warnings.push('low_confidence')
+  }
+
+  if (!candidate.engagementId || !candidate.activityId) {
+    warnings.push('unmatched')
+  }
+
+  return warnings
+}
+
+function hasCalendarCandidateBlockingIssue(candidate: CalendarReviewCandidate): boolean {
+  return (
+    candidate.needsDateConfirmation
+    || candidate.needsTimeConfirmation
+    || candidate.description.trim().length === 0
+  )
+}
+
+function calendarCandidateToTimelineEntry(candidate: CalendarReviewCandidate): TimelineEntry {
+  const candidateTimestamp = Math.floor(Date.now() / 1000)
+
+  return {
+    id: `calendar-${candidate.id}`,
+    date: candidate.date,
+    startMinute: candidate.startMinute,
+    endMinute: candidate.endMinute,
+    durationMinutes: Math.max(1, candidate.endMinute - candidate.startMinute),
+    description: candidate.description,
+    userSubmissionText: candidate.extractedText || candidate.sourceText,
+    source: 'calendar',
+    confidence: candidate.confidence,
+    engagementId: candidate.engagementId,
+    activityId: candidate.activityId,
+    engagementCode: candidate.engagementCode,
+    engagementName: candidate.engagementName,
+    engagementType: candidate.engagementType ?? (
+      candidate.engagementId ? inferEngagementTypeFromCode(candidate.engagementCode) : null
+    ),
+    activityCode: candidate.activityCode,
+    activityName: candidate.activityName,
+    usedActivityFallback: false,
+    usedTemporalFallback: false,
+    durationDefaulted: false,
+    fallbackSummary: null,
+    sourceMessageEntryIndex: null,
+    sourceMessageEntryCount: null,
+    modelUsed: null,
+    modelUsedLabel: null,
+    transcriptionModelUsed: null,
+    transcriptionModelUsedLabel: null,
+    warningFlags: candidate.warningFlags,
+    createdAt: candidateTimestamp,
+    updatedAt: candidateTimestamp,
+  }
+}
+
+function getCalendarCandidateIdFromTimelineEntryId(entryId: string): string | null {
+  return entryId.startsWith('calendar-') ? entryId.slice('calendar-'.length) : null
+}
+
 function resolveEntryDraftEndMinute(entryDraft: EntryDraft): number {
   if (entryDraft.preserveEndOfDay && entryDraft.endTime === END_OF_DAY_INPUT_SENTINEL) {
     return MINUTES_IN_DAY
@@ -6123,6 +9068,14 @@ function generateSubmissionQueueId(): string {
   }
 
   return `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function generateCalendarCandidateId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+
+  return `calendar-candidate-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
 function generateClientCorrelationId(): string {
@@ -6441,16 +9394,56 @@ function formatSubmissionQueueTimestamp(timestampMs: number): string {
   return formatSubmissionQueueOutcomeTimestamp(new Date(timestampMs))
 }
 
-function formatSubmissionQueueDuration(durationMs: number): string {
-  if (durationMs < 60_000) {
-    return `${(durationMs / 1000).toFixed(1)}s`
+function formatHistorySourceLabel(value: string): string {
+  if (value === 'manual') {
+    return 'Manual'
   }
 
-  const totalSeconds = durationMs / 1000
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds - minutes * 60
+  if (value === 'voice') {
+    return 'Voice'
+  }
 
-  return `${minutes}m ${seconds.toFixed(1)}s`
+  if (value === 'calendar') {
+    return 'Calendar'
+  }
+
+  if (value === 'text') {
+    return 'AI Text'
+  }
+
+  if (value === 'ai') {
+    return 'AI'
+  }
+
+  return value
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ') || 'Unknown'
+}
+
+function formatHistoryTimestamp(timestampSeconds: number): string {
+  return formatSubmissionQueueOutcomeTimestamp(new Date(timestampSeconds * 1000))
+}
+
+function formatHistoryEntryTime(entry: TimelineEntry): string {
+  return `${formatMonthDay(entry.date)} ${minuteToLabel(entry.startMinute)} - ${minuteToLabel(entry.endMinute)}`
+}
+
+function formatHistoryEntryTitle(entry: TimelineEntry): string {
+  if (entry.activityName || entry.activityCode) {
+    return formatEntityDisplayLabel(entry.activityName, entry.activityCode)
+  }
+
+  if (entry.engagementName || entry.engagementCode) {
+    return formatEntityDisplayLabel(entry.engagementName, entry.engagementCode)
+  }
+
+  return 'Uncategorized entry'
+}
+
+function formatHistoryConfidence(confidence: number): string {
+  return `${Math.round(confidence * 100)}%`
 }
 
 function formatKeySource(value: SettingsStatus['keySource'] | undefined): string {
@@ -6557,6 +9550,25 @@ function formatTimelineHoursCompact(minutes: number): string {
     .replace(/(?:\.0+|(\.\d*?)0+)$/, '$1')
 
   return `${formattedHours}h`
+}
+
+function formatQuickBlockDuration(minutes: number): string {
+  if (minutes < HOUR_IN_MINUTES) {
+    return `${minutes}m`
+  }
+
+  return formatTimelineHoursCompact(minutes)
+}
+
+function quickBlockDurationProgress(minutes: number): number {
+  const minDuration = TIMELINE_MANUAL_CREATE_DURATION_MINUTES
+  const span = QUICK_BLOCK_MAX_DURATION_MINUTES - minDuration
+
+  if (span <= 0) {
+    return 0
+  }
+
+  return ((clampQuickBlockDuration(minutes) - minDuration) / span) * 100
 }
 
 function formatMonthDay(date: string): string {
@@ -6745,20 +9757,96 @@ function applyDragPreviewToTimelineEntries(
 function createEmptyTimelineTotalBreakdown(): TimelineTotalBreakdown {
   return {
     primaryMinutes: 0,
-    categorizedMinutes: 0,
+    externalMinutes: 0,
+    internalMinutes: 0,
     uncategorizedMinutes: 0,
   }
 }
 
+interface TimelineTotalPreferences {
+  includeExternalInTotals: boolean
+  includeInternalInTotals: boolean
+  excludeUncategorizedFromTotals: boolean
+}
+
+interface TimelineTotalDisplaySegment {
+  key: string
+  label: string
+}
+
+function createTimelineTotalSegment(
+  key: string,
+  minutes: number,
+  label: string,
+): TimelineTotalDisplaySegment {
+  return {
+    key,
+    label: `${formatTimelineHoursCompact(minutes)} ${label}`,
+  }
+}
+
+function buildTimelineTotalDisplaySegments(
+  breakdown: TimelineTotalBreakdown,
+  options: {
+    includePrimaryTotal: boolean
+    separateEngagementTypeTotals: boolean
+    showUncategorizedTotal: boolean
+  },
+): TimelineTotalDisplaySegment[] {
+  const segments: TimelineTotalDisplaySegment[] = []
+
+  if (options.includePrimaryTotal) {
+    segments.push(createTimelineTotalSegment('total', breakdown.primaryMinutes, 'total'))
+  }
+
+  if (options.separateEngagementTypeTotals) {
+    if (breakdown.externalMinutes > 0) {
+      segments.push(createTimelineTotalSegment('external', breakdown.externalMinutes, 'external'))
+    }
+    if (breakdown.internalMinutes > 0) {
+      segments.push(createTimelineTotalSegment('internal', breakdown.internalMinutes, 'internal'))
+    }
+  }
+
+  if (options.showUncategorizedTotal && breakdown.uncategorizedMinutes > 0) {
+    segments.push(
+      createTimelineTotalSegment('uncategorized', breakdown.uncategorizedMinutes, 'uncategorized'),
+    )
+  }
+
+  return segments
+}
+
+function buildWeekTimelinePrimaryTotalSegments(
+  breakdown: TimelineTotalBreakdown,
+  separateEngagementTypeTotals: boolean,
+): TimelineTotalDisplaySegment[] {
+  if (
+    separateEngagementTypeTotals
+    && (breakdown.externalMinutes > 0 || breakdown.internalMinutes > 0)
+  ) {
+    return buildTimelineTotalDisplaySegments(breakdown, {
+      includePrimaryTotal: false,
+      separateEngagementTypeTotals: true,
+      showUncategorizedTotal: false,
+    })
+  }
+
+  return [createTimelineTotalSegment('total', breakdown.primaryMinutes, 'total')]
+}
+
 function finalizeTimelineTotalBreakdown(
   breakdown: TimelineTotalBreakdown,
-  excludeUncategorized: boolean,
+  preferences: TimelineTotalPreferences,
 ): TimelineTotalBreakdown {
+  const primaryMinutes =
+    (preferences.includeExternalInTotals ? breakdown.externalMinutes : 0)
+    + (preferences.includeInternalInTotals ? breakdown.internalMinutes : 0)
+    + (preferences.excludeUncategorizedFromTotals ? 0 : breakdown.uncategorizedMinutes)
+
   return {
     ...breakdown,
-    primaryMinutes: excludeUncategorized
-      ? breakdown.categorizedMinutes
-      : breakdown.categorizedMinutes + breakdown.uncategorizedMinutes,
+    primaryMinutes,
   }
 }
 
@@ -6771,12 +9859,17 @@ function addEntryToTimelineTotalBreakdown(
     return
   }
 
-  breakdown.categorizedMinutes += entry.durationMinutes
+  if (entry.engagementType === 'internal') {
+    breakdown.internalMinutes += entry.durationMinutes
+    return
+  }
+
+  breakdown.externalMinutes += entry.durationMinutes
 }
 
 function buildTimelineTotalBreakdown(
   entries: TimelineEntry[],
-  excludeUncategorized: boolean,
+  preferences: TimelineTotalPreferences,
 ): TimelineTotalBreakdown {
   const breakdown = createEmptyTimelineTotalBreakdown()
 
@@ -6784,13 +9877,13 @@ function buildTimelineTotalBreakdown(
     addEntryToTimelineTotalBreakdown(breakdown, entry)
   }
 
-  return finalizeTimelineTotalBreakdown(breakdown, excludeUncategorized)
+  return finalizeTimelineTotalBreakdown(breakdown, preferences)
 }
 
 function buildTimelineDayTotalBreakdowns(
   entries: TimelineEntry[],
   days: TimelineWeekView['days'],
-  excludeUncategorized: boolean,
+  preferences: TimelineTotalPreferences,
 ): Map<string, TimelineTotalBreakdown> {
   const totalsByDate = new Map(
     days.map((day) => [day.date, createEmptyTimelineTotalBreakdown()] as const),
@@ -6807,7 +9900,7 @@ function buildTimelineDayTotalBreakdowns(
   }
 
   for (const [date, breakdown] of totalsByDate) {
-    totalsByDate.set(date, finalizeTimelineTotalBreakdown(breakdown, excludeUncategorized))
+    totalsByDate.set(date, finalizeTimelineTotalBreakdown(breakdown, preferences))
   }
 
   return totalsByDate
@@ -6849,6 +9942,35 @@ function snapMinute(value: number, increment: number): number {
   }
 
   return Math.round(value / increment) * increment
+}
+
+function clampQuickBlockDuration(durationMinutes: number): number {
+  const rounded = snapMinute(durationMinutes, QUICK_BLOCK_DURATION_STEP_MINUTES)
+  return Math.min(
+    QUICK_BLOCK_MAX_DURATION_MINUTES,
+    Math.max(TIMELINE_MANUAL_CREATE_DURATION_MINUTES, rounded),
+  )
+}
+
+function quickBlockDurationFromDrag(originClientX: number, currentClientX: number): number {
+  const dragDistance = Math.max(0, currentClientX - originClientX)
+  const durationSteps = Math.round(dragDistance / QUICK_BLOCK_DRAG_STEP_PX)
+  return clampQuickBlockDuration(
+    TIMELINE_MANUAL_CREATE_DURATION_MINUTES
+    + durationSteps * QUICK_BLOCK_DURATION_STEP_MINUTES,
+  )
+}
+
+function currentRoundedTimelineEndMinute(): number {
+  const now = new Date()
+  const currentMinute = now.getHours() * HOUR_IN_MINUTES + now.getMinutes()
+  return Math.min(
+    MINUTES_IN_DAY,
+    Math.max(
+      TIMELINE_DRAG_SNAP_MINUTES,
+      snapMinute(currentMinute, TIMELINE_DRAG_SNAP_MINUTES),
+    ),
+  )
 }
 
 function clampStartMinuteForDuration(
@@ -7595,17 +10717,30 @@ function renderSummaryPreviewCell(
 function renderSummaryPreviewFooter(
   column: SummaryLayoutViewColumn,
   weeklySummary: TimelineWeeklySummary | null,
+  timelineTotalPreferences: TimelineTotalPreferences,
+  separateEngagementTypeTotals: boolean,
+  showUncategorizedTotal: boolean,
 ) {
   if (!weeklySummary) {
     return ''
   }
 
   if (column.kind === 'day' && column.dayIndex !== undefined) {
-    return formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
+    return renderSummaryTotalBreakdown(
+      weeklySummary.dayTotalBreakdowns[column.dayIndex],
+      timelineTotalPreferences,
+      separateEngagementTypeTotals,
+      showUncategorizedTotal,
+    )
   }
 
   if (column.kind === 'rowTotal') {
-    return formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+    return renderSummaryTotalBreakdown(
+      weeklySummary.weekTotalBreakdown,
+      timelineTotalPreferences,
+      separateEngagementTypeTotals,
+      showUncategorizedTotal,
+    )
   }
 
   return ''
@@ -7616,13 +10751,26 @@ function renderSummaryFooterCell(
   columnIndex: number,
   summaryFooterLabelIndex: number,
   weeklySummary: TimelineWeeklySummary,
+  timelineTotalPreferences: TimelineTotalPreferences,
+  separateEngagementTypeTotals: boolean,
+  showUncategorizedTotal: boolean,
 ) {
   if (column.kind === 'day' && column.dayIndex !== undefined) {
-    return formatMinutesAsHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
+    return renderSummaryTotalBreakdown(
+      weeklySummary.dayTotalBreakdowns[column.dayIndex],
+      timelineTotalPreferences,
+      separateEngagementTypeTotals,
+      showUncategorizedTotal,
+    )
   }
 
   if (column.kind === 'rowTotal') {
-    return formatMinutesAsHours(weeklySummary.weekTotalMinutes)
+    return renderSummaryTotalBreakdown(
+      weeklySummary.weekTotalBreakdown,
+      timelineTotalPreferences,
+      separateEngagementTypeTotals,
+      showUncategorizedTotal,
+    )
   }
 
   return (
@@ -7630,6 +10778,43 @@ function renderSummaryFooterCell(
     && columnIndex === summaryFooterLabelIndex
     && column.kind !== 'day'
   ) ? 'Day Totals' : ''
+}
+
+function renderSummaryTotalBreakdown(
+  breakdown: TimelineTotalBreakdown | undefined,
+  timelineTotalPreferences: TimelineTotalPreferences,
+  separateEngagementTypeTotals: boolean,
+  showUncategorizedTotal: boolean,
+) {
+  if (!breakdown) {
+    return formatMinutesAsHours(0)
+  }
+
+  const displayedBreakdown = finalizeTimelineTotalBreakdown(breakdown, timelineTotalPreferences)
+
+  const segments = buildTimelineTotalDisplaySegments(displayedBreakdown, {
+    includePrimaryTotal: false,
+    separateEngagementTypeTotals,
+    showUncategorizedTotal,
+  })
+
+  return (
+    <span className="summary-total-breakdown">
+      <span>{formatMinutesAsHours(displayedBreakdown.primaryMinutes)}</span>
+      {segments.length > 0 ? (
+        <span className="summary-total-breakdown-detail">
+          {segments.map((segment, segmentIndex) => (
+            <Fragment key={segment.key}>
+              {segmentIndex > 0 ? (
+                <span className="summary-total-separator" aria-hidden="true">•</span>
+              ) : null}
+              <span>{segment.label}</span>
+            </Fragment>
+          ))}
+        </span>
+      ) : null}
+    </span>
+  )
 }
 
 function buildSummaryLayoutInsertOptions(preset: SummaryLayoutPreset): Array<{

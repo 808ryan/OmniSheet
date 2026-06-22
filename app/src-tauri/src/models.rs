@@ -6,8 +6,12 @@ pub struct ApiKeyInput {
     pub api_key: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OpenAiModelId {
+    #[serde(rename = "gpt-5.4")]
+    Gpt54,
+    #[serde(rename = "gpt-5.4-mini")]
+    Gpt54Mini,
     #[serde(rename = "gpt-5-nano")]
     Gpt5Nano,
     #[serde(rename = "gpt-4.1-nano")]
@@ -21,10 +25,21 @@ impl Default for OpenAiModelId {
 }
 
 impl OpenAiModelId {
-    pub const ALL: [Self; 2] = [Self::Gpt5Nano, Self::Gpt41Nano];
+    pub const ALL: [Self; 4] = [
+        Self::Gpt54,
+        Self::Gpt54Mini,
+        Self::Gpt5Nano,
+        Self::Gpt41Nano,
+    ];
+
+    pub fn default_calendar_bulk_model() -> Self {
+        Self::Gpt54
+    }
 
     pub fn api_name(self) -> &'static str {
         match self {
+            Self::Gpt54 => "gpt-5.4",
+            Self::Gpt54Mini => "gpt-5.4-mini",
             Self::Gpt5Nano => "gpt-5-nano",
             Self::Gpt41Nano => "gpt-4.1-nano",
         }
@@ -32,6 +47,8 @@ impl OpenAiModelId {
 
     pub fn display_label(self) -> &'static str {
         match self {
+            Self::Gpt54 => "GPT-5.4",
+            Self::Gpt54Mini => "GPT-5.4 Mini",
             Self::Gpt5Nano => "GPT-5 Nano",
             Self::Gpt41Nano => "GPT-4.1 Nano",
         }
@@ -39,6 +56,8 @@ impl OpenAiModelId {
 
     pub fn from_api_name(value: &str) -> Option<Self> {
         match value.trim() {
+            "gpt-5.4" => Some(Self::Gpt54),
+            "gpt-5.4-mini" => Some(Self::Gpt54Mini),
             "gpt-5-nano" => Some(Self::Gpt5Nano),
             "gpt-4.1-nano" => Some(Self::Gpt41Nano),
             _ => None,
@@ -54,6 +73,22 @@ impl OpenAiModelId {
             })
             .collect()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngagementType {
+    External,
+    Internal,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineTotalBreakdown {
+    pub primary_minutes: i64,
+    pub external_minutes: i64,
+    pub internal_minutes: i64,
+    pub uncategorized_minutes: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +146,7 @@ impl TranscriptionModelId {
 pub enum CaptureSourceId {
     Text,
     Voice,
+    Calendar,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +171,12 @@ pub struct SettingsSetOpenAiModelInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SettingsSetCalendarBulkModelInput {
+    pub model: OpenAiModelId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsSetTranscriptionModelInput {
     pub model: TranscriptionModelId,
 }
@@ -144,6 +186,16 @@ pub struct SettingsSetTranscriptionModelInput {
 pub struct SettingsSetTimelinePreferencesInput {
     pub timeline_exclude_uncategorized_from_daily_totals: bool,
     pub timeline_show_uncategorized_daily_total: bool,
+    pub timeline_include_external_in_totals: bool,
+    pub timeline_include_internal_in_totals: bool,
+    pub timeline_separate_engagement_type_totals: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSetCalendarBulkPreferencesInput {
+    pub calendar_bulk_ignored_keywords: Vec<String>,
+    pub calendar_bulk_ignore_all_day_events: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,10 +208,16 @@ pub struct SettingsStatus {
     pub last_error: Option<String>,
     pub selected_open_ai_model: OpenAiModelId,
     pub available_open_ai_models: Vec<OpenAiModelOption>,
+    pub selected_calendar_bulk_model: OpenAiModelId,
     pub selected_transcription_model: TranscriptionModelId,
     pub available_transcription_models: Vec<TranscriptionModelOption>,
     pub timeline_exclude_uncategorized_from_daily_totals: bool,
     pub timeline_show_uncategorized_daily_total: bool,
+    pub timeline_include_external_in_totals: bool,
+    pub timeline_include_internal_in_totals: bool,
+    pub timeline_separate_engagement_type_totals: bool,
+    pub calendar_bulk_ignored_keywords: Vec<String>,
+    pub calendar_bulk_ignore_all_day_events: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +266,7 @@ pub struct Engagement {
     pub code: Option<String>,
     pub name: String,
     pub client: Option<String>,
+    pub engagement_type: EngagementType,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
     pub describe_when_to_use: Option<String>,
@@ -224,6 +283,7 @@ pub struct EngagementUpsertInput {
     pub code: Option<String>,
     pub name: String,
     pub client: Option<String>,
+    pub engagement_type: Option<EngagementType>,
     pub color_hex: Option<String>,
     pub tags: Vec<String>,
     pub describe_when_to_use: String,
@@ -331,6 +391,120 @@ pub struct InterpretResult {
     pub llm_duration_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarExtractInput {
+    pub image_base64: String,
+    pub mime_type: String,
+    pub client_timestamp_iso: String,
+    pub timezone: String,
+    pub client_local_date: String,
+    pub client_local_time: String,
+    pub client_utc_offset_minutes: i64,
+    pub selected_date: String,
+    pub open_ai_model: Option<OpenAiModelId>,
+    pub ignored_keywords: Vec<String>,
+    pub ignore_all_day_events: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarExtractResult {
+    pub correlation_id: String,
+    pub candidates: Vec<CalendarExtractCandidate>,
+    pub ignored_candidate_count: i64,
+    pub model_used: OpenAiModelId,
+    pub model_used_label: String,
+    pub llm_duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarExtractCandidate {
+    pub id: String,
+    pub date: String,
+    pub start_minute: i64,
+    pub end_minute: i64,
+    pub duration_minutes: i64,
+    pub time_evidence: Option<String>,
+    pub description: String,
+    pub extracted_text: String,
+    pub source_text: String,
+    pub confidence: f64,
+    pub engagement_id: Option<String>,
+    pub activity_id: Option<String>,
+    pub engagement_code: Option<String>,
+    pub engagement_name: Option<String>,
+    pub engagement_type: Option<EngagementType>,
+    pub activity_code: Option<String>,
+    pub activity_name: Option<String>,
+    pub warning_flags: Vec<WarningType>,
+    pub is_all_day: bool,
+    pub is_ignored: bool,
+    pub ignored_reason: Option<String>,
+    pub needs_date_confirmation: bool,
+    pub needs_time_confirmation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarImportInput {
+    pub client_timestamp_iso: String,
+    pub timezone: String,
+    pub client_local_date: String,
+    pub client_local_time: String,
+    pub client_utc_offset_minutes: i64,
+    pub entries: Vec<CalendarImportEntryInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarImportEntryInput {
+    pub date: String,
+    pub start_minute: i64,
+    pub end_minute: i64,
+    pub description: String,
+    pub extracted_text: String,
+    pub engagement_id: Option<String>,
+    pub activity_id: Option<String>,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarImportResult {
+    pub correlation_id: String,
+    pub raw_message_id: String,
+    pub created_entry_ids: Vec<String>,
+    pub touched_month_keys: Vec<String>,
+    pub warnings: Vec<Warning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarVisionResponse {
+    pub events: Vec<CalendarVisionEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarVisionEvent {
+    pub title: String,
+    pub details: Option<String>,
+    pub date: Option<String>,
+    pub weekday: Option<String>,
+    pub day_of_month: Option<i64>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub duration_minutes: Option<i64>,
+    pub time_evidence: Option<String>,
+    pub is_all_day: bool,
+    pub engagement_ref: Option<String>,
+    pub activity_ref: Option<String>,
+    pub confidence: Option<f64>,
+    pub visual_notes: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WarningType {
@@ -363,6 +537,7 @@ pub struct TimelineEntry {
     pub activity_id: Option<String>,
     pub engagement_code: Option<String>,
     pub engagement_name: Option<String>,
+    pub engagement_type: Option<EngagementType>,
     pub activity_code: Option<String>,
     pub activity_name: Option<String>,
     pub used_activity_fallback: bool,
@@ -376,6 +551,8 @@ pub struct TimelineEntry {
     pub transcription_model_used: Option<TranscriptionModelId>,
     pub transcription_model_used_label: Option<String>,
     pub warning_flags: Vec<WarningType>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -395,6 +572,8 @@ pub struct TimelineWeeklySummary {
     pub rows: Vec<TimelineWeeklySummaryRow>,
     pub day_total_minutes: Vec<i64>,
     pub week_total_minutes: i64,
+    pub day_total_breakdowns: Vec<TimelineTotalBreakdown>,
+    pub week_total_breakdown: TimelineTotalBreakdown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -413,6 +592,7 @@ pub struct TimelineWeeklySummaryRow {
     pub activity_name: String,
     pub engagement_name: String,
     pub client_name: String,
+    pub engagement_type: Option<EngagementType>,
     pub is_uncategorized: bool,
     pub cells: Vec<TimelineWeeklySummaryCell>,
     pub row_total_minutes: i64,
@@ -493,8 +673,13 @@ pub enum SummaryLayoutColumn {
         #[serde(rename = "dayIndex", alias = "day_index")]
         day_index: u8,
     },
-    FreeText { id: String, label: String },
-    RowTotal { id: String },
+    FreeText {
+        id: String,
+        label: String,
+    },
+    RowTotal {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,12 +724,66 @@ pub struct TimelineCreateInput {
     pub date: String,
     pub start_minute: i64,
     pub end_minute: i64,
+    pub engagement_id: Option<String>,
+    pub activity_id: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddSuggestionInput {
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddSuggestion {
+    pub engagement_id: String,
+    pub activity_id: String,
+    pub usage_count: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddSuggestionResult {
+    pub suggestions: Vec<QuickAddSuggestion>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdResult {
     pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryListResult {
+    pub week_start_date: String,
+    pub week_end_date: String,
+    pub submissions: Vec<HistorySubmission>,
+    pub entries: Vec<TimelineEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySubmission {
+    pub id: String,
+    pub raw_text: String,
+    pub capture_source: String,
+    pub status: String,
+    pub message_timestamp: i64,
+    pub created_at: i64,
+    pub interpreted_entry_count: i64,
+    pub unique_entry_count: i64,
+    pub saved_entry_count: i64,
+    pub truncated_entry_count: i64,
+    pub contains_multiple_events: bool,
+    pub confidence: f64,
+    pub model_used: Option<OpenAiModelId>,
+    pub model_used_label: Option<String>,
+    pub transcription_model_used: Option<TranscriptionModelId>,
+    pub transcription_model_used_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -683,6 +922,14 @@ mod tests {
         assert_eq!(default_model, OpenAiModelId::Gpt5Nano);
         assert_eq!(default_model.api_name(), "gpt-5-nano");
         assert_eq!(default_model.display_label(), "GPT-5 Nano");
+        assert_eq!(
+            OpenAiModelId::default_calendar_bulk_model(),
+            OpenAiModelId::Gpt54
+        );
+        assert_eq!(OpenAiModelId::Gpt54.api_name(), "gpt-5.4");
+        assert_eq!(OpenAiModelId::Gpt54.display_label(), "GPT-5.4");
+        assert_eq!(OpenAiModelId::Gpt54Mini.api_name(), "gpt-5.4-mini");
+        assert_eq!(OpenAiModelId::Gpt54Mini.display_label(), "GPT-5.4 Mini");
         assert_eq!(OpenAiModelId::Gpt41Nano.display_label(), "GPT-4.1 Nano");
     }
 
@@ -699,7 +946,23 @@ mod tests {
             OpenAiModelId::from_api_name("gpt-4.1-nano"),
             Some(OpenAiModelId::Gpt41Nano)
         );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.4"),
+            Some(OpenAiModelId::Gpt54)
+        );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.4-mini"),
+            Some(OpenAiModelId::Gpt54Mini)
+        );
         assert_eq!(OpenAiModelId::from_api_name("gpt-4.1"), None);
+
+        let options = OpenAiModelId::options();
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt54));
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt54Mini));
     }
 
     #[test]
@@ -865,7 +1128,9 @@ mod tests {
         };
 
         let serialized = serde_json::to_value(&column).expect("column serialization should work");
-        let serialized_object = serialized.as_object().expect("column should serialize to an object");
+        let serialized_object = serialized
+            .as_object()
+            .expect("column should serialize to an object");
         assert_eq!(
             serialized_object
                 .get("fieldKey")
