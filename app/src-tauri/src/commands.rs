@@ -23,8 +23,11 @@ use crate::models::{
     Engagement, EngagementType, EngagementUpsertInput, HistoryListResult, IdInput, IdResult,
     InterpretResult, InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry,
     MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
-    QuickAddSuggestionInput, QuickAddSuggestionResult, SettingsSetCalendarBulkModelInput,
-    SettingsSetCalendarBulkPreferencesInput, SettingsSetOpenAiModelInput,
+    QuickAddPreferences, QuickAddSuggestionInput, QuickAddSuggestionResult,
+    ReportingDisplayDensity, ReportingDisplayPreset, ReportingRowLabelMode, ReportingState,
+    ReportingViewMode,
+    SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
+    SettingsSetOpenAiModelInput, SettingsSetQuickAddPreferencesInput,
     SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
     StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
     SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
@@ -57,11 +60,16 @@ const APP_SETTING_TIMELINE_SEPARATE_ENGAGEMENT_TYPE_TOTALS: &str =
     "timeline_separate_engagement_type_totals";
 const APP_SETTING_CALENDAR_BULK_IGNORED_KEYWORDS: &str = "calendar_bulk_ignored_keywords";
 const APP_SETTING_CALENDAR_BULK_IGNORE_ALL_DAY_EVENTS: &str = "calendar_bulk_ignore_all_day_events";
+const APP_SETTING_QUICK_ADD_PREFERENCES: &str = "quick_add_preferences";
 const APP_SETTING_SUMMARY_LAYOUT_STATE: &str = "summary_layout_state";
-const SUMMARY_LAYOUT_STATE_VERSION: i64 = 2;
+const APP_SETTING_REPORTING_STATE: &str = "reporting_state";
+const SUMMARY_LAYOUT_STATE_VERSION: i64 = 3;
 const SUMMARY_LAYOUT_MAX_NAME_LENGTH: usize = 40;
 const DEFAULT_SUMMARY_LAYOUT_PRESET_ID: &str = "preset-standard";
 const DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID: &str = "row-total";
+const REPORTING_STATE_VERSION: i64 = 1;
+const REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH: usize = 40;
+const DEFAULT_REPORTING_DISPLAY_PRESET_ID: &str = "reporting-display-compact-review";
 const SUMMARY_DAY_NAMES: [&str; 7] = [
     "Saturday",
     "Sunday",
@@ -335,6 +343,64 @@ fn read_saved_calendar_bulk_preferences(connection: &Connection) -> AppResult<(V
     Ok((ignored_keywords, ignore_all_day_events))
 }
 
+fn default_quick_add_preferences() -> QuickAddPreferences {
+    QuickAddPreferences {
+        engagement_order: Vec::new(),
+        hidden_engagement_ids: Vec::new(),
+        activity_order: HashMap::new(),
+        hidden_activity_ids: Vec::new(),
+    }
+}
+
+fn normalize_id_list(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut normalized = Vec::<String>::new();
+
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+
+        normalized.push(trimmed.to_string());
+    }
+
+    normalized
+}
+
+fn normalize_quick_add_preferences(preferences: QuickAddPreferences) -> QuickAddPreferences {
+    let mut activity_order = HashMap::<String, Vec<String>>::new();
+
+    for (engagement_id, activity_ids) in preferences.activity_order {
+        let normalized_engagement_id = engagement_id.trim();
+        if normalized_engagement_id.is_empty() {
+            continue;
+        }
+
+        activity_order.insert(
+            normalized_engagement_id.to_string(),
+            normalize_id_list(&activity_ids),
+        );
+    }
+
+    QuickAddPreferences {
+        engagement_order: normalize_id_list(&preferences.engagement_order),
+        hidden_engagement_ids: normalize_id_list(&preferences.hidden_engagement_ids),
+        activity_order,
+        hidden_activity_ids: normalize_id_list(&preferences.hidden_activity_ids),
+    }
+}
+
+fn read_saved_quick_add_preferences(connection: &Connection) -> AppResult<QuickAddPreferences> {
+    let saved_value = db::get_app_setting(connection, APP_SETTING_QUICK_ADD_PREFERENCES)?;
+    let parsed_preferences = saved_value
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<QuickAddPreferences>(value).ok())
+        .unwrap_or_else(default_quick_add_preferences);
+
+    Ok(normalize_quick_add_preferences(parsed_preferences))
+}
+
 fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
     vec![
         SummaryLayoutColumn::Field {
@@ -497,9 +563,34 @@ fn normalize_summary_layout_state(
                             .to_string());
                     }
                 }
-                SummaryLayoutColumn::FreeText { id, label } => {
+                SummaryLayoutColumn::FreeText {
+                    id,
+                    label,
+                    row_values,
+                    repeat,
+                    repeat_value,
+                    repeat_row_key,
+                } => {
                     *id = id.trim().to_string();
                     *label = label.trim().to_string();
+                    let mut normalized_row_values = HashMap::new();
+                    for (key, value) in std::mem::take(row_values) {
+                        let normalized_key = key.trim().to_string();
+                        let normalized_value = value.trim().to_string();
+                        if !normalized_key.is_empty() && !normalized_value.is_empty() {
+                            normalized_row_values.insert(normalized_key, normalized_value);
+                        }
+                    }
+                    *row_values = normalized_row_values;
+                    *repeat_value = repeat_value.trim().to_string();
+                    *repeat_row_key = repeat_row_key
+                        .as_ref()
+                        .map(|candidate| candidate.trim().to_string())
+                        .filter(|candidate| !candidate.is_empty());
+                    if !*repeat {
+                        repeat_value.clear();
+                        *repeat_row_key = None;
+                    }
                     if id.is_empty() {
                         return Err(
                             "Summary layout free-text column IDs cannot be empty.".to_string()
@@ -579,6 +670,103 @@ fn read_summary_layout_state(connection: &Connection) -> AppResult<SummaryLayout
         db::upsert_app_setting(
             connection,
             APP_SETTING_SUMMARY_LAYOUT_STATE,
+            serialized_state.as_str(),
+        )?;
+    }
+
+    Ok(state)
+}
+
+fn default_reporting_display_preset() -> ReportingDisplayPreset {
+    ReportingDisplayPreset {
+        id: DEFAULT_REPORTING_DISPLAY_PRESET_ID.to_string(),
+        name: "Compact Review".to_string(),
+        density: ReportingDisplayDensity::Compact,
+        row_label_mode: ReportingRowLabelMode::Combined,
+        show_codes: true,
+        show_client: false,
+        show_engagement_type: false,
+        show_empty_days: true,
+    }
+}
+
+fn default_reporting_state() -> ReportingState {
+    ReportingState {
+        version: REPORTING_STATE_VERSION,
+        selected_view_mode: ReportingViewMode::Table,
+        selected_display_preset_id: DEFAULT_REPORTING_DISPLAY_PRESET_ID.to_string(),
+        selected_export_preset_id: None,
+        display_presets: vec![default_reporting_display_preset()],
+    }
+}
+
+fn normalize_reporting_state(mut state: ReportingState) -> Result<ReportingState, String> {
+    state.version = REPORTING_STATE_VERSION;
+    state.selected_display_preset_id = state.selected_display_preset_id.trim().to_string();
+    state.selected_export_preset_id = state
+        .selected_export_preset_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if state.display_presets.is_empty() {
+        return Err("At least one reporting display preset is required.".to_string());
+    }
+
+    let mut preset_ids = HashSet::new();
+    let mut preset_names = HashSet::new();
+
+    for preset in &mut state.display_presets {
+        preset.id = preset.id.trim().to_string();
+        preset.name = preset.name.trim().to_string();
+
+        if preset.id.is_empty() {
+            return Err("Reporting display preset IDs cannot be empty.".to_string());
+        }
+
+        if preset.name.is_empty() {
+            return Err("Reporting display preset names cannot be empty.".to_string());
+        }
+
+        if preset.name.chars().count() > REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH {
+            return Err(format!(
+                "Reporting display preset names must be {} characters or fewer.",
+                REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH
+            ));
+        }
+
+        if !preset_ids.insert(preset.id.clone()) {
+            return Err("Reporting display preset IDs must be unique.".to_string());
+        }
+
+        if !preset_names.insert(preset.name.to_lowercase()) {
+            return Err("Reporting display preset names must be unique.".to_string());
+        }
+    }
+
+    if state.selected_display_preset_id.is_empty() {
+        return Err("A selected reporting display preset is required.".to_string());
+    }
+
+    if !preset_ids.contains(&state.selected_display_preset_id) {
+        return Err("The selected reporting display preset does not exist.".to_string());
+    }
+
+    Ok(state)
+}
+
+fn read_reporting_state(connection: &Connection) -> AppResult<ReportingState> {
+    let saved_value = db::get_app_setting(connection, APP_SETTING_REPORTING_STATE)?;
+    let state = saved_value
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<ReportingState>(value).ok())
+        .and_then(|state| normalize_reporting_state(state).ok())
+        .unwrap_or_else(default_reporting_state);
+
+    let serialized_state = serde_json::to_string(&state)?;
+    if saved_value.as_deref() != Some(serialized_state.as_str()) {
+        db::upsert_app_setting(
+            connection,
+            APP_SETTING_REPORTING_STATE,
             serialized_state.as_str(),
         )?;
     }
@@ -812,12 +1000,19 @@ fn choose_export_file_path(downloads_dir: &Path, base_name: &str) -> PathBuf {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SummaryExportFreeTextValue {
+    row_values: HashMap<String, String>,
+    repeat: bool,
+    repeat_value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SummaryExportSheetColumnKind {
     Field(SummaryLayoutFieldKey),
     DayHours(usize),
     DayNotes(usize),
-    FreeText,
+    FreeText(SummaryExportFreeTextValue),
     RowTotal,
 }
 
@@ -933,9 +1128,19 @@ fn build_summary_export_hours_sheet_columns(
                     wrap_text: false,
                 });
             }
-            SummaryLayoutColumn::FreeText { label, .. } => columns.push(SummaryExportSheetColumn {
+            SummaryLayoutColumn::FreeText {
+                label,
+                row_values,
+                repeat,
+                repeat_value,
+                ..
+            } => columns.push(SummaryExportSheetColumn {
                 header: label.clone(),
-                kind: SummaryExportSheetColumnKind::FreeText,
+                kind: SummaryExportSheetColumnKind::FreeText(SummaryExportFreeTextValue {
+                    row_values: row_values.clone(),
+                    repeat: *repeat,
+                    repeat_value: repeat_value.clone(),
+                }),
                 width: 18,
                 wrap_text: true,
             }),
@@ -977,30 +1182,27 @@ fn build_summary_export_hours_and_notes_sheet_columns(
                     wrap_text: false,
                 });
 
-                if matches!(
-                    preset.columns.get(column_index + 1),
-                    Some(SummaryLayoutColumn::FreeText { .. })
-                ) {
-                    columns.push(SummaryExportSheetColumn {
-                        header: summary_day_notes_header(summary, resolved_day_index),
-                        kind: SummaryExportSheetColumnKind::DayNotes(resolved_day_index),
-                        width: 42,
-                        wrap_text: true,
-                    });
-                    column_index += 1;
-                } else {
-                    columns.push(SummaryExportSheetColumn {
-                        header: summary_day_notes_header(summary, resolved_day_index),
-                        kind: SummaryExportSheetColumnKind::DayNotes(resolved_day_index),
-                        width: 42,
-                        wrap_text: true,
-                    });
-                }
+                columns.push(SummaryExportSheetColumn {
+                    header: summary_day_notes_header(summary, resolved_day_index),
+                    kind: SummaryExportSheetColumnKind::DayNotes(resolved_day_index),
+                    width: 42,
+                    wrap_text: true,
+                });
             }
-            SummaryLayoutColumn::FreeText { label, .. } => {
+            SummaryLayoutColumn::FreeText {
+                label,
+                row_values,
+                repeat,
+                repeat_value,
+                ..
+            } => {
                 columns.push(SummaryExportSheetColumn {
                     header: label.clone(),
-                    kind: SummaryExportSheetColumnKind::FreeText,
+                    kind: SummaryExportSheetColumnKind::FreeText(SummaryExportFreeTextValue {
+                        row_values: row_values.clone(),
+                        repeat: *repeat,
+                        repeat_value: repeat_value.clone(),
+                    }),
                     width: 18,
                     wrap_text: true,
                 });
@@ -1104,12 +1306,52 @@ fn build_export_metadata_maps(
 fn summary_export_footer_label_column_index(columns: &[SummaryExportSheetColumn]) -> Option<usize> {
     columns.iter().position(|column| {
         !matches!(
-            column.kind,
+            &column.kind,
             SummaryExportSheetColumnKind::DayHours(_)
                 | SummaryExportSheetColumnKind::DayNotes(_)
                 | SummaryExportSheetColumnKind::RowTotal
         )
     })
+}
+
+fn summary_export_row_key(row: &crate::models::TimelineWeeklySummaryRow) -> String {
+    if let Some(activity_id) = row
+        .activity_id
+        .as_ref()
+        .map(|candidate| candidate.trim())
+        .filter(|candidate| !candidate.is_empty())
+    {
+        return format!("activity:{activity_id}");
+    }
+
+    if row.is_uncategorized {
+        if let Some(engagement_id) = row
+            .engagement_id
+            .as_ref()
+            .map(|candidate| candidate.trim())
+            .filter(|candidate| !candidate.is_empty())
+        {
+            return format!("engagement:{engagement_id}:uncategorized");
+        }
+    }
+
+    "uncategorized".to_string()
+}
+
+fn resolve_summary_export_free_text_value(
+    free_text: &SummaryExportFreeTextValue,
+    row: &crate::models::TimelineWeeklySummaryRow,
+) -> String {
+    if free_text.repeat {
+        return free_text.repeat_value.clone();
+    }
+
+    let row_key = summary_export_row_key(row);
+    free_text
+        .row_values
+        .get(&row_key)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn write_layout_driven_summary_sheet(
@@ -1140,10 +1382,10 @@ fn write_layout_driven_summary_sheet(
     for row in &summary.rows {
         for (column_index, column) in columns.iter().enumerate() {
             let excel_column = column_index as u16;
-            match column.kind {
+            match &column.kind {
                 SummaryExportSheetColumnKind::Field(field_key) => {
                     let value = resolve_summary_export_field_value(
-                        field_key,
+                        *field_key,
                         row,
                         engagement_by_id,
                         activity_by_id,
@@ -1162,7 +1404,7 @@ fn write_layout_driven_summary_sheet(
                 SummaryExportSheetColumnKind::DayHours(day_index) => {
                     let total_minutes = row
                         .cells
-                        .get(day_index)
+                        .get(*day_index)
                         .map(|cell| cell.total_minutes)
                         .unwrap_or(0);
                     worksheet.write_with_format(
@@ -1175,7 +1417,7 @@ fn write_layout_driven_summary_sheet(
                 SummaryExportSheetColumnKind::DayNotes(day_index) => {
                     let notes = row
                         .cells
-                        .get(day_index)
+                        .get(*day_index)
                         .map(|cell| format_summary_notes_for_export(&cell.notes))
                         .unwrap_or_default();
                     worksheet.write_with_format(
@@ -1185,13 +1427,14 @@ fn write_layout_driven_summary_sheet(
                         &wrapped_text_format,
                     )?;
                 }
-                SummaryExportSheetColumnKind::FreeText => {
+                SummaryExportSheetColumnKind::FreeText(free_text) => {
                     let format = if column.wrap_text {
                         &wrapped_text_format
                     } else {
                         &plain_text_format
                     };
-                    worksheet.write_with_format(row_index, excel_column, "", format)?;
+                    let value = resolve_summary_export_free_text_value(free_text, row);
+                    worksheet.write_with_format(row_index, excel_column, value.as_str(), format)?;
                 }
                 SummaryExportSheetColumnKind::RowTotal => {
                     worksheet.write_with_format(
@@ -1209,8 +1452,8 @@ fn write_layout_driven_summary_sheet(
 
     for (column_index, column) in columns.iter().enumerate() {
         let excel_column = column_index as u16;
-        match column.kind {
-            SummaryExportSheetColumnKind::Field(_) | SummaryExportSheetColumnKind::FreeText => {
+        match &column.kind {
+            SummaryExportSheetColumnKind::Field(_) | SummaryExportSheetColumnKind::FreeText(_) => {
                 if footer_label_column_index == Some(column_index) {
                     worksheet.write_with_format(
                         row_index,
@@ -1232,7 +1475,7 @@ fn write_layout_driven_summary_sheet(
             SummaryExportSheetColumnKind::DayHours(day_index) => {
                 let total_minutes = summary
                     .day_total_minutes
-                    .get(day_index)
+                    .get(*day_index)
                     .copied()
                     .unwrap_or(0);
                 worksheet.write_with_format(
@@ -2153,6 +2396,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         timeline_preferences,
         calendar_bulk_ignored_keywords,
         calendar_bulk_ignore_all_day_events,
+        quick_add_preferences,
     ) = {
         let connection = state.connection.lock().map_err(|_| {
             let message = state_lock_error();
@@ -2268,6 +2512,25 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
                 }
             };
 
+        let quick_add_preferences = match read_saved_quick_add_preferences(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "read_quick_add_preferences_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
+
         (
             selected_open_ai_model,
             invalid_saved_model,
@@ -2278,6 +2541,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             timeline_preferences,
             calendar_bulk_ignored_keywords,
             calendar_bulk_ignore_all_day_events,
+            quick_add_preferences,
         )
     };
 
@@ -2313,6 +2577,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             .separate_engagement_type_totals,
         calendar_bulk_ignored_keywords,
         calendar_bulk_ignore_all_day_events,
+        quick_add_preferences,
     };
 
     record_backend_event_with_state(
@@ -2345,6 +2610,8 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "timelineSeparateEngagementTypeTotals": status.timeline_separate_engagement_type_totals,
           "calendarBulkIgnoredKeywords": status.calendar_bulk_ignored_keywords,
           "calendarBulkIgnoreAllDayEvents": status.calendar_bulk_ignore_all_day_events,
+          "quickAddHiddenEngagementCount": status.quick_add_preferences.hidden_engagement_ids.len(),
+          "quickAddHiddenActivityCount": status.quick_add_preferences.hidden_activity_ids.len(),
         }),
     );
 
@@ -2931,6 +3198,95 @@ pub fn settings_set_calendar_bulk_preferences(
 }
 
 #[tauri::command]
+pub fn settings_set_quick_add_preferences(
+    state: State<'_, AppState>,
+    input: SettingsSetQuickAddPreferencesInput,
+) -> Result<(), String> {
+    let command = "settings_set_quick_add_preferences";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let preferences = normalize_quick_add_preferences(input.quick_add_preferences);
+    let save_result: Result<(), String> = (|| {
+        let serialized_preferences =
+            serde_json::to_string(&preferences).map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_QUICK_ADD_PREFERENCES,
+            &serialized_preferences,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified =
+            read_saved_quick_add_preferences(&connection).map_err(|error| error.to_string())?;
+        if verified != preferences {
+            return Err("Quick Entry preferences verification failed".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "engagementOrderCount": preferences.engagement_order.len(),
+                  "hiddenEngagementCount": preferences.hidden_engagement_ids.len(),
+                  "activityOrderGroupCount": preferences.activity_order.len(),
+                  "hiddenActivityCount": preferences.hidden_activity_ids.len(),
+                  "verified": true,
+                }),
+            );
+            Ok(())
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_quick_add_preferences_setting",
+                  "message": message,
+                  "engagementOrderCount": preferences.engagement_order.len(),
+                  "hiddenEngagementCount": preferences.hidden_engagement_ids.len(),
+                  "activityOrderGroupCount": preferences.activity_order.len(),
+                  "hiddenActivityCount": preferences.hidden_activity_ids.len(),
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
 pub fn summary_layout_state_get(state: State<'_, AppState>) -> Result<SummaryLayoutState, String> {
     let command = "summary_layout_state_get";
     let correlation_id = Uuid::new_v4().to_string();
@@ -3066,6 +3422,152 @@ pub fn summary_layout_state_set(
                   "message": message,
                   "presetCount": normalized_state.presets.len(),
                   "selectedPresetId": normalized_state.selected_preset_id,
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn reporting_state_get(state: State<'_, AppState>) -> Result<ReportingState, String> {
+    let command = "reporting_state_get";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    match read_reporting_state(&connection) {
+        Ok(reporting_state) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "displayPresetCount": reporting_state.display_presets.len(),
+                  "selectedDisplayPresetId": reporting_state.selected_display_preset_id,
+                  "selectedExportPresetId": reporting_state.selected_export_preset_id,
+                }),
+            );
+            Ok(reporting_state)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({ "stage": "read_reporting_state", "message": message }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn reporting_state_set(
+    state: State<'_, AppState>,
+    input: ReportingState,
+) -> Result<ReportingState, String> {
+    let command = "reporting_state_set";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+    let normalized_state = normalize_reporting_state(input)
+        .map_err(|message| format_command_error(&correlation_id, message))?;
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let save_result: Result<(), String> = (|| {
+        let serialized_state =
+            serde_json::to_string(&normalized_state).map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_REPORTING_STATE,
+            serialized_state.as_str(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified = db::get_app_setting(&connection, APP_SETTING_REPORTING_STATE)
+            .map_err(|error| error.to_string())?;
+        if verified.as_deref() != Some(serialized_state.as_str()) {
+            return Err("Reporting settings save verification failed.".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "displayPresetCount": normalized_state.display_presets.len(),
+                  "selectedDisplayPresetId": normalized_state.selected_display_preset_id,
+                  "selectedExportPresetId": normalized_state.selected_export_preset_id,
+                  "verified": true,
+                }),
+            );
+            Ok(normalized_state)
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_reporting_state",
+                  "message": message,
+                  "displayPresetCount": normalized_state.display_presets.len(),
+                  "selectedDisplayPresetId": normalized_state.selected_display_preset_id,
+                  "selectedExportPresetId": normalized_state.selected_export_preset_id,
                 }),
             );
             Err(format_command_error(&correlation_id, message))
@@ -6816,17 +7318,28 @@ mod tests {
         resolve_calendar_event_time, resolve_requested_openai_model,
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
-        round_to_nearest_15, summary_day_notes_header, timeline_week_bounds,
-        timeline_week_view_bounds, validate_calendar_import_entry, validate_manual_create_refs,
-        validate_manual_update_window, validate_timeline_preferences, PreparedEntry,
-        SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType, TemporalReference,
-        TimelinePreferenceValues, MINUTES_IN_DAY,
+        resolve_summary_export_free_text_value, round_to_nearest_15, summary_day_notes_header,
+        timeline_week_bounds, timeline_week_view_bounds, validate_calendar_import_entry,
+        validate_manual_create_refs, validate_manual_update_window, validate_timeline_preferences,
+        PreparedEntry, SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType,
+        TemporalReference, TimelinePreferenceValues, MINUTES_IN_DAY,
     };
 
     fn test_connection() -> Connection {
         let connection = Connection::open_in_memory().expect("in-memory db should open");
         db::run_migrations(&connection).expect("migrations should run");
         connection
+    }
+
+    fn test_free_text_column(id: &str, label: &str) -> SummaryLayoutColumn {
+        SummaryLayoutColumn::FreeText {
+            id: id.to_string(),
+            label: label.to_string(),
+            row_values: std::collections::HashMap::new(),
+            repeat: false,
+            repeat_value: String::new(),
+            repeat_row_key: None,
+        }
     }
 
     fn create_test_engagement_with_activity(connection: &Connection) -> (String, String) {
@@ -7373,7 +7886,7 @@ mod tests {
     #[test]
     fn default_summary_layout_state_seeds_standard_preset() {
         let state = default_summary_layout_state();
-        assert_eq!(state.version, 2);
+        assert_eq!(state.version, 3);
         assert_eq!(state.presets.len(), 1);
         assert_eq!(state.presets[0].name, "Standard");
         assert_eq!(state.selected_preset_id, state.presets[0].id);
@@ -7401,10 +7914,7 @@ mod tests {
                 SummaryLayoutPreset {
                     id: "preset-b".to_string(),
                     name: " alpha ".to_string(),
-                    columns: vec![SummaryLayoutColumn::FreeText {
-                        id: "free-text".to_string(),
-                        label: "Notes".to_string(),
-                    }],
+                    columns: vec![test_free_text_column("free-text", "Notes")],
                 },
             ],
         };
@@ -7430,22 +7940,23 @@ mod tests {
                         id: " day-2 ".to_string(),
                         day_index: 2,
                     },
-                    SummaryLayoutColumn::FreeText {
-                        id: " free-text ".to_string(),
-                        label: " Notes ".to_string(),
-                    },
+                    test_free_text_column(" free-text ", " Notes "),
                 ],
             }],
         })
         .expect("state should normalize");
 
-        assert_eq!(normalized.version, 2);
+        assert_eq!(normalized.version, 3);
         assert_eq!(normalized.selected_preset_id, "preset-a");
         assert_eq!(normalized.presets[0].name, "Working Layout");
         match &normalized.presets[0].columns[2] {
-            SummaryLayoutColumn::FreeText { id, label } => {
+            SummaryLayoutColumn::FreeText { id, label, row_values, repeat, repeat_value, repeat_row_key } => {
                 assert_eq!(id, "free-text");
                 assert_eq!(label, "Notes");
+                assert!(row_values.is_empty());
+                assert!(!repeat);
+                assert!(repeat_value.is_empty());
+                assert!(repeat_row_key.is_none());
             }
             _ => panic!("expected free-text column"),
         }
@@ -7453,6 +7964,42 @@ mod tests {
             normalized.presets[0].columns[3],
             SummaryLayoutColumn::RowTotal { .. }
         ));
+    }
+
+    #[test]
+    fn summary_layout_state_defaults_legacy_free_text_metadata() {
+        let state: SummaryLayoutState = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "selectedPresetId": "preset-a",
+            "presets": [{
+                "id": "preset-a",
+                "name": "Legacy Free Text",
+                "columns": [{
+                    "kind": "freeText",
+                    "id": "free-text",
+                    "label": "Client Ref"
+                }]
+            }]
+        }))
+        .expect("legacy free-text JSON should deserialize");
+
+        let normalized = normalize_summary_layout_state(state).expect("state should normalize");
+        assert_eq!(normalized.version, 3);
+        match &normalized.presets[0].columns[0] {
+            SummaryLayoutColumn::FreeText {
+                row_values,
+                repeat,
+                repeat_value,
+                repeat_row_key,
+                ..
+            } => {
+                assert!(row_values.is_empty());
+                assert!(!repeat);
+                assert!(repeat_value.is_empty());
+                assert!(repeat_row_key.is_none());
+            }
+            _ => panic!("expected free-text column"),
+        }
     }
 
     #[test]
@@ -7762,10 +8309,7 @@ mod tests {
                     id: " field-activity ".to_string(),
                     field_key: SummaryLayoutFieldKey::ActivityName,
                 },
-                SummaryLayoutColumn::FreeText {
-                    id: " free-text ".to_string(),
-                    label: " Notes Slot ".to_string(),
-                },
+                test_free_text_column(" free-text ", " Notes Slot "),
             ],
         })
         .expect("preset should normalize");
@@ -7773,9 +8317,13 @@ mod tests {
         assert_eq!(normalized.id, "preset-a");
         assert_eq!(normalized.name, "Export Layout");
         match &normalized.columns[1] {
-            SummaryLayoutColumn::FreeText { id, label } => {
+            SummaryLayoutColumn::FreeText { id, label, row_values, repeat, repeat_value, repeat_row_key } => {
                 assert_eq!(id, "free-text");
                 assert_eq!(label, "Notes Slot");
+                assert!(row_values.is_empty());
+                assert!(!repeat);
+                assert!(repeat_value.is_empty());
+                assert!(repeat_row_key.is_none());
             }
             _ => panic!("expected free-text column"),
         }
@@ -7857,7 +8405,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    columns[row_total_index].kind,
+                    &columns[row_total_index].kind,
                     SummaryExportSheetColumnKind::RowTotal
                 ),
                 "{label} preset should keep Row Total at the requested position"
@@ -7866,7 +8414,7 @@ mod tests {
     }
 
     #[test]
-    fn hours_and_notes_export_reuses_only_adjacent_free_text_columns() {
+    fn hours_and_notes_export_preserves_free_text_columns() {
         let summary = test_weekly_summary();
         let preset = SummaryLayoutPreset {
             id: "preset-export".to_string(),
@@ -7880,10 +8428,7 @@ mod tests {
                     id: "day-0".to_string(),
                     day_index: 0,
                 },
-                SummaryLayoutColumn::FreeText {
-                    id: "free-text-adjacent".to_string(),
-                    label: "Custom Notes".to_string(),
-                },
+                test_free_text_column("free-text-adjacent", "Custom Notes"),
                 SummaryLayoutColumn::Day {
                     id: "day-1".to_string(),
                     day_index: 1,
@@ -7892,9 +8437,111 @@ mod tests {
                     id: "field-client-name".to_string(),
                     field_key: SummaryLayoutFieldKey::ClientName,
                 },
+                test_free_text_column("free-text-later", "Later Blank"),
+                SummaryLayoutColumn::RowTotal {
+                    id: "row-total".to_string(),
+                },
+            ],
+        };
+
+        let columns = build_summary_export_hours_and_notes_sheet_columns(&summary, &preset);
+        assert_eq!(columns.len(), 9);
+        assert!(matches!(
+            &columns[0].kind,
+            SummaryExportSheetColumnKind::Field(SummaryLayoutFieldKey::EngagementCode)
+        ));
+        assert!(matches!(
+            &columns[1].kind,
+            SummaryExportSheetColumnKind::DayHours(0)
+        ));
+        assert!(matches!(
+            &columns[2].kind,
+            SummaryExportSheetColumnKind::DayNotes(0)
+        ));
+        assert_eq!(columns[2].header, summary_day_notes_header(&summary, 0));
+        assert!(matches!(
+            &columns[3].kind,
+            SummaryExportSheetColumnKind::FreeText(_)
+        ));
+        assert_eq!(columns[3].header, "Custom Notes");
+        assert!(matches!(
+            &columns[4].kind,
+            SummaryExportSheetColumnKind::DayHours(1)
+        ));
+        assert!(matches!(
+            &columns[5].kind,
+            SummaryExportSheetColumnKind::DayNotes(1)
+        ));
+        assert!(matches!(
+            &columns[6].kind,
+            SummaryExportSheetColumnKind::Field(SummaryLayoutFieldKey::ClientName)
+        ));
+        assert!(matches!(
+            &columns[7].kind,
+            SummaryExportSheetColumnKind::FreeText(_)
+        ));
+        assert_eq!(columns[7].header, "Later Blank");
+        assert!(matches!(
+            &columns[8].kind,
+            SummaryExportSheetColumnKind::RowTotal
+        ));
+    }
+
+    #[test]
+    fn summary_export_free_text_uses_per_row_values() {
+        let summary = test_weekly_summary();
+        let mut row_values = std::collections::HashMap::new();
+        row_values.insert("activity:act-1".to_string(), "Ticket ABC".to_string());
+        let preset = SummaryLayoutPreset {
+            id: "preset-export".to_string(),
+            name: "Export".to_string(),
+            columns: vec![
                 SummaryLayoutColumn::FreeText {
-                    id: "free-text-later".to_string(),
-                    label: "Later Blank".to_string(),
+                    id: "free-text-ticket".to_string(),
+                    label: "Ticket".to_string(),
+                    row_values,
+                    repeat: false,
+                    repeat_value: "Ignored repeat".to_string(),
+                    repeat_row_key: Some("activity:act-1".to_string()),
+                },
+                SummaryLayoutColumn::RowTotal {
+                    id: "row-total".to_string(),
+                },
+            ],
+        };
+
+        let columns = build_summary_export_hours_sheet_columns(&summary, &preset);
+        match &columns[0].kind {
+            SummaryExportSheetColumnKind::FreeText(free_text) => {
+                assert_eq!(
+                    resolve_summary_export_free_text_value(free_text, &summary.rows[0]),
+                    "Ticket ABC"
+                );
+            }
+            _ => panic!("expected free-text column"),
+        }
+    }
+
+    #[test]
+    fn summary_export_free_text_repeat_value_overrides_per_row_values() {
+        let summary = test_weekly_summary();
+        let mut row_values = std::collections::HashMap::new();
+        row_values.insert("activity:act-1".to_string(), "Per-row value".to_string());
+        let preset = SummaryLayoutPreset {
+            id: "preset-export".to_string(),
+            name: "Export".to_string(),
+            columns: vec![
+                SummaryLayoutColumn::Day {
+                    id: "day-0".to_string(),
+                    day_index: 0,
+                },
+                SummaryLayoutColumn::FreeText {
+                    id: "free-text-role".to_string(),
+                    label: "Role".to_string(),
+                    row_values,
+                    repeat: true,
+                    repeat_value: "Senior Associate".to_string(),
+                    repeat_row_key: Some("activity:act-1".to_string()),
                 },
                 SummaryLayoutColumn::RowTotal {
                     id: "row-total".to_string(),
@@ -7903,41 +8550,19 @@ mod tests {
         };
 
         let columns = build_summary_export_hours_and_notes_sheet_columns(&summary, &preset);
-        assert_eq!(columns.len(), 8);
         assert!(matches!(
-            columns[0].kind,
-            SummaryExportSheetColumnKind::Field(SummaryLayoutFieldKey::EngagementCode)
-        ));
-        assert!(matches!(
-            columns[1].kind,
-            SummaryExportSheetColumnKind::DayHours(0)
-        ));
-        assert!(matches!(
-            columns[2].kind,
+            &columns[1].kind,
             SummaryExportSheetColumnKind::DayNotes(0)
         ));
-        assert_eq!(columns[2].header, summary_day_notes_header(&summary, 0));
-        assert!(matches!(
-            columns[3].kind,
-            SummaryExportSheetColumnKind::DayHours(1)
-        ));
-        assert!(matches!(
-            columns[4].kind,
-            SummaryExportSheetColumnKind::DayNotes(1)
-        ));
-        assert!(matches!(
-            columns[5].kind,
-            SummaryExportSheetColumnKind::Field(SummaryLayoutFieldKey::ClientName)
-        ));
-        assert!(matches!(
-            columns[6].kind,
-            SummaryExportSheetColumnKind::FreeText
-        ));
-        assert_eq!(columns[6].header, "Later Blank");
-        assert!(matches!(
-            columns[7].kind,
-            SummaryExportSheetColumnKind::RowTotal
-        ));
+        match &columns[2].kind {
+            SummaryExportSheetColumnKind::FreeText(free_text) => {
+                assert_eq!(
+                    resolve_summary_export_free_text_value(free_text, &summary.rows[0]),
+                    "Senior Associate"
+                );
+            }
+            _ => panic!("expected free-text column after generated notes column"),
+        }
     }
 
     #[test]

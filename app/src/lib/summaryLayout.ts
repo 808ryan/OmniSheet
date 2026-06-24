@@ -13,7 +13,7 @@ export interface SummaryLayoutFieldOption {
   width: string
 }
 
-export const SUMMARY_LAYOUT_STATE_VERSION = 2
+export const SUMMARY_LAYOUT_STATE_VERSION = 3
 export const SUMMARY_LAYOUT_MAX_NAME_LENGTH = 40
 export const DEFAULT_SUMMARY_LAYOUT_PRESET_ID = 'preset-standard'
 export const DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID = 'row-total'
@@ -121,6 +121,16 @@ export function cloneSummaryLayoutColumn(column: SummaryLayoutColumn): SummaryLa
     return { ...column }
   }
 
+  if (column.kind === 'freeText') {
+    return {
+      ...column,
+      rowValues: { ...(column.rowValues ?? {}) },
+      repeat: column.repeat ?? false,
+      repeatValue: column.repeatValue ?? '',
+      repeatRowKey: column.repeatRowKey ?? null,
+    }
+  }
+
   return { ...column }
 }
 
@@ -148,6 +158,10 @@ export function createSummaryLayoutFreeTextColumn(label = 'Free Text'): SummaryL
     kind: 'freeText',
     id: generateSummaryLayoutId('free-text'),
     label,
+    rowValues: {},
+    repeat: false,
+    repeatValue: '',
+    repeatRowKey: null,
   }
 }
 

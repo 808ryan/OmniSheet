@@ -24,11 +24,14 @@ import {
   interpretTextMessage,
   isAppCommandError,
   quickAddSuggestions,
+  reportingStateGet,
+  reportingStateSet,
   settingsGetStatus,
   settingsSetCalendarBulkModel,
   settingsSetCalendarBulkPreferences,
   settingsSetOpenAiKey,
   settingsSetOpenAiModel,
+  settingsSetQuickAddPreferences,
   settingsSetTimelinePreferences,
   settingsSetTranscriptionModel,
   summaryExportWeeklyExcel,
@@ -56,6 +59,13 @@ import {
   SUMMARY_LAYOUT_MAX_NAME_LENGTH,
 } from './lib/summaryLayout'
 import {
+  buildDefaultReportingState,
+  buildNextReportingPresetName,
+  cloneReportingDisplayPreset,
+  generateReportingId,
+  REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH,
+} from './lib/reporting'
+import {
   formatDate,
   joinTags,
   minuteToLabel,
@@ -74,7 +84,10 @@ import type {
   HistoryListResult,
   MicrophonePermissionStatus,
   OpenAiModelId,
+  QuickAddPreferences,
   QuickAddSuggestion,
+  ReportingDisplayPreset,
+  ReportingState,
   SettingsStatus,
   SummaryLayoutColumn,
   SummaryLayoutFieldKey,
@@ -93,19 +106,30 @@ import deleteIcon from './assets/icons/delete.svg'
 import editIcon from './assets/icons/edit.svg'
 import calendarIcon from './assets/icons/calendar.svg'
 import microphoneIcon from './assets/icons/microphone.svg'
+import settingsIcon from './assets/icons/settings.svg'
+import visibleIcon from './assets/icons/visible.svg'
+import visibleOffIcon from './assets/icons/visible-off.svg'
 import './App.css'
 
-type View = 'timeline' | 'week' | 'history' | 'codes' | 'settings' | 'diagnostics' | 'summary'
+type View =
+  | 'timeline'
+  | 'week'
+  | 'history'
+  | 'codes'
+  | 'settings'
+  | 'diagnostics'
+  | 'reporting'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 type CodeEditorSurface =
-  | 'create-engagement'
   | 'edit-engagement'
-  | 'create-activity'
   | 'edit-activity'
+type Codes4CreateStep = 'engagement' | 'activity'
+type Codes3DetailMode = 'activities' | 'edit-engagement' | 'edit-activity'
 type TimelineSurface = 'day' | 'week' | 'calendar-review'
 
 type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
+type HistoryMode = 'all' | 'queue' | 'submissions' | 'entries'
 
 interface SubmissionQueueItem {
   id: string
@@ -130,6 +154,26 @@ interface SubmissionQueueItem {
   transcriptionModelUsedLabel?: string
   transcriptionDurationMs?: number
 }
+
+type HistoryUnifiedItem =
+  | {
+    kind: 'queue'
+    key: string
+    timestampMs: number
+    item: SubmissionQueueItem
+  }
+  | {
+    kind: 'submission'
+    key: string
+    timestampMs: number
+    submission: HistoryListResult['submissions'][number]
+  }
+  | {
+    kind: 'entry'
+    key: string
+    timestampMs: number
+    entry: TimelineEntry
+  }
 
 interface QuickBlockDragState {
   engagementId: string
@@ -158,6 +202,28 @@ interface QuickAddScrollMetrics {
   canScroll: boolean
   thumbTopPct: number
   thumbHeightPct: number
+}
+
+type QuickAddSettingsDragKind = 'engagement' | 'activity'
+
+interface QuickAddSettingsDragSnapshot {
+  key: string
+  top: number
+  height: number
+  centerY: number
+}
+
+interface QuickAddSettingsDragState {
+  kind: QuickAddSettingsDragKind
+  pointerId: number
+  dragKey: string
+  engagementId: string
+  activityId?: string
+  startClientY: number
+  latestClientY: number
+  sourceIndex: number
+  insertionIndex: number
+  snapshots: QuickAddSettingsDragSnapshot[]
 }
 
 interface VoiceDraftMetadata {
@@ -209,6 +275,21 @@ interface EntryDraft {
   endTime: string
   preserveEndOfDay: boolean
 }
+
+type EntryAutoSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
+type EntryDraftSavePlan =
+  | {
+    ok: true
+    startMinute: number
+    endMinute: number
+    normalizedDraft: EntryDraft
+    key: string
+  }
+  | {
+    ok: false
+    errorMessage: string
+  }
 
 type CalendarBulkTab = 'submission' | 'review'
 type CalendarCandidateReviewState = 'pending' | 'accepted' | 'rejected' | 'ignored'
@@ -315,6 +396,14 @@ interface TimelineHeaderDate {
   weekday: string
 }
 
+interface TimelineWeekRangeLabel {
+  startMonthDay: string
+  startYear: string
+  endMonthDay: string
+  endYear: string
+  isSameYear: boolean
+}
+
 type TimelineContextMenuKind = 'entry' | 'empty'
 
 type TimelineContextMenuState =
@@ -376,6 +465,25 @@ interface SummaryLayoutModalState {
   presetId: string | null
 }
 
+interface ReportingDisplayPresetModalState {
+  mode: 'create' | 'edit'
+  presetId: string | null
+}
+
+type ReportingExportPreviewSheet = 'weeklyHours' | 'weeklyHoursNotes'
+
+interface ReportingExportPreviewColumn {
+  kind: 'field' | 'dayHours' | 'dayNotes' | 'freeText' | 'rowTotal'
+  id: string
+  header: string
+  fieldKey?: SummaryLayoutFieldKey
+  dayIndex?: number
+  rowValues?: Record<string, string>
+  repeat?: boolean
+  repeatValue?: string
+  repeatRowKey?: string | null
+}
+
 interface SummaryLayoutDragSnapshot {
   columnId: string
   left: number
@@ -434,6 +542,13 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
   describeWhenToUse: '',
   tags: '',
   isActive: true,
+}
+
+const EMPTY_QUICK_ADD_PREFERENCES: QuickAddPreferences = {
+  engagementOrder: [],
+  hiddenEngagementIds: [],
+  activityOrder: {},
+  hiddenActivityIds: [],
 }
 
 function getDefaultActivityEngagementId(engagements: Engagement[]): string {
@@ -501,14 +616,228 @@ function quickAddActivityKey(engagementId: string, activityId: string): string {
   return `${engagementId}:${activityId}`
 }
 
+function uniqueIds(values: string[]): string[] {
+  const seen = new Set<string>()
+  const next: string[] = []
+
+  for (const value of values) {
+    if (!value || seen.has(value)) {
+      continue
+    }
+
+    seen.add(value)
+    next.push(value)
+  }
+
+  return next
+}
+
+function sanitizeQuickAddPreferences(
+  preferences: QuickAddPreferences | null | undefined,
+  engagements: Engagement[],
+): QuickAddPreferences {
+  const source = preferences ?? EMPTY_QUICK_ADD_PREFERENCES
+  const activeEngagementIds = new Set(engagements.filter((engagement) => engagement.isActive).map((engagement) => engagement.id))
+  const activeActivityIds = new Set<string>()
+  const activityIdsByEngagement = new Map<string, Set<string>>()
+
+  for (const engagement of engagements) {
+    if (!engagement.isActive) {
+      continue
+    }
+
+    const activeActivities = engagement.activities.filter((activity) => activity.isActive)
+    const activeIds = new Set(activeActivities.map((activity) => activity.id))
+    activityIdsByEngagement.set(engagement.id, activeIds)
+
+    for (const activity of activeActivities) {
+      activeActivityIds.add(activity.id)
+    }
+  }
+
+  const activityOrder: Record<string, string[]> = {}
+  for (const [engagementId, activityIds] of Object.entries(source.activityOrder ?? {})) {
+    const activeIds = activityIdsByEngagement.get(engagementId)
+    if (!activeIds) {
+      continue
+    }
+
+    const orderedActivityIds = uniqueIds(activityIds).filter((activityId) => activeIds.has(activityId))
+    if (orderedActivityIds.length > 0) {
+      activityOrder[engagementId] = orderedActivityIds
+    }
+  }
+
+  return {
+    engagementOrder: uniqueIds(source.engagementOrder).filter((engagementId) =>
+      activeEngagementIds.has(engagementId),
+    ),
+    hiddenEngagementIds: uniqueIds(source.hiddenEngagementIds).filter((engagementId) =>
+      activeEngagementIds.has(engagementId),
+    ),
+    activityOrder,
+    hiddenActivityIds: uniqueIds(source.hiddenActivityIds).filter((activityId) =>
+      activeActivityIds.has(activityId),
+    ),
+  }
+}
+
+function buildQuickAddSettingsDraft(
+  preferences: QuickAddPreferences | null | undefined,
+  engagements: Engagement[],
+): QuickAddPreferences {
+  const sanitized = sanitizeQuickAddPreferences(preferences, engagements)
+  const engagementOrder = sanitized.engagementOrder.slice()
+  const engagementSeen = new Set(engagementOrder)
+  const activityOrder: Record<string, string[]> = { ...sanitized.activityOrder }
+
+  for (const engagement of engagements) {
+    if (!engagement.isActive) {
+      continue
+    }
+
+    if (!engagementSeen.has(engagement.id)) {
+      engagementOrder.push(engagement.id)
+      engagementSeen.add(engagement.id)
+    }
+
+    const orderedActivityIds = activityOrder[engagement.id]?.slice() ?? []
+    const activitySeen = new Set(orderedActivityIds)
+    for (const activity of engagement.activities) {
+      if (!activity.isActive || activitySeen.has(activity.id)) {
+        continue
+      }
+
+      orderedActivityIds.push(activity.id)
+      activitySeen.add(activity.id)
+    }
+
+    activityOrder[engagement.id] = orderedActivityIds
+  }
+
+  return {
+    ...sanitized,
+    engagementOrder,
+    activityOrder,
+  }
+}
+
+function moveId(values: string[], id: string, direction: -1 | 1): string[] {
+  const index = values.indexOf(id)
+  const nextIndex = index + direction
+  if (index < 0 || nextIndex < 0 || nextIndex >= values.length) {
+    return values
+  }
+
+  const next = values.slice()
+  const [item] = next.splice(index, 1)
+  next.splice(nextIndex, 0, item)
+  return next
+}
+
+function moveIdToIndex(values: string[], id: string, insertionIndex: number): string[] {
+  if (!values.includes(id)) {
+    return values
+  }
+
+  const withoutItem = values.filter((value) => value !== id)
+  const safeIndex = Math.min(Math.max(insertionIndex, 0), withoutItem.length)
+  return [
+    ...withoutItem.slice(0, safeIndex),
+    id,
+    ...withoutItem.slice(safeIndex),
+  ]
+}
+
+function toggleId(values: string[], id: string): string[] {
+  return values.includes(id)
+    ? values.filter((value) => value !== id)
+    : [...values, id]
+}
+
+function quickAddSettingsEngagementKey(engagementId: string): string {
+  return `engagement:${engagementId}`
+}
+
+function quickAddSettingsActivityKey(
+  engagementId: string,
+  activityId: string,
+): string {
+  return `activity:${engagementId}:${activityId}`
+}
+
+function findQuickAddSettingsInsertionIndex(
+  draggedCenterY: number,
+  dragState: QuickAddSettingsDragState,
+): number {
+  let insertionIndex = 0
+  for (const snapshot of dragState.snapshots) {
+    if (snapshot.key === dragState.dragKey) {
+      continue
+    }
+
+    if (draggedCenterY > snapshot.centerY) {
+      insertionIndex += 1
+    }
+  }
+
+  return Math.min(Math.max(insertionIndex, 0), Math.max(dragState.snapshots.length - 1, 0))
+}
+
+function codeEntitySearchText(engagement: Engagement): string {
+  return [
+    engagement.code,
+    engagement.name,
+    engagement.client,
+    engagement.engagementType,
+    engagement.describeWhenToUse,
+    ...engagement.tags,
+    ...engagement.activities.flatMap((activity) => [
+      activity.code,
+      activity.name,
+      activity.describeWhenToUse,
+      ...activity.tags,
+    ]),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLocaleLowerCase()
+}
+
+function activityCodeSearchText(activity: Activity): string {
+  return [
+    activity.code,
+    activity.name,
+    activity.describeWhenToUse,
+    ...activity.tags,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLocaleLowerCase()
+}
+
+function isSummaryLikeView(view: View): boolean {
+  return view === 'reporting'
+}
+
+function getSummaryRowKey(row: TimelineWeeklySummary['rows'][number], rowIndex: number): string {
+  return [
+    row.engagementId ?? 'uncategorized',
+    row.activityId ?? 'uncategorized',
+    row.engagementCode ?? '',
+    row.activityCode ?? '',
+    rowIndex,
+  ].join(':')
+}
+
 const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'timeline', label: 'Day' },
   { id: 'week', label: 'Week' },
-  { id: 'history', label: 'History' },
   { id: 'codes', label: 'Codes' },
+  { id: 'reporting', label: 'Reporting' },
   { id: 'settings', label: 'Settings' },
+  { id: 'history', label: 'History' },
   { id: 'diagnostics', label: 'Diagnostics' },
-  { id: 'summary', label: 'Summary View' },
 ]
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const
 const SUMMARY_DAY_NAMES = [
@@ -695,15 +1024,31 @@ function App() {
 
   const [engagements, setEngagements] = useState<Engagement[]>([])
   const [codeEditorSurface, setCodeEditorSurface] = useState<CodeEditorSurface | null>(null)
-  const [editorActivationKey, setEditorActivationKey] = useState(0)
-  const [expandedEngagementId, setExpandedEngagementId] = useState<string | null>(null)
   const [engagementForm, setEngagementForm] =
     useState<EngagementFormState>(EMPTY_ENGAGEMENT_FORM)
   const [hasManualEngagementTypeSelection, setHasManualEngagementTypeSelection] = useState(false)
   const [activityForm, setActivityForm] = useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
+  const [isCodes4CreateModalOpen, setIsCodes4CreateModalOpen] = useState(false)
+  const [codes4CreateStep, setCodes4CreateStep] = useState<Codes4CreateStep>('engagement')
+  const [codes4CreateEngagementForm, setCodes4CreateEngagementForm] =
+    useState<EngagementFormState>(EMPTY_ENGAGEMENT_FORM)
+  const [
+    hasManualCodes4CreateEngagementTypeSelection,
+    setHasManualCodes4CreateEngagementTypeSelection,
+  ] = useState(false)
+  const [codes4CreateActivityForm, setCodes4CreateActivityForm] =
+    useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
+  const [codes4CreateContextEngagementId, setCodes4CreateContextEngagementId] =
+    useState<string | null>(null)
+  const [codes4CreateNotice, setCodes4CreateNotice] = useState<string | null>(null)
+  const [codes3SelectedEngagementId, setCodes3SelectedEngagementId] = useState<string | null>(null)
+  const [codes3DetailMode, setCodes3DetailMode] = useState<Codes3DetailMode>('activities')
+  const [codes3EngagementSearch, setCodes3EngagementSearch] = useState('')
+  const [codes3ActivitySearch, setCodes3ActivitySearch] = useState('')
 
   const [captureMessage, setCaptureMessage] = useState('')
   const [captureDraftMetadata, setCaptureDraftMetadata] = useState<VoiceDraftMetadata | null>(null)
+  const [isLlmEntryCollapsed, setIsLlmEntryCollapsed] = useState(false)
   const [voiceCaptureState, setVoiceCaptureState] = useState<VoiceCaptureState>('idle')
   const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
@@ -712,6 +1057,10 @@ function App() {
   const [quickAddSuggestionItems, setQuickAddSuggestionItems] = useState<QuickAddSuggestion[]>([])
   const [quickAddSuggestedKeys, setQuickAddSuggestedKeys] = useState<string[]>([])
   const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
+  const [isQuickAddSettingsOpen, setIsQuickAddSettingsOpen] = useState(false)
+  const [quickAddSettingsDraft, setQuickAddSettingsDraft] = useState<QuickAddPreferences | null>(null)
+  const [quickAddSettingsDragState, setQuickAddSettingsDragState] =
+    useState<QuickAddSettingsDragState | null>(null)
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickBlockDragState | null>(null)
   const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickAddScrollMetrics>({
     canScroll: false,
@@ -738,6 +1087,7 @@ function App() {
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
+  const [entryAutoSaveStatus, setEntryAutoSaveStatus] = useState<EntryAutoSaveStatus>('idle')
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
@@ -750,9 +1100,6 @@ function App() {
   const [monthSummaryCache, setMonthSummaryCache] = useState<MonthSummaryCache>({})
   const [monthSummaryLoadingMonth, setMonthSummaryLoadingMonth] = useState<string | null>(null)
   const [monthSummaryError, setMonthSummaryError] = useState<string | null>(null)
-  const codeFormsBodyRef = useRef<HTMLDivElement | null>(null)
-  const engagementNameInputRef = useRef<HTMLInputElement | null>(null)
-  const activityEngagementSelectRef = useRef<HTMLSelectElement | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
   const weekTimelineGridRef = useRef<HTMLDivElement | null>(null)
   const calendarReviewTimelineGridRef = useRef<HTMLDivElement | null>(null)
@@ -765,9 +1112,18 @@ function App() {
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
   const selectedDateRef = useRef(selectedDate)
+  const selectedEntryIdRef = useRef<string | null>(selectedEntryId)
+  const entryDraftAutoSaveTimeoutRef = useRef<number | null>(null)
+  const entryDraftAutoSaveChainRef = useRef<Promise<void>>(Promise.resolve())
+  const entryDraftLastSavedKeyRef = useRef<string | null>(null)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
   const quickBlockDragStateRef = useRef<QuickBlockDragState | null>(null)
   const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
+  const quickAddSettingsDraftRef = useRef<QuickAddPreferences | null>(null)
+  const quickAddSettingsDragStateRef = useRef<QuickAddSettingsDragState | null>(null)
+  const quickAddSettingsRowRefs = useRef<Record<string, HTMLElement | null>>({})
+  const quickAddSettingsDragCaptureTargetRef = useRef<HTMLButtonElement | null>(null)
+  const quickAddSettingsSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const timelineEntriesRef = useRef<TimelineEntry[]>([])
   const suppressTimelineClickRef = useRef(false)
   const inFlightSubmissionIdsRef = useRef<Set<string>>(new Set())
@@ -785,6 +1141,8 @@ function App() {
   const [historyData, setHistoryData] = useState<HistoryListResult | null>(null)
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState<string | null>(null)
+  const [historyMode, setHistoryMode] = useState<HistoryMode>('all')
+  const [selectedHistoryItemKey, setSelectedHistoryItemKey] = useState<string | null>(null)
   const [weeklySummary, setWeeklySummary] = useState<TimelineWeeklySummary | null>(null)
   const [isWeeklySummaryLoading, setIsWeeklySummaryLoading] = useState(false)
   const [weeklySummaryError, setWeeklySummaryError] = useState<string | null>(null)
@@ -798,6 +1156,18 @@ function App() {
   const [summaryLayoutInsertionIndex, setSummaryLayoutInsertionIndex] = useState<number | null>(null)
   const [summaryLayoutDragState, setSummaryLayoutDragState] = useState<SummaryLayoutDragState | null>(null)
   const [summaryLayoutDropCommitColumnIds, setSummaryLayoutDropCommitColumnIds] = useState<string[]>([])
+  const [reportingState, setReportingState] = useState<ReportingState | null>(null)
+  const [isReportingStateSaving, setIsReportingStateSaving] = useState(false)
+  const [reportingDisplayPresetModal, setReportingDisplayPresetModal] =
+    useState<ReportingDisplayPresetModalState | null>(null)
+  const [reportingDisplayPresetDraft, setReportingDisplayPresetDraft] =
+    useState<ReportingDisplayPreset | null>(null)
+  const [reportingDisplayPresetDraftName, setReportingDisplayPresetDraftName] = useState('')
+  const [reportingDisplayPresetDraftError, setReportingDisplayPresetDraftError] =
+    useState<string | null>(null)
+  const [isReportingExportModalOpen, setIsReportingExportModalOpen] = useState(false)
+  const [reportingExportPreviewSheet, setReportingExportPreviewSheet] =
+    useState<ReportingExportPreviewSheet>('weeklyHours')
   const [summaryNotesModal, setSummaryNotesModal] = useState<SummaryNotesModalState | null>(null)
   const summaryLayoutModalRef = useRef<HTMLDivElement | null>(null)
   const summaryLayoutColumnRefs = useRef<Record<string, HTMLDivElement | null>>({})
@@ -829,6 +1199,114 @@ function App() {
 
     summaryLayoutDragCaptureTargetRef.current = null
   }, [])
+  const commitQuickAddSettingsDragState = useCallback((next: QuickAddSettingsDragState | null) => {
+    quickAddSettingsDragStateRef.current = next
+    setQuickAddSettingsDragState(next)
+  }, [])
+  const releaseQuickAddSettingsPointerCapture = useCallback((pointerId?: number | null) => {
+    const captureTarget = quickAddSettingsDragCaptureTargetRef.current
+    if (
+      captureTarget
+      && pointerId !== null
+      && pointerId !== undefined
+      && captureTarget.hasPointerCapture(pointerId)
+    ) {
+      captureTarget.releasePointerCapture(pointerId)
+    }
+
+    quickAddSettingsDragCaptureTargetRef.current = null
+  }, [])
+  const captureQuickAddSettingsRowRects = useCallback(() => {
+    const rects = new Map<string, DOMRect>()
+    for (const [key, node] of Object.entries(quickAddSettingsRowRefs.current)) {
+      if (!node) {
+        continue
+      }
+
+      rects.set(key, node.getBoundingClientRect())
+    }
+
+    return rects
+  }, [])
+  const animateQuickAddSettingsRowReorder = useCallback((previousRects: Map<string, DOMRect>) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        for (const [key, previousRect] of previousRects) {
+          const node = quickAddSettingsRowRefs.current[key]
+          if (!node) {
+            continue
+          }
+
+          const nextRect = node.getBoundingClientRect()
+          const deltaY = previousRect.top - nextRect.top
+          if (Math.abs(deltaY) < 1) {
+            continue
+          }
+
+          node.style.transition = 'none'
+          node.style.transform = `translateY(${deltaY}px)`
+          void node.offsetHeight
+          node.style.transition = 'transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)'
+          node.style.transform = ''
+
+          const cleanup = () => {
+            node.style.transition = ''
+            node.removeEventListener('transitionend', cleanup)
+          }
+          node.addEventListener('transitionend', cleanup, { once: true })
+          window.setTimeout(cleanup, 240)
+        }
+      })
+    })
+  }, [])
+  const persistQuickAddSettingsDraft = useCallback(
+    (preferences: QuickAddPreferences) => {
+      const quickAddPreferences = sanitizeQuickAddPreferences(preferences, engagements)
+      setSettingsStatus((previous) => (
+        previous
+          ? {
+              ...previous,
+              quickAddPreferences,
+            }
+          : previous
+      ))
+
+      quickAddSettingsSaveChainRef.current = quickAddSettingsSaveChainRef.current
+        .catch(() => undefined)
+        .then(() => settingsSetQuickAddPreferences({ quickAddPreferences }))
+        .catch((error) => {
+          setErrorMessage(`Quick Entry settings could not be saved. ${formatActionErrorMessage(error)}`)
+        })
+    },
+    [engagements],
+  )
+  const updateQuickAddSettingsDraftWithAnimation = useCallback(
+    (
+      updater: (previous: QuickAddPreferences) => QuickAddPreferences,
+      options?: { animate?: boolean },
+    ) => {
+      const previousRects = options?.animate === false ? null : captureQuickAddSettingsRowRects()
+      const currentDraft =
+        quickAddSettingsDraftRef.current
+        ?? buildQuickAddSettingsDraft(settingsStatus?.quickAddPreferences, engagements)
+      const nextDraft = sanitizeQuickAddPreferences(updater(currentDraft), engagements)
+
+      quickAddSettingsDraftRef.current = nextDraft
+      setQuickAddSettingsDraft(nextDraft)
+      persistQuickAddSettingsDraft(nextDraft)
+
+      if (previousRects) {
+        animateQuickAddSettingsRowReorder(previousRects)
+      }
+    },
+    [
+      animateQuickAddSettingsRowReorder,
+      captureQuickAddSettingsRowRects,
+      engagements,
+      persistQuickAddSettingsDraft,
+      settingsStatus?.quickAddPreferences,
+    ],
+  )
   const clearSummaryLayoutDropAnimation = useCallback(() => {
     if (summaryLayoutDropCommitFrameRef.current !== null) {
       window.cancelAnimationFrame(summaryLayoutDropCommitFrameRef.current)
@@ -847,6 +1325,12 @@ function App() {
     clearSummaryLayoutDropAnimation()
     summaryLayoutColumnRefs.current = {}
   }, [clearSummaryLayoutDropAnimation, commitSummaryLayoutDragState, releaseSummaryLayoutPointerCapture])
+  const resetReportingDisplayPresetEditor = useCallback(() => {
+    setReportingDisplayPresetModal(null)
+    setReportingDisplayPresetDraft(null)
+    setReportingDisplayPresetDraftName('')
+    setReportingDisplayPresetDraftError(null)
+  }, [])
   const weekTimelineLayoutMetrics = useMemo(
     () => buildWeekTimelineLayoutMetrics(isCompactWeekTimeline),
     [isCompactWeekTimeline],
@@ -878,7 +1362,7 @@ function App() {
   const visibleMonthSummaryError = monthSummaryCache[visibleMonth] ? null : monthSummaryError
   const hasVisibleMonthSummary = monthSummaryCache[visibleMonth] !== undefined
   const summaryWeekHighlightedDates = useMemo(() => {
-    if (activeView !== 'summary' || !weeklySummary) {
+    if (!isSummaryLikeView(activeView) || !weeklySummary) {
       return new Set<string>()
     }
 
@@ -930,6 +1414,46 @@ function App() {
     ),
     [resolvedSummaryLayoutState],
   )
+  const resolvedReportingState = useMemo(
+    () => reportingState ?? buildDefaultReportingState(),
+    [reportingState],
+  )
+  const selectedReportingDisplayPreset = useMemo(
+    () => (
+      resolvedReportingState.displayPresets.find(
+        (preset) => preset.id === resolvedReportingState.selectedDisplayPresetId,
+      ) ?? resolvedReportingState.displayPresets[0]
+    ),
+    [resolvedReportingState],
+  )
+  const previewReportingDisplayPreset = useMemo(() => {
+    if (
+      reportingDisplayPresetModal?.mode === 'edit'
+      && reportingDisplayPresetDraft
+      && reportingDisplayPresetDraft.id === selectedReportingDisplayPreset?.id
+    ) {
+      return reportingDisplayPresetDraft
+    }
+
+    return selectedReportingDisplayPreset
+  }, [
+    reportingDisplayPresetDraft,
+    reportingDisplayPresetModal,
+    selectedReportingDisplayPreset,
+  ])
+  const selectedReportingExportPreset = useMemo(
+    () => (
+      resolvedSummaryLayoutState.presets.find(
+        (preset) => preset.id === resolvedReportingState.selectedExportPresetId,
+      )
+      ?? selectedSummaryLayoutPreset
+      ?? resolvedSummaryLayoutState.presets[0]
+    ),
+    [resolvedReportingState.selectedExportPresetId, resolvedSummaryLayoutState, selectedSummaryLayoutPreset],
+  )
+  const activeSummaryExportPreset = activeView === 'reporting'
+    ? selectedReportingExportPreset
+    : selectedSummaryLayoutPreset
   const engagementById = useMemo(() => {
     const values = new Map<string, Engagement>()
     for (const engagement of engagements) {
@@ -946,6 +1470,10 @@ function App() {
     }
     return values
   }, [engagements])
+  const quickAddPreferences = useMemo(
+    () => sanitizeQuickAddPreferences(settingsStatus?.quickAddPreferences, engagements),
+    [engagements, settingsStatus?.quickAddPreferences],
+  )
   const quickAddSuggestionByKey = useMemo(() => {
     const values = new Map<string, QuickAddSuggestion>()
     for (const suggestion of quickAddSuggestionItems) {
@@ -1023,6 +1551,130 @@ function App() {
 
     return values
   }, [allQuickAddActivities, quickAddActivityByKey, quickAddSuggestedKeys])
+  const orderedQuickAddActivities = useMemo(() => {
+    const hiddenEngagementIds = new Set(quickAddPreferences.hiddenEngagementIds)
+    const hiddenActivityIds = new Set(quickAddPreferences.hiddenActivityIds)
+    const engagementOrderIndex = new Map(
+      quickAddPreferences.engagementOrder.map((engagementId, index) => [engagementId, index]),
+    )
+    const hasCustomEngagementOrder = engagementOrderIndex.size > 0
+    const suggestedActivityIndex = new Map(
+      suggestedQuickAddActivities.map((item, index) => [
+        quickAddActivityKey(item.engagement.id, item.activity.id),
+        index,
+      ]),
+    )
+    const engagementIndex = new Map(engagements.map((engagement, index) => [engagement.id, index]))
+    const activityIndex = new Map<string, number>()
+
+    for (const engagement of engagements) {
+      engagement.activities.forEach((activity, index) => {
+        activityIndex.set(activity.id, index)
+      })
+    }
+
+    const groups = new Map<string, QuickAddActivityGroup>()
+    for (const item of allQuickAddActivities) {
+      if (
+        hiddenEngagementIds.has(item.engagement.id)
+        || hiddenActivityIds.has(item.activity.id)
+      ) {
+        continue
+      }
+
+      const existing = groups.get(item.engagement.id)
+      if (existing) {
+        existing.activities.push(item)
+        continue
+      }
+
+      groups.set(item.engagement.id, {
+        engagement: item.engagement,
+        activities: [item],
+      })
+    }
+
+    const orderedGroups = [...groups.values()].sort((left, right) => {
+      if (hasCustomEngagementOrder) {
+        const leftCustomIndex = engagementOrderIndex.get(left.engagement.id)
+        const rightCustomIndex = engagementOrderIndex.get(right.engagement.id)
+        if (leftCustomIndex !== undefined || rightCustomIndex !== undefined) {
+          return (
+            leftCustomIndex ?? Number.MAX_SAFE_INTEGER
+          ) - (
+            rightCustomIndex ?? Number.MAX_SAFE_INTEGER
+          )
+        }
+      }
+
+      const leftSuggestionIndex = Math.min(
+        ...left.activities.map((item) =>
+          suggestedActivityIndex.get(quickAddActivityKey(item.engagement.id, item.activity.id))
+          ?? Number.MAX_SAFE_INTEGER,
+        ),
+      )
+      const rightSuggestionIndex = Math.min(
+        ...right.activities.map((item) =>
+          suggestedActivityIndex.get(quickAddActivityKey(item.engagement.id, item.activity.id))
+          ?? Number.MAX_SAFE_INTEGER,
+        ),
+      )
+
+      if (leftSuggestionIndex !== rightSuggestionIndex) {
+        return leftSuggestionIndex - rightSuggestionIndex
+      }
+
+      return (
+        engagementIndex.get(left.engagement.id) ?? Number.MAX_SAFE_INTEGER
+      ) - (
+        engagementIndex.get(right.engagement.id) ?? Number.MAX_SAFE_INTEGER
+      )
+    })
+
+    return orderedGroups.flatMap((group) => {
+      const customActivityOrder = quickAddPreferences.activityOrder[group.engagement.id] ?? []
+      const customActivityOrderIndex = new Map(
+        customActivityOrder.map((activityId, index) => [activityId, index]),
+      )
+      const hasCustomActivityOrder = customActivityOrderIndex.size > 0
+
+      return group.activities.slice().sort((left, right) => {
+        if (hasCustomActivityOrder) {
+          const leftCustomIndex = customActivityOrderIndex.get(left.activity.id)
+          const rightCustomIndex = customActivityOrderIndex.get(right.activity.id)
+          if (leftCustomIndex !== undefined || rightCustomIndex !== undefined) {
+            return (
+              leftCustomIndex ?? Number.MAX_SAFE_INTEGER
+            ) - (
+              rightCustomIndex ?? Number.MAX_SAFE_INTEGER
+            )
+          }
+        }
+
+        const leftSuggestionIndex =
+          suggestedActivityIndex.get(quickAddActivityKey(left.engagement.id, left.activity.id))
+          ?? Number.MAX_SAFE_INTEGER
+        const rightSuggestionIndex =
+          suggestedActivityIndex.get(quickAddActivityKey(right.engagement.id, right.activity.id))
+          ?? Number.MAX_SAFE_INTEGER
+
+        if (leftSuggestionIndex !== rightSuggestionIndex) {
+          return leftSuggestionIndex - rightSuggestionIndex
+        }
+
+        return (
+          activityIndex.get(left.activity.id) ?? Number.MAX_SAFE_INTEGER
+        ) - (
+          activityIndex.get(right.activity.id) ?? Number.MAX_SAFE_INTEGER
+        )
+      })
+    })
+  }, [
+    allQuickAddActivities,
+    engagements,
+    quickAddPreferences,
+    suggestedQuickAddActivities,
+  ])
   const visibleQuickAddActivities = useMemo(() => {
     const searchTerms = quickAddSearch
       .trim()
@@ -1031,10 +1683,10 @@ function App() {
       .filter(Boolean)
 
     if (searchTerms.length === 0) {
-      return suggestedQuickAddActivities
+      return orderedQuickAddActivities
     }
 
-    return allQuickAddActivities.filter(({ engagement, activity }) => {
+    return orderedQuickAddActivities.filter(({ engagement, activity }) => {
       const haystack = [
         engagement.code,
         engagement.name,
@@ -1047,7 +1699,7 @@ function App() {
 
       return searchTerms.every((term) => haystack.includes(term))
     })
-  }, [allQuickAddActivities, quickAddSearch, suggestedQuickAddActivities])
+  }, [orderedQuickAddActivities, quickAddSearch])
   const quickAddActivityGroups = useMemo<QuickAddActivityGroup[]>(() => {
     const groups: QuickAddActivityGroup[] = []
     const groupByEngagementId = new Map<string, QuickAddActivityGroup>()
@@ -1080,10 +1732,13 @@ function App() {
       return
     }
 
+    const scrollFrame = node.parentElement as HTMLElement | null
     const maxScrollTop = Math.max(node.scrollHeight - node.clientHeight, 0)
     const canScroll = maxScrollTop > 1
 
     if (!canScroll || node.scrollHeight <= 0 || node.clientHeight <= 0) {
+      scrollFrame?.style.setProperty('--quick-add-scroll-thumb-top', '0%')
+      scrollFrame?.style.setProperty('--quick-add-scroll-thumb-height', '100%')
       setQuickAddScrollMetrics((previous) => (
         previous.canScroll
           ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
@@ -1096,12 +1751,11 @@ function App() {
     const maxThumbTopPct = Math.max(100 - thumbHeightPct, 0)
     const thumbTopPct = Math.min(maxThumbTopPct, Math.max(0, (node.scrollTop / maxScrollTop) * maxThumbTopPct))
 
+    scrollFrame?.style.setProperty('--quick-add-scroll-thumb-top', `${thumbTopPct}%`)
+    scrollFrame?.style.setProperty('--quick-add-scroll-thumb-height', `${thumbHeightPct}%`)
+
     setQuickAddScrollMetrics((previous) => {
-      if (
-        previous.canScroll === canScroll
-        && Math.abs(previous.thumbTopPct - thumbTopPct) < 0.2
-        && Math.abs(previous.thumbHeightPct - thumbHeightPct) < 0.2
-      ) {
+      if (previous.canScroll === canScroll) {
         return previous
       }
 
@@ -1148,17 +1802,49 @@ function App() {
       window.removeEventListener('resize', scheduleUpdate)
     }
   }, [quickAddActivityGroups, updateQuickAddScrollMetrics])
-  const summaryViewColumns = useMemo(
-    () => buildSummaryViewColumns(selectedSummaryLayoutPreset),
-    [selectedSummaryLayoutPreset],
-  )
-  const summaryFooterLabelIndex = useMemo(
-    () => summaryViewColumns.findIndex((column) => column.kind !== 'day' && column.kind !== 'rowTotal'),
-    [summaryViewColumns],
-  )
+  const reportingDayIndexes = useMemo(() => {
+    if (!weeklySummary) {
+      return []
+    }
+
+    const allDayIndexes = weeklySummary.days.map((_, dayIndex) => dayIndex)
+    if (previewReportingDisplayPreset?.showEmptyDays ?? true) {
+      return allDayIndexes
+    }
+
+    const visibleDayIndexes = allDayIndexes.filter((dayIndex) => (
+      weeklySummary.dayTotalBreakdowns[dayIndex]?.primaryMinutes
+      ?? weeklySummary.dayTotalMinutes[dayIndex]
+      ?? 0
+    ) > 0)
+
+    return visibleDayIndexes.length > 0 ? visibleDayIndexes : allDayIndexes
+  }, [previewReportingDisplayPreset, weeklySummary])
   const summaryLayoutPreviewRows = useMemo(
     () => weeklySummary?.rows.slice(0, 3) ?? [],
     [weeklySummary],
+  )
+  const reportingExportPreviewColumns = useMemo(
+    () => buildReportingExportPreviewColumns(
+      selectedReportingExportPreset,
+      weeklySummary,
+      reportingExportPreviewSheet,
+    ),
+    [reportingExportPreviewSheet, selectedReportingExportPreset, weeklySummary],
+  )
+  const reportingExportPreviewGridColumns = useMemo(
+    () => reportingExportPreviewColumns
+      .map(getReportingExportPreviewColumnWidth)
+      .join(' '),
+    [reportingExportPreviewColumns],
+  )
+  const reportingExportPreviewFooterLabelIndex = useMemo(
+    () => reportingExportPreviewColumns.findIndex((column) => (
+      column.kind !== 'dayHours'
+      && column.kind !== 'dayNotes'
+      && column.kind !== 'rowTotal'
+    )),
+    [reportingExportPreviewColumns],
   )
   const summaryLayoutDragTransforms = useMemo(
     () => buildSummaryLayoutDragTransforms(
@@ -1202,7 +1888,64 @@ function App() {
       }),
     [historyData],
   )
-  const persistedHistorySubmissions = historyData?.submissions ?? []
+  const persistedHistorySubmissions = useMemo(
+    () => historyData?.submissions ?? [],
+    [historyData],
+  )
+  const historyCounts = useMemo(() => ({
+    queue: liveHistoryQueueItems.length,
+    submissions: persistedHistorySubmissions.length,
+    entries: persistedHistoryEntries.length,
+  }), [liveHistoryQueueItems.length, persistedHistoryEntries.length, persistedHistorySubmissions.length])
+  const historyUnifiedItems = useMemo<HistoryUnifiedItem[]>(() => {
+    const items: HistoryUnifiedItem[] = [
+      ...liveHistoryQueueItems.map((item): HistoryUnifiedItem => ({
+        kind: 'queue',
+        key: `queue-${item.id}`,
+        timestampMs: item.submittedAtMs,
+        item,
+      })),
+      ...persistedHistorySubmissions.map((submission): HistoryUnifiedItem => ({
+        kind: 'submission',
+        key: `submission-${submission.id}`,
+        timestampMs: submission.messageTimestamp * 1000,
+        submission,
+      })),
+      ...persistedHistoryEntries.map((entry): HistoryUnifiedItem => ({
+        kind: 'entry',
+        key: `entry-${entry.id}`,
+        timestampMs: entry.createdAt * 1000,
+        entry,
+      })),
+    ]
+
+    return items.sort((left, right) => {
+      if (left.kind === 'queue' && right.kind !== 'queue') {
+        return -1
+      }
+      if (left.kind !== 'queue' && right.kind === 'queue') {
+        return 1
+      }
+
+      return right.timestampMs - left.timestampMs
+    })
+  }, [liveHistoryQueueItems, persistedHistoryEntries, persistedHistorySubmissions])
+  const filteredHistoryItems = useMemo(
+    () => historyUnifiedItems.filter((item) => (
+      historyMode === 'all'
+      || (historyMode === 'queue' && item.kind === 'queue')
+      || (historyMode === 'submissions' && item.kind === 'submission')
+      || (historyMode === 'entries' && item.kind === 'entry')
+    )),
+    [historyMode, historyUnifiedItems],
+  )
+  const selectedHistoryItem = useMemo(
+    () =>
+      filteredHistoryItems.find((item) => item.key === selectedHistoryItemKey)
+      ?? filteredHistoryItems[0]
+      ?? null,
+    [filteredHistoryItems, selectedHistoryItemKey],
+  )
 
   const recordVoiceDiagnostic = useCallback((
     eventType: string,
@@ -1294,8 +2037,10 @@ function App() {
     settingsStatus?.timelineIncludeInternalInTotals ?? false
   const timelineSeparateEngagementTypeTotals =
     settingsStatus?.timelineSeparateEngagementTypeTotals ?? true
+  // When uncategorized time contributes to the primary total, keep it visible so
+  // the displayed breakdown reconciles back to that total.
   const shouldShowTimelineUncategorizedDailyTotal =
-    timelineExcludeUncategorizedFromDailyTotals && timelineShowUncategorizedDailyTotal
+    !timelineExcludeUncategorizedFromDailyTotals || timelineShowUncategorizedDailyTotal
   const timelineTotalPreferences = useMemo(
     () => ({
       includeExternalInTotals: timelineIncludeExternalInTotals,
@@ -1430,6 +2175,20 @@ function App() {
       ? finalizeTimelineTotalBreakdown(weeklySummary.weekTotalBreakdown, timelineTotalPreferences)
       : null,
     [timelineTotalPreferences, weeklySummary],
+  )
+  const reportingWeeklyTotalSegments = useMemo(
+    () => displayedSummaryWeekTotalBreakdown
+      ? buildTimelineTotalDisplaySegments(displayedSummaryWeekTotalBreakdown, {
+        includePrimaryTotal: true,
+        separateEngagementTypeTotals: timelineSeparateEngagementTypeTotals,
+        showUncategorizedTotal: shouldShowTimelineUncategorizedDailyTotal,
+      })
+      : [],
+    [
+      displayedSummaryWeekTotalBreakdown,
+      shouldShowTimelineUncategorizedDailyTotal,
+      timelineSeparateEngagementTypeTotals,
+    ],
   )
   const baselinePositionedWeekTimelineEntries = useMemo(
     () => positionWeekTimelineEntries(
@@ -1646,104 +2405,210 @@ function App() {
     () => engagements.find((engagement) => engagement.id === activityForm.engagementId) ?? null,
     [activityForm.engagementId, engagements],
   )
-  const isEngagementEditorOpen =
-    codeEditorSurface === 'create-engagement' || codeEditorSurface === 'edit-engagement'
-  const isActivityEditorOpen =
-    codeEditorSurface === 'create-activity' || codeEditorSurface === 'edit-activity'
+  const selectedCodes4CreateActivityEngagement = useMemo(
+    () =>
+      engagements.find((engagement) => engagement.id === codes4CreateActivityForm.engagementId)
+      ?? null,
+    [codes4CreateActivityForm.engagementId, engagements],
+  )
   const isEditingEngagement = codeEditorSurface === 'edit-engagement'
   const isEditingActivity = codeEditorSurface === 'edit-activity'
-  const canCreateActivity = engagements.length > 0
+  const resolveCodes4CreateActivityEngagementId = useCallback(() => {
+    const hasEngagement = (id: string | null | undefined) =>
+      Boolean(id && engagements.some((engagement) => engagement.id === id))
+
+    if (codeEditorSurface === 'edit-engagement' && hasEngagement(engagementForm.id)) {
+      return engagementForm.id ?? ''
+    }
+
+    if (codeEditorSurface === 'edit-activity' && hasEngagement(activityForm.engagementId)) {
+      return activityForm.engagementId
+    }
+
+    if (activeView === 'codes' && hasEngagement(codes3SelectedEngagementId)) {
+      return codes3SelectedEngagementId ?? ''
+    }
+
+    if (hasEngagement(codes4CreateContextEngagementId)) {
+      return codes4CreateContextEngagementId ?? ''
+    }
+
+    return engagements.find((engagement) => engagement.isActive)?.id ?? engagements[0]?.id ?? ''
+  }, [
+    activityForm.engagementId,
+    activeView,
+    codeEditorSurface,
+    codes3SelectedEngagementId,
+    codes4CreateContextEngagementId,
+    engagementForm.id,
+    engagements,
+  ])
+  const selectedCodes3Engagement = useMemo(
+    () =>
+      engagements.find((engagement) => engagement.id === codes3SelectedEngagementId)
+      ?? engagements[0]
+      ?? null,
+    [codes3SelectedEngagementId, engagements],
+  )
+  const normalizedCodes3EngagementSearch = codes3EngagementSearch.trim().toLocaleLowerCase()
+  const filteredCodes3Engagements = useMemo(
+    () => (
+      normalizedCodes3EngagementSearch.length === 0
+        ? engagements
+        : engagements.filter((engagement) =>
+          codeEntitySearchText(engagement).includes(normalizedCodes3EngagementSearch),
+        )
+    ),
+    [engagements, normalizedCodes3EngagementSearch],
+  )
+  const normalizedCodes3ActivitySearch = codes3ActivitySearch.trim().toLocaleLowerCase()
+  const filteredCodes3Activities = useMemo(
+    () => {
+      const activities = selectedCodes3Engagement?.activities ?? []
+      return normalizedCodes3ActivitySearch.length === 0
+        ? activities
+        : activities.filter((activity) =>
+          activityCodeSearchText(activity).includes(normalizedCodes3ActivitySearch),
+        )
+    },
+    [normalizedCodes3ActivitySearch, selectedCodes3Engagement],
+  )
+  const codes3IsEditing =
+    (codes3DetailMode === 'edit-engagement' && isEditingEngagement)
+    || (codes3DetailMode === 'edit-activity' && isEditingActivity)
+  const selectedCodes3EngagementName = selectedCodes3Engagement
+    ? selectedCodes3Engagement.name.trim()
+      || selectedCodes3Engagement.code?.trim()
+      || 'selected engagement'
+    : ''
+  const codes3ActivitiesHeading = selectedCodes3EngagementName
+    ? `Activities in ${selectedCodes3EngagementName}`
+    : 'Activities'
 
   const engagementFormColorValue = normalizeColorHexInput(engagementForm.colorHex)
   const activityFormColorValue = normalizeColorHexInput(activityForm.colorHex)
   const selectedEngagementColorValue = normalizeColorHexInput(selectedActivityEngagement?.colorHex)
+  const codes4CreateEngagementColorValue =
+    normalizeColorHexInput(codes4CreateEngagementForm.colorHex)
+  const codes4CreateActivityColorValue =
+    normalizeColorHexInput(codes4CreateActivityForm.colorHex)
+  const selectedCodes4CreateEngagementColorValue =
+    normalizeColorHexInput(selectedCodes4CreateActivityEngagement?.colorHex)
 
   useEffect(() => {
-    if (!expandedEngagementId) {
+    const defaultEngagementId = getDefaultActivityEngagementId(engagements)
+    if (!defaultEngagementId) {
+      setCodes3SelectedEngagementId(null)
+      setCodes3DetailMode('activities')
       return
     }
 
-    const isExpandedEngagementPresent = engagements.some(
-      (engagement) => engagement.id === expandedEngagementId,
-    )
-    if (!isExpandedEngagementPresent) {
-      setExpandedEngagementId(null)
-    }
-  }, [engagements, expandedEngagementId])
-
-  const openCreateEngagementEditor = useCallback(() => {
-    setEngagementForm(EMPTY_ENGAGEMENT_FORM)
-    setHasManualEngagementTypeSelection(false)
-    setCodeEditorSurface('create-engagement')
-    setEditorActivationKey((previous) => previous + 1)
-  }, [])
-
-  const openCreateActivityEditor = useCallback(() => {
-    if (engagements.length === 0) {
-      return
-    }
-
-    setActivityForm(buildEmptyActivityForm(getDefaultActivityEngagementId(engagements)))
-    setCodeEditorSurface('create-activity')
-    setEditorActivationKey((previous) => previous + 1)
+    setCodes3SelectedEngagementId((previous) => (
+      previous && engagements.some((engagement) => engagement.id === previous)
+        ? previous
+        : defaultEngagementId
+    ))
   }, [engagements])
 
+  useEffect(() => {
+    setSelectedHistoryItemKey((previous) => {
+      if (previous && filteredHistoryItems.some((item) => item.key === previous)) {
+        return previous
+      }
+
+      return filteredHistoryItems[0]?.key ?? null
+    })
+  }, [filteredHistoryItems])
+
   const closeCodeEditor = useCallback(() => {
-    if (isEngagementEditorOpen) {
-      setEngagementForm(EMPTY_ENGAGEMENT_FORM)
-      setHasManualEngagementTypeSelection(false)
-    }
-
-    if (isActivityEditorOpen) {
-      setActivityForm(buildEmptyActivityForm(getDefaultActivityEngagementId(engagements)))
-    }
-
+    setEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    setHasManualEngagementTypeSelection(false)
+    setActivityForm(buildEmptyActivityForm(getDefaultActivityEngagementId(engagements)))
     setCodeEditorSurface(null)
-  }, [engagements, isActivityEditorOpen, isEngagementEditorOpen])
+    setCodes3DetailMode('activities')
+  }, [engagements])
 
-  const toggleEngagementEditor = useCallback(() => {
-    if (isEngagementEditorOpen) {
-      closeCodeEditor()
-      return
-    }
+  const openCodes4CreateEngagementModal = useCallback(() => {
+    setCodes4CreateStep('engagement')
+    setCodes4CreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    setHasManualCodes4CreateEngagementTypeSelection(false)
+    setCodes4CreateNotice(null)
+    setIsCodes4CreateModalOpen(true)
+  }, [])
 
-    openCreateEngagementEditor()
-  }, [closeCodeEditor, isEngagementEditorOpen, openCreateEngagementEditor])
+  const openCodes4CreateActivityModal = useCallback(() => {
+    const engagementId = resolveCodes4CreateActivityEngagementId()
+    setCodes4CreateStep('activity')
+    setCodes4CreateActivityForm(buildEmptyActivityForm(engagementId))
+    setCodes4CreateNotice(null)
+    setIsCodes4CreateModalOpen(true)
+  }, [resolveCodes4CreateActivityEngagementId])
 
-  const toggleActivityEditor = useCallback(() => {
-    if (isActivityEditorOpen) {
-      closeCodeEditor()
-      return
-    }
+  const openCodes3CreateEngagementModal = useCallback(() => {
+    setCodes3DetailMode('activities')
+    openCodes4CreateEngagementModal()
+  }, [openCodes4CreateEngagementModal])
 
-    openCreateActivityEditor()
-  }, [closeCodeEditor, isActivityEditorOpen, openCreateActivityEditor])
+  const openCodes3CreateActivityModal = useCallback(() => {
+    const engagementId = selectedCodes3Engagement?.id ?? resolveCodes4CreateActivityEngagementId()
+    setCodes4CreateContextEngagementId(engagementId || null)
+    setCodes3DetailMode('activities')
+    setCodes4CreateStep('activity')
+    setCodes4CreateActivityForm(buildEmptyActivityForm(engagementId))
+    setCodes4CreateNotice(null)
+    setIsCodes4CreateModalOpen(true)
+  }, [resolveCodes4CreateActivityEngagementId, selectedCodes3Engagement?.id])
+
+  const closeCodes4CreateModal = useCallback(() => {
+    setIsCodes4CreateModalOpen(false)
+    setCodes4CreateStep('engagement')
+    setCodes4CreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    setHasManualCodes4CreateEngagementTypeSelection(false)
+    setCodes4CreateActivityForm(buildEmptyActivityForm(''))
+    setCodes4CreateNotice(null)
+  }, [])
 
   useEffect(() => {
-    if (!codeEditorSurface) {
+    if (!isCodes4CreateModalOpen) {
       return
     }
 
-    if (codeFormsBodyRef.current) {
-      codeFormsBodyRef.current.scrollTop = 0
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !isBusy) {
+        closeCodes4CreateModal()
+      }
     }
 
-    const targetInput = isActivityEditorOpen
-      ? activityEngagementSelectRef.current
-      : engagementNameInputRef.current
-
-    if (!targetInput) {
-      return
-    }
-
-    const animationFrameId = window.requestAnimationFrame(() => {
-      targetInput.focus()
-    })
-
+    window.addEventListener('keydown', handleKeyDown)
     return () => {
-      window.cancelAnimationFrame(animationFrameId)
+      window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [codeEditorSurface, editorActivationKey, isActivityEditorOpen])
+  }, [closeCodes4CreateModal, isBusy, isCodes4CreateModalOpen])
+
+  useEffect(() => {
+    if (!isCodes4CreateModalOpen || codes4CreateStep !== 'activity') {
+      return
+    }
+
+    setCodes4CreateActivityForm((previous) => {
+      if (
+        previous.engagementId
+        && engagements.some((engagement) => engagement.id === previous.engagementId)
+      ) {
+        return previous
+      }
+
+      const nextEngagementId = resolveCodes4CreateActivityEngagementId()
+      return previous.engagementId === nextEngagementId
+        ? previous
+        : { ...previous, engagementId: nextEngagementId }
+    })
+  }, [
+    codes4CreateStep,
+    engagements,
+    isCodes4CreateModalOpen,
+    resolveCodes4CreateActivityEngagementId,
+  ])
 
   useEffect(() => {
     if (isEditingEngagement && engagementForm.id) {
@@ -1756,7 +2621,7 @@ function App() {
       return
     }
 
-    if (!isActivityEditorOpen) {
+    if (!isEditingActivity) {
       return
     }
 
@@ -1770,7 +2635,7 @@ function App() {
       (engagement) => engagement.id === activityForm.engagementId,
     )
 
-    if (isEditingActivity && activityForm.id) {
+    if (activityForm.id) {
       const activityStillExists = engagements.some((engagement) =>
         engagement.activities.some((activity) => activity.id === activityForm.id),
       )
@@ -1782,25 +2647,11 @@ function App() {
 
       return
     }
-
-    if (!hasSelectedEngagement) {
-      const defaultEngagementId = getDefaultActivityEngagementId(engagements)
-      setActivityForm((previous) => (
-        previous.engagementId === defaultEngagementId
-          ? previous
-          : {
-              ...previous,
-              engagementId: defaultEngagementId,
-            }
-      ))
-    }
   }, [
     activityForm.engagementId,
     activityForm.id,
-    codeEditorSurface,
     engagementForm.id,
     engagements,
-    isActivityEditorOpen,
     isEditingActivity,
     isEditingEngagement,
   ])
@@ -1818,6 +2669,7 @@ function App() {
         engagementId: values[0].id,
       }
     })
+    return values
   }, [])
 
   const loadSettings = useCallback(async () => {
@@ -1832,6 +2684,12 @@ function App() {
   const loadSummaryLayoutState = useCallback(async () => {
     const value = await summaryLayoutStateGet()
     setSummaryLayoutState(value)
+    return value
+  }, [])
+
+  const loadReportingState = useCallback(async () => {
+    const value = await reportingStateGet()
+    setReportingState(value)
     return value
   }, [])
 
@@ -2013,6 +2871,7 @@ function App() {
           loadQuickAddSuggestions(),
           loadSettings(),
           loadSummaryLayoutState(),
+          loadReportingState(),
           loadTimeline(todayDate),
           loadDiagnostics('all'),
         ])
@@ -2029,6 +2888,7 @@ function App() {
     loadDiagnostics,
     loadEngagements,
     loadQuickAddSuggestions,
+    loadReportingState,
     loadSettings,
     loadSummaryLayoutState,
     loadTimeline,
@@ -2267,7 +3127,7 @@ function App() {
   }, [activeView, appRuntime, loadWeekTimeline, selectedDate])
 
   useEffect(() => {
-    if (!appRuntime || !hasInitializedRef.current || activeView !== 'summary') {
+    if (!appRuntime || !hasInitializedRef.current || !isSummaryLikeView(activeView)) {
       return
     }
 
@@ -2313,16 +3173,56 @@ function App() {
   }, [activeView, timelineContextMenu])
 
   useEffect(() => {
-    if (activeView !== 'summary' && summaryNotesModal) {
+    if (!isSummaryLikeView(activeView) && summaryNotesModal) {
       setSummaryNotesModal(null)
     }
   }, [activeView, summaryNotesModal])
 
   useEffect(() => {
-    if (activeView !== 'summary' && summaryLayoutModal) {
+    if (activeView !== 'reporting' && summaryLayoutModal) {
       resetSummaryLayoutEditor()
     }
   }, [activeView, resetSummaryLayoutEditor, summaryLayoutModal])
+
+  useEffect(() => {
+    if (activeView !== 'reporting' && reportingDisplayPresetModal) {
+      resetReportingDisplayPresetEditor()
+    }
+  }, [activeView, reportingDisplayPresetModal, resetReportingDisplayPresetEditor])
+
+  useEffect(() => {
+    if (activeView !== 'reporting') {
+      setIsReportingExportModalOpen(false)
+    }
+  }, [activeView])
+
+  useEffect(() => {
+    if (!isReportingExportModalOpen) {
+      return
+    }
+
+    setReportingExportPreviewSheet('weeklyHours')
+  }, [isReportingExportModalOpen])
+
+  useEffect(() => {
+    if (!isReportingExportModalOpen) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (summaryLayoutModal || reportingDisplayPresetModal) {
+          return
+        }
+        setIsReportingExportModalOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isReportingExportModalOpen, reportingDisplayPresetModal, summaryLayoutModal])
 
   useEffect(() => {
     if (!summaryNotesModal) {
@@ -2646,6 +3546,20 @@ function App() {
     }
   }, [successMessage])
 
+  useEffect(() => {
+    if (!codes4CreateNotice) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setCodes4CreateNotice(null)
+    }, 5000)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [codes4CreateNotice])
+
   const refreshAfterMutation = useCallback(async () => {
     await Promise.all([
       loadEngagements(),
@@ -2711,6 +3625,12 @@ function App() {
   )
 
   const clearTimelineSelection = useCallback(() => {
+    if (entryDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
+      entryDraftAutoSaveTimeoutRef.current = null
+    }
+    entryDraftLastSavedKeyRef.current = null
+    setEntryAutoSaveStatus('idle')
     setSelectedEntryId(null)
     setHighlightedEntryId(null)
     setEntryDraft(null)
@@ -2826,6 +3746,15 @@ function App() {
         ? replaceTimelineEntry(previousWeekTimeline.entries, optimisticEntry)
         : null
       const nextDraftEndState = buildEntryDraftEndState(nextEndMinute)
+      const optimisticDraft = previousEntryDraft && previousEntryDraft.id === draggedEntry.id
+        ? {
+            ...previousEntryDraft,
+            date: refreshDate,
+            startTime: minuteToTimeInput(nextStartMinute),
+            endTime: nextDraftEndState.endTime,
+            preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
+          }
+        : null
 
       setIsBusy(true)
       setErrorMessage(null)
@@ -2854,16 +3783,12 @@ function App() {
       } else {
         setTimelineEntries((previous) => replaceTimelineEntry(previous, optimisticEntry))
       }
+      if (optimisticDraft) {
+        entryDraftLastSavedKeyRef.current = serializeEntryDraft(optimisticDraft)
+        setEntryAutoSaveStatus('saved')
+      }
       setEntryDraft((previous) =>
-        previous && previous.id === draggedEntry.id
-          ? {
-              ...previous,
-              date: refreshDate,
-              startTime: minuteToTimeInput(nextStartMinute),
-              endTime: nextDraftEndState.endTime,
-              preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
-            }
-          : previous,
+        previous && previous.id === draggedEntry.id ? optimisticDraft ?? previous : previous,
       )
       setTimelineDragStateWithRef(() => null)
 
@@ -2893,6 +3818,7 @@ function App() {
           } else {
             setTimelineEntries(previousTimelineEntries)
           }
+          entryDraftLastSavedKeyRef.current = previousEntryDraft ? serializeEntryDraft(previousEntryDraft) : null
           setEntryDraft(previousEntryDraft)
           setErrorMessage(formatActionErrorMessage(error))
           setIsBusy(false)
@@ -3399,6 +4325,10 @@ function App() {
   }, [selectedDate])
 
   useEffect(() => {
+    selectedEntryIdRef.current = selectedEntryId
+  }, [selectedEntryId])
+
+  useEffect(() => {
     timelineEntriesRef.current = loadedTimelineEntries
   }, [loadedTimelineEntries])
 
@@ -3602,6 +4532,236 @@ function App() {
       void processSubmissionQueueItem(pendingItem)
     }
   }, [processSubmissionQueueItem, submissionQueue])
+
+  const updateQuickAddSettingsDraft = useCallback(
+    (updater: (previous: QuickAddPreferences) => QuickAddPreferences) => {
+      updateQuickAddSettingsDraftWithAnimation(updater, { animate: false })
+    },
+    [updateQuickAddSettingsDraftWithAnimation],
+  )
+
+  const openQuickAddSettings = () => {
+    const draft = buildQuickAddSettingsDraft(settingsStatus?.quickAddPreferences, engagements)
+    quickAddSettingsDraftRef.current = draft
+    setQuickAddSettingsDraft(draft)
+    commitQuickAddSettingsDragState(null)
+    setIsQuickAddSettingsOpen(true)
+  }
+
+  const closeQuickAddSettings = useCallback(() => {
+    releaseQuickAddSettingsPointerCapture(quickAddSettingsDragStateRef.current?.pointerId ?? null)
+    commitQuickAddSettingsDragState(null)
+    setIsQuickAddSettingsOpen(false)
+  }, [commitQuickAddSettingsDragState, releaseQuickAddSettingsPointerCapture])
+
+  useEffect(() => {
+    if (!isQuickAddSettingsOpen) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeQuickAddSettings()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+    window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [closeQuickAddSettings, isQuickAddSettingsOpen])
+
+  const moveQuickAddEngagement = (engagementId: string, direction: -1 | 1) => {
+    updateQuickAddSettingsDraftWithAnimation((previous) => ({
+      ...previous,
+      engagementOrder: moveId(previous.engagementOrder, engagementId, direction),
+    }))
+  }
+
+  const toggleQuickAddEngagementVisibility = (engagementId: string) => {
+    const childActivityIds =
+      engagementById.get(engagementId)?.activities
+        .filter((activity) => activity.isActive)
+        .map((activity) => activity.id) ?? []
+
+    updateQuickAddSettingsDraft((previous) => {
+      const isHidden = previous.hiddenEngagementIds.includes(engagementId)
+      const childActivityIdSet = new Set(childActivityIds)
+
+      return {
+        ...previous,
+        hiddenEngagementIds: toggleId(previous.hiddenEngagementIds, engagementId),
+        hiddenActivityIds: isHidden
+          ? previous.hiddenActivityIds.filter((activityId) => !childActivityIdSet.has(activityId))
+          : Array.from(new Set([...previous.hiddenActivityIds, ...childActivityIds])),
+      }
+    })
+  }
+
+  const moveQuickAddActivity = (engagementId: string, activityId: string, direction: -1 | 1) => {
+    updateQuickAddSettingsDraftWithAnimation((previous) => ({
+      ...previous,
+      activityOrder: {
+        ...previous.activityOrder,
+        [engagementId]: moveId(previous.activityOrder[engagementId] ?? [], activityId, direction),
+      },
+    }))
+  }
+
+  const toggleQuickAddActivityVisibility = (activityId: string) => {
+    updateQuickAddSettingsDraft((previous) => ({
+      ...previous,
+      hiddenActivityIds: toggleId(previous.hiddenActivityIds, activityId),
+    }))
+  }
+
+  const collectQuickAddSettingsDragSnapshots = (keys: string[]): QuickAddSettingsDragSnapshot[] | null => {
+    const snapshots: QuickAddSettingsDragSnapshot[] = []
+    for (const key of keys) {
+      const node = quickAddSettingsRowRefs.current[key]
+      if (!node) {
+        return null
+      }
+
+      const rect = node.getBoundingClientRect()
+      snapshots.push({
+        key,
+        top: rect.top,
+        height: rect.height,
+        centerY: rect.top + (rect.height / 2),
+      })
+    }
+
+    return snapshots
+  }
+
+  const startQuickAddSettingsDrag = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    options: {
+      kind: QuickAddSettingsDragKind
+      engagementId: string
+      activityId?: string
+      keys: string[]
+      dragKey: string
+    },
+  ) => {
+    if (isBusy || event.button !== 0) {
+      return
+    }
+
+    const snapshots = collectQuickAddSettingsDragSnapshots(options.keys)
+    if (!snapshots) {
+      return
+    }
+
+    const sourceIndex = snapshots.findIndex((snapshot) => snapshot.key === options.dragKey)
+    if (sourceIndex < 0) {
+      return
+    }
+
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    quickAddSettingsDragCaptureTargetRef.current = event.currentTarget
+    commitQuickAddSettingsDragState({
+      kind: options.kind,
+      pointerId: event.pointerId,
+      dragKey: options.dragKey,
+      engagementId: options.engagementId,
+      activityId: options.activityId,
+      startClientY: event.clientY,
+      latestClientY: event.clientY,
+      sourceIndex,
+      insertionIndex: sourceIndex,
+      snapshots,
+    })
+  }
+
+  const onQuickAddSettingsDragPointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const current = quickAddSettingsDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId) {
+      return
+    }
+
+    const draggedSnapshot = current.snapshots[current.sourceIndex]
+    if (!draggedSnapshot) {
+      return
+    }
+
+    const draggedCenterY = draggedSnapshot.centerY + (event.clientY - current.startClientY)
+    commitQuickAddSettingsDragState({
+      ...current,
+      latestClientY: event.clientY,
+      insertionIndex: findQuickAddSettingsInsertionIndex(draggedCenterY, current),
+    })
+  }
+
+  const finishQuickAddSettingsDrag = (
+    pointerId: number,
+    shouldCommit: boolean,
+    clientY?: number,
+  ) => {
+    const current = quickAddSettingsDragStateRef.current
+    if (!current || current.pointerId !== pointerId) {
+      return
+    }
+
+    const draggedSnapshot = current.snapshots[current.sourceIndex]
+    const finalDragState =
+      draggedSnapshot && clientY !== undefined
+        ? {
+            ...current,
+            latestClientY: clientY,
+            insertionIndex: findQuickAddSettingsInsertionIndex(
+              draggedSnapshot.centerY + (clientY - current.startClientY),
+              current,
+            ),
+          }
+        : current
+
+    releaseQuickAddSettingsPointerCapture(pointerId)
+    commitQuickAddSettingsDragState(null)
+
+    if (!shouldCommit || finalDragState.sourceIndex === finalDragState.insertionIndex) {
+      return
+    }
+
+    updateQuickAddSettingsDraftWithAnimation((previous) => {
+      if (finalDragState.kind === 'engagement') {
+        return {
+          ...previous,
+          engagementOrder: moveIdToIndex(
+            previous.engagementOrder,
+            finalDragState.engagementId,
+            finalDragState.insertionIndex,
+          ),
+        }
+      }
+
+      if (!finalDragState.activityId) {
+        return previous
+      }
+
+      return {
+        ...previous,
+        activityOrder: {
+          ...previous.activityOrder,
+          [finalDragState.engagementId]: moveIdToIndex(
+            previous.activityOrder[finalDragState.engagementId] ?? [],
+            finalDragState.activityId,
+            finalDragState.insertionIndex,
+          ),
+        },
+      }
+    })
+  }
+
+  const onQuickAddSettingsDragPointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    finishQuickAddSettingsDrag(event.pointerId, true, event.clientY)
+  }
+
+  const onQuickAddSettingsDragPointerCancel = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    finishQuickAddSettingsDrag(event.pointerId, false, event.clientY)
+  }
 
   const openCalendarBulkModal = () => {
     calendarReviewAutoCenterKeyRef.current = null
@@ -4128,7 +5288,7 @@ function App() {
 
   const onSubmitEngagement = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const isEditing = codeEditorSurface === 'edit-engagement'
+    const savedEngagementId = engagementForm.id
 
     void runAction(async () => {
       const describeWhenToUse = engagementForm.describeWhenToUse.trim()
@@ -4156,11 +5316,10 @@ function App() {
       setEngagementForm(EMPTY_ENGAGEMENT_FORM)
       setHasManualEngagementTypeSelection(false)
       await refreshAfterMutation()
-      if (isEditing) {
-        setCodeEditorSurface(null)
-      } else {
-        setCodeEditorSurface('create-engagement')
-        setEditorActivationKey((previous) => previous + 1)
+      setCodeEditorSurface(null)
+      if (activeView === 'codes' && savedEngagementId) {
+        setCodes3SelectedEngagementId(savedEngagementId)
+        setCodes3DetailMode('activities')
       }
       setSuccessMessage('Engagement saved.')
     }, { formatError: formatCodesMutationError })
@@ -4175,7 +5334,7 @@ function App() {
   }
 
   const onEditEngagement = (engagement: Engagement) => {
-    setExpandedEngagementId(engagement.id)
+    setCodes4CreateContextEngagementId(engagement.id)
     setCodeEditorSurface('edit-engagement')
     setHasManualEngagementTypeSelection(false)
     setEngagementForm({
@@ -4189,21 +5348,15 @@ function App() {
       tags: joinTags(engagement.tags),
       isActive: engagement.isActive,
     })
-    setEditorActivationKey((previous) => previous + 1)
   }
 
   const onSubmitActivity = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const isEditing = codeEditorSurface === 'edit-activity'
     const nextEngagementId =
       activityForm.engagementId || getDefaultActivityEngagementId(engagements)
 
     void runAction(async () => {
       const describeWhenToUse = activityForm.describeWhenToUse.trim()
-      if (describeWhenToUse.length === 0) {
-        throw new Error('"Describe when to use" is required for matching.')
-      }
-
       const colorHex = normalizeColorHexInput(activityForm.colorHex)
       if (activityForm.colorHex.trim().length > 0 && !colorHex) {
         throw new Error('Activity color must be a valid #RRGGBB value.')
@@ -4222,13 +5375,98 @@ function App() {
 
       setActivityForm(buildEmptyActivityForm(nextEngagementId))
       await refreshAfterMutation()
-      if (isEditing) {
-        setCodeEditorSurface(null)
-      } else {
-        setCodeEditorSurface('create-activity')
-        setEditorActivationKey((previous) => previous + 1)
+      setCodeEditorSurface(null)
+      if (activeView === 'codes') {
+        setCodes3SelectedEngagementId(nextEngagementId)
+        setCodes3DetailMode('activities')
       }
       setSuccessMessage('Activity saved.')
+    }, { formatError: formatCodesMutationError })
+  }
+
+  const onSubmitCodes4CreateEngagement = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    void runAction(async () => {
+      const name = codes4CreateEngagementForm.name.trim()
+      const code = codes4CreateEngagementForm.code.trim()
+      const describeWhenToUse = codes4CreateEngagementForm.describeWhenToUse.trim()
+
+      if (!name) {
+        throw new Error('Engagement name is required.')
+      }
+      const colorHex = normalizeColorHexInput(codes4CreateEngagementForm.colorHex)
+      if (codes4CreateEngagementForm.colorHex.trim().length > 0 && !colorHex) {
+        throw new Error('Engagement color must be a valid #RRGGBB value.')
+      }
+
+      const result = await engagementUpsert({
+        code: code || null,
+        name,
+        client: codes4CreateEngagementForm.client.trim() || null,
+        engagementType: codes4CreateEngagementForm.engagementType,
+        colorHex,
+        describeWhenToUse,
+        tags: parseTagInput(codes4CreateEngagementForm.tags),
+        isActive: codes4CreateEngagementForm.isActive,
+      })
+
+      await refreshAfterMutation()
+      setCodes4CreateContextEngagementId(result.id)
+      setCodes4CreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
+      setHasManualCodes4CreateEngagementTypeSelection(false)
+      setCodes4CreateActivityForm(buildEmptyActivityForm(result.id))
+      setCodes4CreateStep('activity')
+      if (activeView === 'codes') {
+        setCodes3SelectedEngagementId(result.id)
+        setCodes3DetailMode('activities')
+      }
+      setSuccessMessage(null)
+      setCodes4CreateNotice('Engagement created. Proceed to create activities.')
+    }, { formatError: formatCodesMutationError })
+  }
+
+  const onSubmitCodes4CreateActivity = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    void runAction(async () => {
+      const engagementId =
+        codes4CreateActivityForm.engagementId || resolveCodes4CreateActivityEngagementId()
+      const name = codes4CreateActivityForm.name.trim()
+      const code = codes4CreateActivityForm.code.trim()
+      const describeWhenToUse = codes4CreateActivityForm.describeWhenToUse.trim()
+
+      if (!engagementId) {
+        throw new Error('Choose an engagement for the activity.')
+      }
+      if (!name) {
+        throw new Error('Activity name is required.')
+      }
+      const colorHex = normalizeColorHexInput(codes4CreateActivityForm.colorHex)
+      if (codes4CreateActivityForm.colorHex.trim().length > 0 && !colorHex) {
+        throw new Error('Activity color must be a valid #RRGGBB value.')
+      }
+
+      await activityUpsert({
+        engagementId,
+        code: code || null,
+        name,
+        colorHex,
+        describeWhenToUse,
+        tags: parseTagInput(codes4CreateActivityForm.tags),
+        isActive: codes4CreateActivityForm.isActive,
+      })
+
+      await refreshAfterMutation()
+      setCodes4CreateContextEngagementId(engagementId)
+      setCodes4CreateActivityForm(buildEmptyActivityForm(engagementId))
+      setCodes4CreateStep('activity')
+      if (activeView === 'codes') {
+        setCodes3SelectedEngagementId(engagementId)
+        setCodes3DetailMode('activities')
+      }
+      setSuccessMessage(null)
+      setCodes4CreateNotice('Activity created. You may create the next activity.')
     }, { formatError: formatCodesMutationError })
   }
 
@@ -4241,7 +5479,7 @@ function App() {
   }
 
   const onEditActivity = (activity: Activity) => {
-    setExpandedEngagementId(activity.engagementId)
+    setCodes4CreateContextEngagementId(activity.engagementId)
     setCodeEditorSurface('edit-activity')
     setActivityForm({
       id: activity.id,
@@ -4253,7 +5491,6 @@ function App() {
       tags: joinTags(activity.tags),
       isActive: activity.isActive,
     })
-    setEditorActivationKey((previous) => previous + 1)
   }
 
   const onSetDate = (nextDate: string) => {
@@ -4290,13 +5527,16 @@ function App() {
       syncSelectedDate?: boolean
     },
   ) => {
+    const nextDraft = buildEntryDraft(entry)
     setTimelineContextMenu(null)
     if (options?.syncSelectedDate) {
       updateSelectedDate(entry.date, { clearSelection: false })
     }
     setHighlightedEntryId(null)
     setSelectedEntryId(entry.id)
-    setEntryDraft(buildEntryDraft(entry))
+    entryDraftLastSavedKeyRef.current = serializeEntryDraft(nextDraft)
+    setEntryAutoSaveStatus('saved')
+    setEntryDraft(nextDraft)
   }
 
   const onSelectTimelineBlock = (entry: TimelineEntry) => {
@@ -4900,6 +6140,109 @@ function App() {
     onCreateCalendarCandidateAtMinute(calendarSelectedDate, pointerMinute)
   }
 
+  const saveEntryDraftSnapshot = useCallback(
+    async (draft: EntryDraft) => {
+      if (selectedEntryIdRef.current !== draft.id) {
+        return
+      }
+
+      const savePlan = buildEntryDraftSavePlan(draft)
+      if (!savePlan.ok) {
+        setSuccessMessage(null)
+        setErrorMessage(savePlan.errorMessage)
+        setEntryAutoSaveStatus('error')
+        return
+      }
+
+      const currentEntry = timelineEntriesRef.current.find((entry) => entry.id === draft.id) ?? null
+      const previousEntryDate = currentEntry?.date ?? selectedDateRef.current
+      const previousMonthKey = monthKeyFromDate(previousEntryDate)
+      const nextMonthKey = monthKeyFromDate(savePlan.normalizedDraft.date)
+      const refreshDate = savePlan.normalizedDraft.date
+
+      setEntryAutoSaveStatus('saving')
+      setSuccessMessage(null)
+      setErrorMessage(null)
+
+      try {
+        await timelineUpdateEntry({
+          id: savePlan.normalizedDraft.id,
+          engagementId: savePlan.normalizedDraft.engagementId || null,
+          activityId: savePlan.normalizedDraft.activityId || null,
+          mode: 'manual',
+          date: savePlan.normalizedDraft.date,
+          startMinute: savePlan.startMinute,
+          endMinute: savePlan.endMinute,
+          description: savePlan.normalizedDraft.description,
+        })
+
+        invalidateMonthSummaries([previousMonthKey, nextMonthKey])
+        updateSelectedDate(refreshDate, { clearSelection: false })
+        await Promise.all([
+          loadTimeline(refreshDate),
+          loadWeekTimeline(refreshDate),
+          loadWeeklySummary(refreshDate),
+          loadQuickAddSuggestions(),
+        ])
+
+        if (selectedEntryIdRef.current !== draft.id) {
+          return
+        }
+
+        entryDraftLastSavedKeyRef.current = savePlan.key
+        setEntryDraft((previous) =>
+          previous && previous.id === draft.id ? savePlan.normalizedDraft : previous,
+        )
+        setEntryAutoSaveStatus('saved')
+      } catch (error) {
+        if (selectedEntryIdRef.current !== draft.id) {
+          return
+        }
+
+        setEntryAutoSaveStatus('error')
+        setErrorMessage(formatActionErrorMessage(error))
+      }
+    },
+    [
+      invalidateMonthSummaries,
+      loadTimeline,
+      loadWeekTimeline,
+      loadWeeklySummary,
+      loadQuickAddSuggestions,
+      updateSelectedDate,
+    ],
+  )
+
+  useEffect(() => {
+    if (!entryDraft) {
+      return undefined
+    }
+
+    const draftKey = serializeEntryDraft(entryDraft)
+    if (draftKey === entryDraftLastSavedKeyRef.current) {
+      return undefined
+    }
+
+    if (entryDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
+    }
+
+    entryDraftAutoSaveTimeoutRef.current = window.setTimeout(() => {
+      const draftToSave = entryDraft
+      entryDraftAutoSaveTimeoutRef.current = null
+      entryDraftAutoSaveChainRef.current = entryDraftAutoSaveChainRef.current
+        .catch(() => undefined)
+        .then(() => saveEntryDraftSnapshot(draftToSave))
+    }, 700)
+
+    return () => {
+      if (entryDraftAutoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
+        entryDraftAutoSaveTimeoutRef.current = null
+      }
+    }
+  }, [entryDraft, saveEntryDraftSnapshot])
+
   const onSaveEntryDraft = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
@@ -4907,65 +6250,9 @@ function App() {
       return
     }
 
-    if (entryDraft.startTime.trim().length === 0) {
-      setSuccessMessage(null)
-      setErrorMessage('Start time is required.')
-      return
-    }
-
-    if (entryDraft.endTime.trim().length === 0) {
-      setSuccessMessage(null)
-      setErrorMessage('End time is required.')
-      return
-    }
-
-    const startMinute = timeInputToMinute(entryDraft.startTime)
-    const endMinute = resolveEntryDraftEndMinute(entryDraft)
-    if (endMinute <= startMinute) {
-      setSuccessMessage(null)
-      setErrorMessage('End time must be later than start time.')
-      return
-    }
-
-    void runAction(async () => {
-      const previousEntryDate = selectedEntry?.date ?? selectedDate
-      const previousMonthKey = monthKeyFromDate(previousEntryDate)
-      const nextMonthKey = monthKeyFromDate(entryDraft.date)
-      const refreshDate = entryDraft.date
-
-      await timelineUpdateEntry({
-        id: entryDraft.id,
-        engagementId: entryDraft.engagementId || null,
-        activityId: entryDraft.activityId || null,
-        mode: 'manual',
-        date: entryDraft.date,
-        startMinute,
-        endMinute,
-        description: entryDraft.description,
-      })
-
-      updateSelectedDate(refreshDate, { clearSelection: false })
-      await Promise.all([
-        loadTimeline(refreshDate),
-        loadWeekTimeline(refreshDate),
-        loadWeeklySummary(refreshDate),
-        loadQuickAddSuggestions(),
-      ])
-      invalidateMonthSummaries([previousMonthKey, nextMonthKey])
-      const nextDraftEndState = buildEntryDraftEndState(endMinute)
-      setEntryDraft((previous) =>
-        previous && previous.id === entryDraft.id
-          ? {
-              ...previous,
-              date: refreshDate,
-              startTime: minuteToTimeInput(startMinute),
-              endTime: nextDraftEndState.endTime,
-              preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
-            }
-          : previous,
-      )
-      setSuccessMessage('Timeline entry updated.')
-    })
+    entryDraftAutoSaveChainRef.current = entryDraftAutoSaveChainRef.current
+      .catch(() => undefined)
+      .then(() => saveEntryDraftSnapshot(entryDraft))
   }
 
   const onDeleteTimelineEntry = (id: string) => {
@@ -5206,8 +6493,8 @@ function App() {
       return
     }
 
-    if (!selectedSummaryLayoutPreset) {
-      setErrorMessage('No summary layout preset is selected.')
+    if (!activeSummaryExportPreset) {
+      setErrorMessage('No export preset is selected.')
       return
     }
 
@@ -5216,7 +6503,7 @@ function App() {
       try {
         const result = await summaryExportWeeklyExcel({
           date: selectedDate,
-          layoutPreset: selectedSummaryLayoutPreset,
+          layoutPreset: activeSummaryExportPreset,
         })
         if (!result.autoOpenAttempted || result.autoOpenSucceeded) {
           setSuccessMessage(`Weekly summary exported and opened: ${result.filePath}`)
@@ -5250,8 +6537,42 @@ function App() {
     }
   }, [])
 
-  const openSummaryLayoutEditor = useCallback((mode: 'create' | 'edit') => {
-    const basePreset = selectedSummaryLayoutPreset
+  const persistReportingState = useCallback(async (
+    nextState: ReportingState,
+    options?: { successMessage?: string },
+  ) => {
+    setIsReportingStateSaving(true)
+    setErrorMessage(null)
+    try {
+      const savedState = await reportingStateSet(nextState)
+      setReportingState(savedState)
+      if (options?.successMessage) {
+        setSuccessMessage(options.successMessage)
+      }
+      return savedState
+    } finally {
+      setIsReportingStateSaving(false)
+    }
+  }, [])
+
+  const updateReportingState = useCallback((
+    updater: (state: ReportingState) => ReportingState,
+    options?: { successMessage?: string },
+  ) => {
+    const nextState = updater(resolvedReportingState)
+    void (async () => {
+      try {
+        await persistReportingState(nextState, options)
+      } catch (error) {
+        setErrorMessage(extractErrorMessage(error))
+      }
+    })()
+  }, [persistReportingState, resolvedReportingState])
+
+  const openSummaryLayoutEditor = useCallback((
+    mode: 'create' | 'edit',
+  ) => {
+    const basePreset = selectedReportingExportPreset
     if (!basePreset) {
       return
     }
@@ -5291,25 +6612,165 @@ function App() {
     commitSummaryLayoutDragState,
     releaseSummaryLayoutPointerCapture,
     resolvedSummaryLayoutState.presets,
-    selectedSummaryLayoutPreset,
+    selectedReportingExportPreset,
   ])
 
-  const onSelectSummaryLayoutPreset = (presetId: string) => {
+  const onSelectReportingExportPreset = (presetId: string) => {
     if (
-      isSummaryLayoutSaving
-      || presetId === resolvedSummaryLayoutState.selectedPresetId
+      isReportingStateSaving
+      || presetId === selectedReportingExportPreset?.id
     ) {
       return
     }
 
+    updateReportingState((state) => ({
+      ...state,
+      selectedExportPresetId: presetId,
+    }))
+  }
+
+  const onSelectReportingDisplayPreset = (presetId: string) => {
+    if (
+      isReportingStateSaving
+      || presetId === selectedReportingDisplayPreset?.id
+    ) {
+      return
+    }
+
+    updateReportingState((state) => ({
+      ...state,
+      selectedDisplayPresetId: presetId,
+    }))
+  }
+
+  const openReportingDisplayPresetEditor = useCallback((mode: 'create' | 'edit') => {
+    const basePreset = selectedReportingDisplayPreset
+    if (!basePreset) {
+      return
+    }
+
+    if (mode === 'create') {
+      const nextName = buildNextReportingPresetName(
+        `${basePreset.name} Copy`,
+        resolvedReportingState.displayPresets,
+      )
+      const draft = cloneReportingDisplayPreset(basePreset, {
+        id: generateReportingId('reporting-display'),
+        name: nextName,
+      })
+      setReportingDisplayPresetDraft(draft)
+      setReportingDisplayPresetDraftName(draft.name)
+      setReportingDisplayPresetModal({
+        mode,
+        presetId: null,
+      })
+    } else {
+      setReportingDisplayPresetDraft(cloneReportingDisplayPreset(basePreset))
+      setReportingDisplayPresetDraftName(basePreset.name)
+      setReportingDisplayPresetModal({
+        mode,
+        presetId: basePreset.id,
+      })
+    }
+
+    setReportingDisplayPresetDraftError(null)
+  }, [resolvedReportingState.displayPresets, selectedReportingDisplayPreset])
+
+  const onSaveReportingDisplayPreset = () => {
+    if (!reportingDisplayPresetDraft || !reportingDisplayPresetModal) {
+      return
+    }
+
+    const trimmedName = reportingDisplayPresetDraftName.trim()
+    if (!trimmedName) {
+      setReportingDisplayPresetDraftError('Enter a table preset name before saving.')
+      return
+    }
+
+    if (trimmedName.length > REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH) {
+      setReportingDisplayPresetDraftError(
+        `Display preset names must be ${REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH} characters or fewer.`,
+      )
+      return
+    }
+
+    const duplicateName = resolvedReportingState.displayPresets.some((preset) => (
+      preset.id !== reportingDisplayPresetDraft.id
+      && preset.name.trim().toLowerCase() === trimmedName.toLowerCase()
+    ))
+    if (duplicateName) {
+      setReportingDisplayPresetDraftError('Display preset names must be unique.')
+      return
+    }
+
+    const draftToSave = {
+      ...reportingDisplayPresetDraft,
+      name: trimmedName,
+    }
+
+    const nextDisplayPresets = (
+      reportingDisplayPresetModal.mode === 'create'
+        ? [...resolvedReportingState.displayPresets, draftToSave]
+        : resolvedReportingState.displayPresets.map((preset) => (
+          preset.id === draftToSave.id ? draftToSave : preset
+        ))
+    )
+
     void (async () => {
       try {
-        await persistSummaryLayoutState({
-          ...resolvedSummaryLayoutState,
-          selectedPresetId: presetId,
+        await persistReportingState({
+          ...resolvedReportingState,
+          selectedDisplayPresetId: draftToSave.id,
+          displayPresets: nextDisplayPresets,
+        }, {
+          successMessage:
+            reportingDisplayPresetModal.mode === 'create'
+              ? 'Reporting table preset created.'
+              : 'Reporting table preset updated.',
         })
+        resetReportingDisplayPresetEditor()
       } catch (error) {
-        setErrorMessage(extractErrorMessage(error))
+        setReportingDisplayPresetDraftError(extractErrorMessage(error))
+      }
+    })()
+  }
+
+  const onDeleteReportingDisplayPreset = () => {
+    if (
+      !reportingDisplayPresetDraft
+      || !reportingDisplayPresetModal
+      || resolvedReportingState.displayPresets.length <= 1
+    ) {
+      setReportingDisplayPresetDraftError('At least one table preset must remain.')
+      return
+    }
+
+    const confirmed = window.confirm(`Delete table preset "${reportingDisplayPresetDraft.name}"?`)
+    if (!confirmed) {
+      return
+    }
+
+    const remainingPresets = resolvedReportingState.displayPresets.filter(
+      (preset) => preset.id !== reportingDisplayPresetDraft.id,
+    )
+    const nextSelectedPresetId = (
+      resolvedReportingState.selectedDisplayPresetId === reportingDisplayPresetDraft.id
+        ? remainingPresets[0]?.id ?? resolvedReportingState.selectedDisplayPresetId
+        : resolvedReportingState.selectedDisplayPresetId
+    )
+
+    void (async () => {
+      try {
+        await persistReportingState({
+          ...resolvedReportingState,
+          selectedDisplayPresetId: nextSelectedPresetId,
+          displayPresets: remainingPresets,
+        }, {
+          successMessage: 'Reporting table preset deleted.',
+        })
+        resetReportingDisplayPresetEditor()
+      } catch (error) {
+        setReportingDisplayPresetDraftError(extractErrorMessage(error))
       }
     })()
   }
@@ -5381,6 +6842,94 @@ function App() {
     setSummaryLayoutDraftError(null)
   }
 
+  const onUpdateSummaryLayoutFreeTextRowValue = (
+    columnId: string,
+    rowKey: string,
+    value: string,
+  ) => {
+    setSummaryLayoutDraft((previous) => {
+      if (!previous) {
+        return previous
+      }
+
+      return {
+        ...previous,
+        columns: previous.columns.map((column) => {
+          if (column.kind !== 'freeText' || column.id !== columnId) {
+            return column
+          }
+
+          if (column.repeat) {
+            return {
+              ...column,
+              repeatValue: value,
+              repeatRowKey: column.repeatRowKey ?? rowKey,
+            }
+          }
+
+          const nextRowValues = { ...(column.rowValues ?? {}) }
+          if (value.trim()) {
+            nextRowValues[rowKey] = value
+          } else {
+            delete nextRowValues[rowKey]
+          }
+
+          return {
+            ...column,
+            rowValues: nextRowValues,
+          }
+        }),
+      }
+    })
+    setSummaryLayoutDraftError(null)
+  }
+
+  const onToggleSummaryLayoutFreeTextRepeat = (
+    columnId: string,
+    rowKey: string,
+    value: string,
+  ) => {
+    setSummaryLayoutDraft((previous) => {
+      if (!previous) {
+        return previous
+      }
+
+      return {
+        ...previous,
+        columns: previous.columns.map((column) => {
+          if (column.kind !== 'freeText' || column.id !== columnId) {
+            return column
+          }
+
+          if (column.repeat && column.repeatRowKey === rowKey) {
+            return {
+              ...column,
+              repeat: false,
+              repeatValue: '',
+              repeatRowKey: null,
+            }
+          }
+
+          const nextRowValues = { ...(column.rowValues ?? {}) }
+          if (value.trim()) {
+            nextRowValues[rowKey] = value
+          } else {
+            delete nextRowValues[rowKey]
+          }
+
+          return {
+            ...column,
+            rowValues: nextRowValues,
+            repeat: true,
+            repeatValue: value,
+            repeatRowKey: rowKey,
+          }
+        }),
+      }
+    })
+    setSummaryLayoutDraftError(null)
+  }
+
   const onSaveSummaryLayoutPreset = () => {
     if (!summaryLayoutDraft || !summaryLayoutModal) {
       return
@@ -5420,18 +6969,21 @@ function App() {
           preset.id === draftToSave.id ? draftToSave : preset
         ))
     )
-
     void (async () => {
       try {
         await persistSummaryLayoutState({
           ...resolvedSummaryLayoutState,
-          selectedPresetId: draftToSave.id,
+          selectedPresetId: resolvedSummaryLayoutState.selectedPresetId,
           presets: nextPresets,
         }, {
           successMessage:
             summaryLayoutModal.mode === 'create'
-              ? 'Summary layout preset created.'
-              : 'Summary layout preset updated.',
+              ? 'Export preset created.'
+              : 'Export preset updated.',
+        })
+        await persistReportingState({
+          ...resolvedReportingState,
+          selectedExportPresetId: draftToSave.id,
         })
         resetSummaryLayoutEditor()
       } catch (error) {
@@ -5459,6 +7011,11 @@ function App() {
         ? remainingPresets[0]?.id ?? resolvedSummaryLayoutState.selectedPresetId
         : resolvedSummaryLayoutState.selectedPresetId
     )
+    const nextReportingExportPresetId = (
+      resolvedReportingState.selectedExportPresetId === summaryLayoutDraft.id
+        ? remainingPresets[0]?.id ?? null
+        : resolvedReportingState.selectedExportPresetId
+    )
 
     void (async () => {
       try {
@@ -5467,7 +7024,11 @@ function App() {
           selectedPresetId: nextSelectedPresetId,
           presets: remainingPresets,
         }, {
-          successMessage: 'Summary layout preset deleted.',
+          successMessage: 'Export preset deleted.',
+        })
+        await persistReportingState({
+          ...resolvedReportingState,
+          selectedExportPresetId: nextReportingExportPresetId,
         })
         resetSummaryLayoutEditor()
       } catch (error) {
@@ -5553,7 +7114,7 @@ function App() {
   const weekTimelineRangeLabel = useMemo(() => {
     const startDate = weekTimelineDays[0]?.date ?? selectedDate
     const endDate = weekTimelineDays[6]?.date ?? selectedDate
-    return formatTimelineWeekRange(startDate, endDate)
+    return formatTimelineWeekRangeLabel(startDate, endDate)
   }, [selectedDate, weekTimelineDays])
   const historyWeekRangeLabel = useMemo(() => {
     const days = buildWeekViewDays(selectedDate)
@@ -5585,6 +7146,15 @@ function App() {
       }
     })()
   }
+
+  const entryAutoSaveStatusLabel =
+    entryAutoSaveStatus === 'saving'
+      ? 'Saving...'
+      : entryAutoSaveStatus === 'saved'
+        ? 'Saved'
+        : entryAutoSaveStatus === 'error'
+          ? 'Not saved'
+          : ''
 
   const timelineEditorPanel = (
     <aside className={`timeline-editor ${entryDraft ? '' : 'is-empty'}`}>
@@ -5731,15 +7301,17 @@ function App() {
             />
           </label>
           <div className="timeline-entry-actions">
-            <button type="submit" className="button-soft-primary" disabled={isBusy}>
-              <span className="control-icon save-icon" aria-hidden="true" />
-              Update
-            </button>
+            <p
+              className={`timeline-entry-save-status ${entryAutoSaveStatus}`}
+              aria-live="polite"
+            >
+              {entryAutoSaveStatusLabel}
+            </p>
             <button
               type="button"
               className="button-soft-danger"
               onClick={() => onDeleteTimelineEntry(entryDraft.id)}
-              disabled={isBusy || isTimelineDeleteBusy}
+              disabled={isBusy || isTimelineDeleteBusy || entryAutoSaveStatus === 'saving'}
             >
               <span className="control-icon trash-icon" aria-hidden="true" />
               Delete
@@ -5797,6 +7369,880 @@ function App() {
       ) : null}
     </aside>
   )
+
+  const codes4CreateModal = isCodes4CreateModalOpen ? createPortal(
+    <div
+      className="calendar-bulk-backdrop codes4-create-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !isBusy) {
+          closeCodes4CreateModal()
+        }
+      }}
+    >
+      <section
+        className="calendar-bulk-modal codes4-create-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="codes4-create-title"
+      >
+        <header className="calendar-bulk-header codes4-create-header">
+          <div>
+            <h3 id="codes4-create-title">Add Codes</h3>
+            <p>
+              {codes4CreateStep === 'engagement'
+                ? 'Start with an engagement, then add its activities.'
+                : 'Add activities for the selected engagement.'}
+            </p>
+          </div>
+          {codes4CreateNotice ? (
+            <div className="alert success codes4-create-notice" role="status">
+              <span className="alert-message">{codes4CreateNotice}</span>
+              <button
+                type="button"
+                className="alert-close"
+                aria-label="Dismiss add codes message"
+                onClick={() => setCodes4CreateNotice(null)}
+              >
+                &times;
+              </button>
+            </div>
+          ) : null}
+          <div className="calendar-bulk-header-actions">
+            <button
+              type="button"
+              className="timeline-editor-close"
+              aria-label="Close add codes"
+              title="Close"
+              onClick={closeCodes4CreateModal}
+              disabled={isBusy}
+            >
+              <span className="control-icon close-icon" aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+
+        <div className="codes4-create-body">
+          <nav className="codes4-create-rail" aria-label="Add code type">
+            <button
+              type="button"
+              className={codes4CreateStep === 'engagement' ? 'active' : ''}
+              onClick={() => {
+                setCodes4CreateStep('engagement')
+                setCodes4CreateNotice(null)
+              }}
+            >
+              <strong>Add Engagement</strong>
+              <span>Define the engagement code first.</span>
+            </button>
+            <button
+              type="button"
+              className={codes4CreateStep === 'activity' ? 'active' : ''}
+              onClick={() => {
+                setCodes4CreateStep('activity')
+                setCodes4CreateNotice(null)
+                setCodes4CreateActivityForm((previous) => ({
+                  ...previous,
+                  engagementId: previous.engagementId || resolveCodes4CreateActivityEngagementId(),
+                }))
+              }}
+              disabled={engagements.length === 0}
+            >
+              <strong>Add Activity</strong>
+              <span>Add activity codes under an engagement.</span>
+            </button>
+          </nav>
+
+          <section className="codes4-create-workspace">
+            {codes4CreateStep === 'engagement' ? (
+              <form className="stack code-editor-form codes4-create-form" onSubmit={onSubmitCodes4CreateEngagement}>
+                <div className="codes4-create-form-header">
+                  <h4>Add Engagement</h4>
+                  <button type="submit" className="button-soft-primary" disabled={isBusy}>
+                    Add Engagement
+                  </button>
+                </div>
+                <label>
+                  <span className="field-label-row">
+                    Engagement Name
+                    <span className="required-indicator" aria-hidden="true">*</span>
+                  </span>
+                  <input
+                    value={codes4CreateEngagementForm.name}
+                    onChange={(event) =>
+                      setCodes4CreateEngagementForm((previous) => ({
+                        ...previous,
+                        name: event.target.value,
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label>
+                  Engagement Code
+                  <input
+                    value={codes4CreateEngagementForm.code}
+                    onChange={(event) => {
+                      const nextCode = event.target.value
+                      setCodes4CreateEngagementForm((previous) => ({
+                        ...previous,
+                        code: nextCode,
+                        engagementType: hasManualCodes4CreateEngagementTypeSelection
+                          ? previous.engagementType
+                          : inferEngagementTypeFromCode(nextCode),
+                      }))
+                    }}
+                    placeholder="E-12345"
+                  />
+                </label>
+                <label>
+                  Describe when to use this engagement
+                  <textarea
+                    rows={2}
+                    maxLength={500}
+                    value={codes4CreateEngagementForm.describeWhenToUse}
+                    onChange={(event) =>
+                      setCodes4CreateEngagementForm((previous) => ({
+                        ...previous,
+                        describeWhenToUse: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Tags / Key Words (comma separated)
+                  <input
+                    value={codes4CreateEngagementForm.tags}
+                    onChange={(event) =>
+                      setCodes4CreateEngagementForm((previous) => ({
+                        ...previous,
+                        tags: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Client
+                  <input
+                    value={codes4CreateEngagementForm.client}
+                    onChange={(event) =>
+                      setCodes4CreateEngagementForm((previous) => ({
+                        ...previous,
+                        client: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <div className="code-editor-field">
+                  <span className="code-editor-field-label">Engagement Type</span>
+                  <div
+                    className="segmented-control engagement-type-segmented"
+                    role="group"
+                    aria-label="Add engagement type"
+                  >
+                    {(['external', 'internal'] as const).map((engagementType) => (
+                      <button
+                        key={engagementType}
+                        type="button"
+                        className={codes4CreateEngagementForm.engagementType === engagementType ? 'active' : ''}
+                        aria-pressed={codes4CreateEngagementForm.engagementType === engagementType}
+                        onClick={() => {
+                          setHasManualCodes4CreateEngagementTypeSelection(true)
+                          setCodes4CreateEngagementForm((previous) => ({
+                            ...previous,
+                            engagementType,
+                          }))
+                        }}
+                      >
+                        {engagementType === 'external' ? 'External' : 'Internal'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <label>
+                  Color
+                  <div className="color-input-row">
+                    <input
+                      type="color"
+                      value={codes4CreateEngagementColorValue ?? TIMELINE_NEUTRAL_COLOR}
+                      onChange={(event) =>
+                        setCodes4CreateEngagementForm((previous) => ({
+                          ...previous,
+                          colorHex: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      aria-label="Select engagement color"
+                    />
+                    <input
+                      value={codes4CreateEngagementForm.colorHex}
+                      onChange={(event) =>
+                        setCodes4CreateEngagementForm((previous) => ({
+                          ...previous,
+                          colorHex: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="#RRGGBB"
+                      maxLength={7}
+                    />
+                    <button
+                      type="button"
+                      className="ghost color-clear-button"
+                      onClick={() =>
+                        setCodes4CreateEngagementForm((previous) => ({
+                          ...previous,
+                          colorHex: '',
+                        }))
+                      }
+                    >
+                      Use Default
+                    </button>
+                  </div>
+                </label>
+                <div className="codes-active-field">
+                  <div className="codes-active-toggle">
+                    <span>Active</span>
+                    <label className="settings-toggle-group">
+                      <input
+                        type="checkbox"
+                        checked={codes4CreateEngagementForm.isActive}
+                        onChange={(event) =>
+                          setCodes4CreateEngagementForm((previous) => ({
+                            ...previous,
+                            isActive: event.target.checked,
+                          }))
+                        }
+                        aria-label="Active"
+                      />
+                    </label>
+                  </div>
+                  <small>Show in timeline code selection and quick entry panels</small>
+                </div>
+              </form>
+            ) : (
+              <form className="stack code-editor-form codes4-create-form" onSubmit={onSubmitCodes4CreateActivity}>
+                <div className="codes4-create-form-header">
+                  <h4>Add Activity</h4>
+                  <button
+                    type="submit"
+                    className="button-soft-primary"
+                    disabled={isBusy || engagements.length === 0}
+                  >
+                    Add Activity
+                  </button>
+                </div>
+                <label>
+                  Engagement Name
+                  <select
+                    value={codes4CreateActivityForm.engagementId}
+                    onChange={(event) =>
+                      setCodes4CreateActivityForm((previous) => ({
+                        ...previous,
+                        engagementId: event.target.value,
+                      }))
+                    }
+                    disabled={engagements.length === 0}
+                    required
+                  >
+                    <option value="" disabled>
+                      Select engagement
+                    </option>
+                    {engagements.map((engagement) => (
+                      <option key={engagement.id} value={engagement.id}>
+                        {formatEntityDisplayLabel(engagement.name, engagement.code)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span className="field-label-row">
+                    Activity Name
+                    <span className="required-indicator" aria-hidden="true">*</span>
+                  </span>
+                  <input
+                    value={codes4CreateActivityForm.name}
+                    onChange={(event) =>
+                      setCodes4CreateActivityForm((previous) => ({
+                        ...previous,
+                        name: event.target.value,
+                      }))
+                    }
+                    disabled={engagements.length === 0}
+                    required
+                  />
+                </label>
+                <label>
+                  Activity Code
+                  <input
+                    value={codes4CreateActivityForm.code}
+                    onChange={(event) =>
+                      setCodes4CreateActivityForm((previous) => ({
+                        ...previous,
+                        code: event.target.value,
+                      }))
+                    }
+                    disabled={engagements.length === 0}
+                    placeholder="007"
+                  />
+                </label>
+                <label>
+                  Describe when to use this activity
+                  <textarea
+                    rows={2}
+                    maxLength={500}
+                    value={codes4CreateActivityForm.describeWhenToUse}
+                    onChange={(event) =>
+                      setCodes4CreateActivityForm((previous) => ({
+                        ...previous,
+                        describeWhenToUse: event.target.value,
+                      }))
+                    }
+                    disabled={engagements.length === 0}
+                  />
+                </label>
+                <label>
+                  Tags / Key Words (comma separated)
+                  <input
+                    value={codes4CreateActivityForm.tags}
+                    onChange={(event) =>
+                      setCodes4CreateActivityForm((previous) => ({
+                        ...previous,
+                        tags: event.target.value,
+                      }))
+                    }
+                    disabled={engagements.length === 0}
+                  />
+                </label>
+                <label>
+                  Color
+                  <div className="color-input-row">
+                    <input
+                      type="color"
+                      value={
+                        codes4CreateActivityColorValue
+                        ?? selectedCodes4CreateEngagementColorValue
+                        ?? TIMELINE_NEUTRAL_COLOR
+                      }
+                      onChange={(event) =>
+                        setCodes4CreateActivityForm((previous) => ({
+                          ...previous,
+                          colorHex: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      aria-label="Select activity color"
+                      disabled={engagements.length === 0}
+                    />
+                    <input
+                      value={
+                        codes4CreateActivityForm.colorHex
+                        || selectedCodes4CreateEngagementColorValue
+                        || ''
+                      }
+                      onChange={(event) =>
+                        setCodes4CreateActivityForm((previous) => ({
+                          ...previous,
+                          colorHex: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="#RRGGBB"
+                      maxLength={7}
+                      disabled={engagements.length === 0}
+                    />
+                    <button
+                      type="button"
+                      className="ghost color-clear-button"
+                      onClick={() =>
+                        setCodes4CreateActivityForm((previous) => ({
+                          ...previous,
+                          colorHex: '',
+                        }))
+                      }
+                      disabled={engagements.length === 0}
+                    >
+                      Use Default
+                    </button>
+                  </div>
+                </label>
+                <div className="codes-active-field">
+                  <div className="codes-active-toggle">
+                    <span>Active</span>
+                    <label className="settings-toggle-group">
+                      <input
+                        type="checkbox"
+                        checked={codes4CreateActivityForm.isActive}
+                        onChange={(event) =>
+                          setCodes4CreateActivityForm((previous) => ({
+                            ...previous,
+                            isActive: event.target.checked,
+                          }))
+                        }
+                        aria-label="Active"
+                        disabled={engagements.length === 0}
+                      />
+                    </label>
+                  </div>
+                  <small>Show in timeline code selection and quick entry panels</small>
+                </div>
+              </form>
+            )}
+          </section>
+        </div>
+      </section>
+    </div>,
+    document.body,
+  ) : null
+
+  const quickAddSettingsResolvedDraft =
+    quickAddSettingsDraft ?? buildQuickAddSettingsDraft(settingsStatus?.quickAddPreferences, engagements)
+  const quickAddSettingsEngagements = quickAddSettingsResolvedDraft.engagementOrder
+    .map((engagementId) => engagementById.get(engagementId))
+    .filter((engagement): engagement is Engagement => Boolean(engagement?.isActive))
+  const quickAddSettingsHiddenEngagementIds = new Set(quickAddSettingsResolvedDraft.hiddenEngagementIds)
+  const quickAddSettingsHiddenActivityIds = new Set(quickAddSettingsResolvedDraft.hiddenActivityIds)
+  const quickAddSettingsPreviewGroups = quickAddSettingsEngagements
+    .filter((engagement) => !quickAddSettingsHiddenEngagementIds.has(engagement.id))
+    .map<QuickAddActivityGroup | null>((engagement) => {
+      const activeActivitiesById = new Map(
+        engagement.activities
+          .filter((activity) => activity.isActive)
+          .map((activity) => [activity.id, activity]),
+      )
+      const activities = (quickAddSettingsResolvedDraft.activityOrder[engagement.id] ?? [])
+        .map((activityId) => activeActivitiesById.get(activityId))
+        .filter((activity): activity is Activity => {
+          if (!activity) {
+            return false
+          }
+
+          return !quickAddSettingsHiddenActivityIds.has(activity.id)
+        })
+        .map((activity) => {
+          const suggestion = quickAddSuggestionByKey.get(quickAddActivityKey(engagement.id, activity.id))
+          return {
+            engagement,
+            activity,
+            usageCount: suggestion?.usageCount ?? 0,
+            lastUsedAt: suggestion?.lastUsedAt ?? null,
+          }
+        })
+
+      return activities.length > 0 ? { engagement, activities } : null
+    })
+    .filter((group): group is QuickAddActivityGroup => Boolean(group))
+  const quickAddShownActivityCount = quickAddSettingsPreviewGroups.reduce(
+    (total, group) => total + group.activities.length,
+    0,
+  )
+  const getQuickAddSettingsDragPresentation = (key: string) => {
+    const current = quickAddSettingsDragState
+    if (!current) {
+      return {
+        className: '',
+        style: undefined as CSSProperties | undefined,
+      }
+    }
+
+    const snapshotIndex = current.snapshots.findIndex((snapshot) => snapshot.key === key)
+    if (snapshotIndex < 0) {
+      return {
+        className: '',
+        style: undefined as CSSProperties | undefined,
+      }
+    }
+
+    if (key === current.dragKey) {
+      return {
+        className: 'is-dragging',
+        style: {
+          transform: `translateY(${current.latestClientY - current.startClientY}px)`,
+        } as CSSProperties,
+      }
+    }
+
+    const draggedSnapshot = current.snapshots[current.sourceIndex]
+    if (!draggedSnapshot || current.sourceIndex === current.insertionIndex) {
+      return {
+        className: '',
+        style: undefined as CSSProperties | undefined,
+      }
+    }
+
+    const nextSnapshot = current.snapshots[current.sourceIndex + 1]
+    const previousSnapshot = current.snapshots[current.sourceIndex - 1]
+    const nextGap = nextSnapshot ? nextSnapshot.top - draggedSnapshot.top - draggedSnapshot.height : null
+    const previousGap = previousSnapshot ? draggedSnapshot.top - previousSnapshot.top - previousSnapshot.height : null
+    const shiftDistance = draggedSnapshot.height + Math.max(nextGap ?? previousGap ?? 8, 0)
+
+    if (
+      current.sourceIndex < current.insertionIndex
+      && snapshotIndex > current.sourceIndex
+      && snapshotIndex <= current.insertionIndex
+    ) {
+      return {
+        className: 'is-displaced',
+        style: { transform: `translateY(-${shiftDistance}px)` } as CSSProperties,
+      }
+    }
+
+    if (
+      current.sourceIndex > current.insertionIndex
+      && snapshotIndex >= current.insertionIndex
+      && snapshotIndex < current.sourceIndex
+    ) {
+      return {
+        className: 'is-displaced',
+        style: { transform: `translateY(${shiftDistance}px)` } as CSSProperties,
+      }
+    }
+
+    return {
+      className: '',
+      style: undefined as CSSProperties | undefined,
+    }
+  }
+
+  const quickAddSettingsModal = isQuickAddSettingsOpen ? createPortal(
+    <div
+      className="calendar-bulk-backdrop quick-add-settings-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !isBusy) {
+          closeQuickAddSettings()
+        }
+      }}
+    >
+      <section
+        className="calendar-bulk-modal quick-add-settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="quick-add-settings-title"
+      >
+        <header className="calendar-bulk-header quick-add-settings-header">
+          <div>
+            <h3 id="quick-add-settings-title">Quick Entry Settings</h3>
+            <p>Rearrange or hide engagements/activities to customize how it appears.</p>
+          </div>
+          <div className="calendar-bulk-header-actions">
+            <button
+              type="button"
+              className="ghost quick-add-settings-header-button"
+              onClick={() => {
+                closeQuickAddSettings()
+                openCodes4CreateEngagementModal()
+              }}
+              disabled={isBusy}
+            >
+              <span className="control-icon plus-icon" aria-hidden="true" />
+              Add Engagement
+            </button>
+            <button
+              type="button"
+              className="ghost quick-add-settings-header-button"
+              onClick={() => {
+                closeQuickAddSettings()
+                openCodes4CreateActivityModal()
+              }}
+              disabled={isBusy || engagements.length === 0}
+            >
+              <span className="control-icon plus-icon" aria-hidden="true" />
+              Add Activity
+            </button>
+            <button
+              type="button"
+              className="timeline-editor-close"
+              aria-label="Close Quick Entry settings"
+              title="Close"
+              onClick={closeQuickAddSettings}
+              disabled={isBusy}
+            >
+              <span className="control-icon close-icon" aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+
+        <div className="quick-add-settings-body">
+          <section className="quick-add-settings-list" aria-label="Quick Entry order and visibility">
+            {quickAddSettingsEngagements.length === 0 ? (
+              <p className="quick-add-settings-empty">No active engagements.</p>
+            ) : (
+              quickAddSettingsEngagements.map((engagement, engagementIndex) => {
+                const engagementKey = quickAddSettingsEngagementKey(engagement.id)
+                const engagementDragPresentation = getQuickAddSettingsDragPresentation(engagementKey)
+                const engagementColor = engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
+                const activeActivitiesById = new Map(
+                  engagement.activities
+                    .filter((activity) => activity.isActive)
+                    .map((activity) => [activity.id, activity]),
+                )
+                const orderedActivities = (quickAddSettingsResolvedDraft.activityOrder[engagement.id] ?? [])
+                  .map((activityId) => activeActivitiesById.get(activityId))
+                  .filter((activity): activity is Activity => Boolean(activity))
+                const engagementHidden = quickAddSettingsResolvedDraft.hiddenEngagementIds.includes(engagement.id)
+                const engagementLabel = formatEntityDisplayLabel(
+                  engagement.name,
+                  engagement.code,
+                  'Engagement',
+                )
+
+                return (
+                  <article
+                    key={engagement.id}
+                    ref={(node) => {
+                      quickAddSettingsRowRefs.current[engagementKey] = node
+                    }}
+                    className={[
+                      'quick-add-settings-engagement',
+                      engagementHidden ? 'is-hidden' : '',
+                      engagementDragPresentation.className,
+                    ].filter(Boolean).join(' ')}
+                    style={{
+                      '--quick-add-settings-color': engagementColor,
+                      ...engagementDragPresentation.style,
+                    } as CSSProperties}
+                  >
+                    <div className="quick-add-settings-row quick-add-settings-engagement-row">
+                      <button
+                        type="button"
+                        className="quick-add-settings-handle"
+                        aria-label={`Drag ${engagementLabel}`}
+                        title="Drag to reorder"
+                        onPointerDown={(event) =>
+                          startQuickAddSettingsDrag(event, {
+                            kind: 'engagement',
+                            engagementId: engagement.id,
+                            keys: quickAddSettingsEngagements.map((item) =>
+                              quickAddSettingsEngagementKey(item.id),
+                            ),
+                            dragKey: engagementKey,
+                          })
+                        }
+                        onPointerMove={onQuickAddSettingsDragPointerMove}
+                        onPointerUp={onQuickAddSettingsDragPointerUp}
+                        onPointerCancel={onQuickAddSettingsDragPointerCancel}
+                        disabled={isBusy}
+                      >
+                        <span aria-hidden="true" />
+                      </button>
+                      <div className="quick-add-settings-title-block">
+                        <strong>{formatEntityPrimaryLabel(
+                          engagement.name,
+                          engagement.code,
+                          'Engagement',
+                        )}</strong>
+                        <span>{formatActivityCount(orderedActivities.length)}</span>
+                      </div>
+                      <div className="quick-add-settings-controls">
+                        <button
+                          type="button"
+                          className="quick-add-reorder-button"
+                          aria-label={`Move ${engagementLabel} up`}
+                          title="Move up"
+                          onClick={() => moveQuickAddEngagement(engagement.id, -1)}
+                          disabled={engagementIndex === 0 || isBusy}
+                        >
+                          <span className="control-icon chevron-up" aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          className="quick-add-reorder-button"
+                          aria-label={`Move ${engagementLabel} down`}
+                          title="Move down"
+                          onClick={() => moveQuickAddEngagement(engagement.id, 1)}
+                          disabled={engagementIndex === quickAddSettingsEngagements.length - 1 || isBusy}
+                        >
+                          <span className="control-icon chevron-down" aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          className={`quick-add-visibility-button ${engagementHidden ? 'is-hidden' : ''}`}
+                          aria-label={`${engagementHidden ? 'Show' : 'Hide'} ${engagementLabel}`}
+                          aria-pressed={!engagementHidden}
+                          title={engagementHidden ? 'Show in Quick Entry' : 'Hide from Quick Entry'}
+                          onClick={() => toggleQuickAddEngagementVisibility(engagement.id)}
+                          disabled={isBusy}
+                        >
+                          <img src={engagementHidden ? visibleOffIcon : visibleIcon} alt="" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="quick-add-settings-activities">
+                      {orderedActivities.length === 0 ? (
+                        <p className="quick-add-settings-empty">No active activities.</p>
+                      ) : (
+                        orderedActivities.map((activity, activityIndex) => {
+                          const activityHidden = quickAddSettingsResolvedDraft.hiddenActivityIds.includes(activity.id)
+                          const activityLabel = formatEntityDisplayLabel(activity.name, activity.code)
+                          const activityEffectivelyHidden = engagementHidden || activityHidden
+                          const activityVisibilityLabel = engagementHidden
+                            ? `${activityLabel} hidden because ${engagementLabel} is hidden`
+                            : `${activityHidden ? 'Show' : 'Hide'} ${activityLabel}`
+                          const activityVisibilityTitle = engagementHidden
+                            ? 'Hidden because engagement is hidden'
+                            : activityHidden
+                              ? 'Show in Quick Entry'
+                              : 'Hide from Quick Entry'
+                          const activityKey = quickAddSettingsActivityKey(engagement.id, activity.id)
+                          const activityDragPresentation = getQuickAddSettingsDragPresentation(activityKey)
+                          const activityColor = activity.colorHex ?? engagementColor
+
+                          return (
+                            <div
+                              key={activity.id}
+                              ref={(node) => {
+                                quickAddSettingsRowRefs.current[activityKey] = node
+                              }}
+                              className={[
+                                'quick-add-settings-row',
+                                'quick-add-settings-activity-row',
+                                activityHidden ? 'is-hidden' : '',
+                                activityDragPresentation.className,
+                              ].filter(Boolean).join(' ')}
+                              style={{
+                                '--quick-add-settings-color': activityColor,
+                                ...activityDragPresentation.style,
+                              } as CSSProperties}
+                            >
+                              <button
+                                type="button"
+                                className="quick-add-settings-handle small"
+                                aria-label={`Drag ${activityLabel}`}
+                                title="Drag to reorder"
+                                onPointerDown={(event) =>
+                                  startQuickAddSettingsDrag(event, {
+                                    kind: 'activity',
+                                    engagementId: engagement.id,
+                                    activityId: activity.id,
+                                    keys: orderedActivities.map((item) =>
+                                      quickAddSettingsActivityKey(engagement.id, item.id),
+                                    ),
+                                    dragKey: activityKey,
+                                  })
+                                }
+                                onPointerMove={onQuickAddSettingsDragPointerMove}
+                                onPointerUp={onQuickAddSettingsDragPointerUp}
+                                onPointerCancel={onQuickAddSettingsDragPointerCancel}
+                                disabled={isBusy}
+                              >
+                                <span aria-hidden="true" />
+                              </button>
+                              <div className="quick-add-settings-title-block">
+                                <strong>{formatEntityPrimaryLabel(activity.name, activity.code)}</strong>
+                              </div>
+                              <div className="quick-add-settings-controls">
+                                <button
+                                  type="button"
+                                  className="quick-add-reorder-button"
+                                  aria-label={`Move ${activityLabel} up`}
+                                  title="Move up"
+                                  onClick={() => moveQuickAddActivity(engagement.id, activity.id, -1)}
+                                  disabled={activityIndex === 0 || isBusy}
+                                >
+                                  <span className="control-icon chevron-up" aria-hidden="true" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="quick-add-reorder-button"
+                                  aria-label={`Move ${activityLabel} down`}
+                                  title="Move down"
+                                  onClick={() => moveQuickAddActivity(engagement.id, activity.id, 1)}
+                                  disabled={activityIndex === orderedActivities.length - 1 || isBusy}
+                                >
+                                  <span className="control-icon chevron-down" aria-hidden="true" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`quick-add-visibility-button ${activityEffectivelyHidden ? 'is-hidden' : ''}`}
+                                  aria-label={activityVisibilityLabel}
+                                  aria-pressed={!activityEffectivelyHidden}
+                                  title={activityVisibilityTitle}
+                                  onClick={() => toggleQuickAddActivityVisibility(activity.id)}
+                                  disabled={isBusy}
+                                >
+                                  <img
+                                    src={activityEffectivelyHidden ? visibleOffIcon : visibleIcon}
+                                    alt=""
+                                    aria-hidden="true"
+                                  />
+                                </button>
+                              </div>
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+                  </article>
+                )
+              })
+            )}
+          </section>
+
+          <aside className="quick-add-settings-preview-panel" aria-label="Quick Entry preview">
+            <div className="quick-add-settings-preview-header">
+              <h4>Live Preview</h4>
+              <span>{quickAddShownActivityCount} visible</span>
+            </div>
+            <div className="quick-add-panel quick-add-settings-preview">
+              {quickAddSettingsPreviewGroups.length === 0 ? (
+                <p className="quick-add-empty">
+                  {allQuickAddActivities.length === 0 ? 'No active activities yet.' : 'All Quick Entry items are hidden.'}
+                </p>
+              ) : (
+                <div className="quick-add-scroll-frame">
+                  <div className="quick-add-scroll">
+                    <div className="quick-add-list">
+                      {quickAddSettingsPreviewGroups.map((group) => {
+                        const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
+
+                        return (
+                          <section
+                            key={group.engagement.id}
+                            className="quick-add-group"
+                            style={{
+                              '--quick-add-color': engagementColor,
+                            } as CSSProperties}
+                          >
+                            <div className="quick-add-group-header">
+                              <span>{formatEntityPrimaryLabel(
+                                group.engagement.name,
+                                group.engagement.code,
+                                'Engagement',
+                              )}</span>
+                            </div>
+                            <div className="quick-add-grid">
+                              {group.activities.map(({ activity }) => {
+                                const activityColor = activity.colorHex ?? engagementColor
+                                const activityLabel = activity.name || activity.code
+
+                                return (
+                                  <div
+                                    key={activity.id}
+                                    className="quick-add-tile quick-add-settings-preview-tile"
+                                    role="button"
+                                    aria-disabled="true"
+                                    style={{
+                                      '--quick-add-color': activityColor,
+                                      '--quick-add-duration-progress': '0%',
+                                    } as CSSProperties}
+                                  >
+                                    <span className="quick-add-tile-main">
+                                      <strong>{activityLabel}</strong>
+                                    </span>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </section>
+                        )
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </aside>
+        </div>
+      </section>
+    </div>,
+    document.body,
+  ) : null
 
   const calendarBulkModal = isCalendarBulkModalOpen ? createPortal(
     <div
@@ -6387,6 +8833,96 @@ function App() {
     document.body,
   ) : null
 
+  const codes3ActivitiesPane = selectedCodes3Engagement ? (
+    <>
+      <div className="codes3-activities-toolbar">
+        <div className="codes3-pane-title">
+          <h2 title={codes3ActivitiesHeading}>{codes3ActivitiesHeading}</h2>
+        </div>
+        <input
+          type="search"
+          className="quick-add-search codes3-activity-search"
+          value={codes3ActivitySearch}
+          onChange={(event) => setCodes3ActivitySearch(event.target.value)}
+          placeholder="Search activities"
+          aria-label="Search activities"
+          disabled={codes3IsEditing}
+        />
+      </div>
+
+      <div className="codes3-activity-list">
+        {selectedCodes3Engagement.activities.length === 0 ? (
+          <p className="engagement-empty-state">No activities yet.</p>
+        ) : filteredCodes3Activities.length === 0 ? (
+          <p className="engagement-empty-state">No matching activities.</p>
+        ) : (
+          filteredCodes3Activities.map((activity) => {
+            const activityColor =
+              normalizeColorHexInput(activity.colorHex)
+              ?? normalizeColorHexInput(selectedCodes3Engagement.colorHex)
+              ?? TIMELINE_NEUTRAL_COLOR
+
+            return (
+              <div
+                key={activity.id}
+                className={`codes3-activity-row ${activity.isActive ? '' : 'is-inactive'}`}
+                style={{ '--codes3-activity-color': activityColor } as CSSProperties}
+              >
+                <div>
+                  <div className="codes4-title-line">
+                    {activity.code ? (
+                      <span className="code-item-badge">{activity.code}</span>
+                    ) : null}
+                    <strong>{activity.name}</strong>
+                    {activity.isActive ? null : (
+                      <span className="codes4-state-pill">Inactive</span>
+                    )}
+                  </div>
+                  <span className="codes3-activity-usage">
+                    {activity.describeWhenToUse || 'Usage guidance not added yet.'}
+                  </span>
+                  <ResponsiveCodeTagList
+                    tags={activity.tags}
+                    itemKeyPrefix={`codes3-activity-${activity.id}`}
+                  />
+                </div>
+                <div className="code-item-actions">
+                  <button
+                    type="button"
+                    className="icon-action-button"
+                    aria-label={`Edit activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
+                    onClick={() => {
+                      setCodes3SelectedEngagementId(activity.engagementId)
+                      onEditActivity(activity)
+                      setCodes3DetailMode('edit-activity')
+                    }}
+                    disabled={codes3IsEditing}
+                  >
+                    <img src={editIcon} alt="" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-action-button is-danger"
+                    aria-label={`Delete activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
+                    onClick={() => {
+                      setCodes3DetailMode('activities')
+                      onDeleteActivity(activity.id)
+                    }}
+                    disabled={codes3IsEditing}
+                  >
+                    <img src={deleteIcon} alt="" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </>
+  ) : (
+    <p className="code-list-empty">No engagement selected.</p>
+  )
+
   if (!appRuntime) {
     return (
       <div className="runtime-shell">
@@ -6401,92 +8937,116 @@ function App() {
     <div className="app-shell" data-testid="omnisheet-app-shell">
       <div className={`workspace-shell ${activeView === 'timeline' ? 'with-timeline' : 'without-timeline'}`}>
         <aside className="sidebar-panel">
-          <section className="sidebar-section sidebar-capture">
+          <section className={`sidebar-section sidebar-capture ${isLlmEntryCollapsed ? 'is-llm-collapsed' : ''}`}>
             <div className="sidebar-section-header">
-              <h2>Submit an entry</h2>
+              <button
+                type="button"
+                className="sidebar-section-title-button"
+                onClick={() => setIsLlmEntryCollapsed((previous) => !previous)}
+                aria-expanded={!isLlmEntryCollapsed}
+                aria-controls="llm-entry-body"
+                title={isLlmEntryCollapsed ? 'Expand LLM Entry' : 'Collapse LLM Entry'}
+              >
+                <span>LLM Entry</span>
+                <span
+                  className={`control-icon ${isLlmEntryCollapsed ? 'chevron-down' : 'chevron-up'}`}
+                  aria-hidden="true"
+                />
+              </button>
             </div>
-            <form onSubmit={onSubmitCapture} className="stack">
-              <textarea
-                aria-label="Entry message"
-                value={captureMessage}
-                onChange={(event) => {
-                  const nextValue = event.target.value
-                  setCaptureMessage(nextValue)
-                  if (nextValue.trim().length === 0) {
-                    setCaptureDraftMetadata(null)
-                    if (voiceCaptureState === 'idle') {
-                      setVoiceCaptureStatusMessage(null)
+            <div id="llm-entry-body" className="llm-entry-body" hidden={isLlmEntryCollapsed}>
+              <form onSubmit={onSubmitCapture} className="stack">
+                <textarea
+                  aria-label="Entry message"
+                  value={captureMessage}
+                  onChange={(event) => {
+                    const nextValue = event.target.value
+                    setCaptureMessage(nextValue)
+                    if (nextValue.trim().length === 0) {
+                      setCaptureDraftMetadata(null)
+                      if (voiceCaptureState === 'idle') {
+                        setVoiceCaptureStatusMessage(null)
+                      }
                     }
-                  }
-                }}
-                placeholder="Example: Just finished a 30 minute SAP ITGC meeting with the Orange team"
-                rows={4}
-                required={voiceCaptureState !== 'recording'}
-              />
-              {voiceCaptureStatusMessage ? (
-                <p className={`capture-status ${voiceCaptureState === 'recording' ? 'recording' : ''}`}>
-                  {voiceCaptureStatusMessage}
-                </p>
+                  }}
+                  placeholder="Example: Just finished a 30 minute SAP ITGC meeting with the Orange team"
+                  rows={4}
+                  required={voiceCaptureState !== 'recording'}
+                />
+                {voiceCaptureStatusMessage ? (
+                  <p className={`capture-status ${voiceCaptureState === 'recording' ? 'recording' : ''}`}>
+                    {voiceCaptureStatusMessage}
+                  </p>
+                ) : null}
+                <div className="capture-actions">
+                  <button
+                    type="button"
+                    className={`capture-mic-button ${voiceCaptureState === 'recording' ? 'recording' : ''}`}
+                    onClick={() => {
+                      if (voiceCaptureState === 'recording') {
+                        void stopVoiceRecordingToDraft()
+                        return
+                      }
+
+                      void startVoiceRecording()
+                    }}
+                    disabled={voiceCaptureState === 'transcribing'}
+                    aria-label={voiceCaptureState === 'recording' ? 'Stop recording' : 'Start recording'}
+                    title={voiceCaptureState === 'recording' ? 'Stop recording' : 'Start recording'}
+                  >
+                    <img src={microphoneIcon} alt="" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="capture-calendar-button"
+                    onClick={openCalendarBulkModal}
+                    disabled={voiceCaptureState === 'transcribing' || calendarIsExtracting}
+                    aria-label="Open calendar bulk add"
+                    title="Calendar bulk add"
+                  >
+                    <img src={calendarIcon} alt="" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      voiceCaptureState === 'transcribing'
+                      || (voiceCaptureState !== 'recording' && captureMessage.trim().length === 0)
+                    }
+                  >
+                    {voiceCaptureState === 'recording' ? 'Stop & Send' : 'Send'}
+                  </button>
+                </div>
+              </form>
+
+              {lastSubmissionNotice ? (
+                <div className="capture-history-notice">
+                  <span>{lastSubmissionNotice}</span>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => {
+                      setActiveView('history')
+                      setLastSubmissionNotice(null)
+                    }}
+                  >
+                    History
+                  </button>
+                </div>
               ) : null}
-              <div className="capture-actions">
-                <button
-                  type="button"
-                  className={`capture-mic-button ${voiceCaptureState === 'recording' ? 'recording' : ''}`}
-                  onClick={() => {
-                    if (voiceCaptureState === 'recording') {
-                      void stopVoiceRecordingToDraft()
-                      return
-                    }
+            </div>
 
-                    void startVoiceRecording()
-                  }}
-                  disabled={voiceCaptureState === 'transcribing'}
-                  aria-label={voiceCaptureState === 'recording' ? 'Stop recording' : 'Start recording'}
-                  title={voiceCaptureState === 'recording' ? 'Stop recording' : 'Start recording'}
-                >
-                  <img src={microphoneIcon} alt="" aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  className="capture-calendar-button"
-                  onClick={openCalendarBulkModal}
-                  disabled={voiceCaptureState === 'transcribing' || calendarIsExtracting}
-                  aria-label="Open calendar bulk add"
-                  title="Calendar bulk add"
-                >
-                  <img src={calendarIcon} alt="" aria-hidden="true" />
-                </button>
-                <button
-                  type="submit"
-                  disabled={
-                    voiceCaptureState === 'transcribing'
-                    || (voiceCaptureState !== 'recording' && captureMessage.trim().length === 0)
-                  }
-                >
-                  {voiceCaptureState === 'recording' ? 'Stop & Send' : 'Send'}
-                </button>
-              </div>
-            </form>
-
-            {lastSubmissionNotice ? (
-              <div className="capture-history-notice">
-                <span>{lastSubmissionNotice}</span>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    setActiveView('history')
-                    setLastSubmissionNotice(null)
-                  }}
-                >
-                  History
-                </button>
-              </div>
-            ) : null}
-
-            <div className="quick-add-panel" aria-label="Quick Add">
+            <div className="quick-add-panel" aria-label="Quick Entry">
               <div className="quick-add-header">
-                <h3>Quick Add</h3>
+                <h3>Quick Entry</h3>
+                <button
+                  type="button"
+                  className="quick-add-settings-button"
+                  onClick={openQuickAddSettings}
+                  aria-label="Open Quick Entry settings"
+                  title="Quick Entry settings"
+                >
+                  <img src={settingsIcon} alt="" aria-hidden="true" />
+                </button>
               </div>
               <input
                 className="quick-add-search"
@@ -6494,7 +9054,7 @@ function App() {
                 value={quickAddSearch}
                 onChange={(event) => setQuickAddSearch(event.target.value)}
                 placeholder="Search activities"
-                aria-label="Search quick add activities"
+                aria-label="Search quick entry activities"
               />
               {quickAddSuggestionsError ? (
                 <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
@@ -6503,7 +9063,9 @@ function App() {
                 <p className="quick-add-empty">
                   {allQuickAddActivities.length === 0
                     ? 'No active activities yet.'
-                    : 'No matching activities.'}
+                    : orderedQuickAddActivities.length === 0 && quickAddSearch.trim().length === 0
+                      ? 'All Quick Entry items are hidden.'
+                      : 'No matching activities.'}
                 </p>
               ) : (
                 <div className="quick-add-scroll-frame">
@@ -6611,10 +9173,6 @@ function App() {
                     <div
                       className="quick-add-scroll-indicator"
                       aria-hidden="true"
-                      style={{
-                        '--quick-add-scroll-thumb-top': `${quickAddScrollMetrics.thumbTopPct}%`,
-                        '--quick-add-scroll-thumb-height': `${quickAddScrollMetrics.thumbHeightPct}%`,
-                      } as CSSProperties}
                     >
                       <span />
                     </div>
@@ -6707,7 +9265,7 @@ function App() {
         </aside>
 
         <main className="app-main">
-          <div className="segmented-control" role="tablist" aria-label="Main views">
+          <div className="segmented-control main-view-tabs" role="tablist" aria-label="Main views">
             {SEGMENTED_VIEWS.map((view) => (
               <button
                 key={view.id}
@@ -6982,17 +9540,32 @@ function App() {
             <div className="timeline-toolbar">
               <div>
                 <h2 className="timeline-date-heading">
-                  <strong>{weekTimelineRangeLabel}</strong>
+                  {weekTimelineRangeLabel.isSameYear ? (
+                    <>
+                      <strong>
+                        {weekTimelineRangeLabel.startMonthDay} - {weekTimelineRangeLabel.endMonthDay}
+                      </strong>
+                      , {weekTimelineRangeLabel.endYear}
+                    </>
+                  ) : (
+                    <>
+                      <strong>{weekTimelineRangeLabel.startMonthDay}</strong>
+                      , {weekTimelineRangeLabel.startYear} -{' '}
+                      <strong>{weekTimelineRangeLabel.endMonthDay}</strong>
+                      , {weekTimelineRangeLabel.endYear}
+                    </>
+                  )}
                 </h2>
                 <p className="timeline-range">
-                  Sunday - Saturday
                   {buildTimelineTotalDisplaySegments(weekTimelineTotalBreakdown, {
                     includePrimaryTotal: true,
                     separateEngagementTypeTotals: timelineSeparateEngagementTypeTotals,
                     showUncategorizedTotal: shouldShowTimelineDayUncategorizedDailyTotal,
-                  }).map((segment) => (
+                  }).map((segment, segmentIndex) => (
                     <Fragment key={segment.key}>
-                      <span className="timeline-range-separator" aria-hidden="true">•</span>
+                      {segmentIndex > 0 ? (
+                        <span className="timeline-range-separator" aria-hidden="true">•</span>
+                      ) : null}
                       <span
                         className={`timeline-range-total ${segment.key === 'total' ? '' : 'timeline-range-total-secondary'}`}
                       >
@@ -7359,655 +9932,830 @@ function App() {
               <p className="mini-calendar-error">{historyError}</p>
             ) : null}
 
+            <div className="history-overview" aria-label="History counts">
+              <button
+                type="button"
+                className={historyMode === 'all' ? 'active' : ''}
+                onClick={() => setHistoryMode('all')}
+              >
+                <span>All</span>
+                <strong>{historyUnifiedItems.length}</strong>
+              </button>
+              <button
+                type="button"
+                className={historyMode === 'queue' ? 'active' : ''}
+                onClick={() => setHistoryMode('queue')}
+              >
+                <span>Queue</span>
+                <strong>{historyCounts.queue}</strong>
+              </button>
+              <button
+                type="button"
+                className={historyMode === 'submissions' ? 'active' : ''}
+                onClick={() => setHistoryMode('submissions')}
+              >
+                <span>Submissions</span>
+                <strong>{historyCounts.submissions}</strong>
+              </button>
+              <button
+                type="button"
+                className={historyMode === 'entries' ? 'active' : ''}
+                onClick={() => setHistoryMode('entries')}
+              >
+                <span>Entries</span>
+                <strong>{historyCounts.entries}</strong>
+              </button>
+            </div>
+
             <div className="history-layout" aria-busy={isHistoryLoading}>
-              <section className="history-section">
+              <section className="history-primary-section">
                 <div className="history-section-header">
-                  <h3>Live Queue</h3>
-                  <span>{liveHistoryQueueItems.length}</span>
+                  <h3>Activity</h3>
+                  <span>{filteredHistoryItems.length}</span>
                 </div>
-                {liveHistoryQueueItems.length === 0 ? (
-                  <p className="history-empty">No live queue items.</p>
+                {isHistoryLoading && !historyData && filteredHistoryItems.length === 0 ? (
+                  <p className="history-empty">Loading history...</p>
+                ) : filteredHistoryItems.length === 0 ? (
+                  <p className="history-empty">
+                    {historyMode === 'queue'
+                      ? 'No live queue items.'
+                      : historyMode === 'submissions'
+                        ? 'No persisted submissions this week.'
+                        : historyMode === 'entries'
+                          ? 'No entries created this week.'
+                          : 'No history for this week.'}
+                  </p>
                 ) : (
-                  <div className="history-list">
-                    {liveHistoryQueueItems.map((item) => (
-                      <article key={item.id} className={`history-card live ${item.state}`}>
-                        <div className="history-card-header">
-                          <div>
+                  <div className="history-list history-primary-list" role="listbox" aria-label="History activity">
+                    {filteredHistoryItems.map((historyItem) => {
+                      const isSelected = selectedHistoryItem?.key === historyItem.key
+
+                      if (historyItem.kind === 'queue') {
+                        const { item } = historyItem
+                        return (
+                          <button
+                            key={historyItem.key}
+                            type="button"
+                            className={`history-list-row queue ${item.state} ${isSelected ? 'active' : ''}`}
+                            onClick={() => setSelectedHistoryItemKey(historyItem.key)}
+                            role="option"
+                            aria-selected={isSelected}
+                          >
+                            <span className="history-row-kicker">
+                              Live Queue
+                              <span className={`submission-queue-item-badge ${item.state}`}>
+                                {formatSubmissionQueueStateLabel(item.state)}
+                              </span>
+                            </span>
                             <strong>{formatHistorySourceLabel(item.captureSource)}</strong>
-                            <span>{formatSubmissionQueueTimestamp(item.submittedAtMs)}</span>
-                          </div>
-                          <span className={`submission-queue-item-badge ${item.state}`}>
-                            {formatSubmissionQueueStateLabel(item.state)}
-                          </span>
-                        </div>
-                        <p className="history-card-text">{item.rawText}</p>
-                        <p className="history-card-status">{item.statusMessage}</p>
-                        {item.correlationId ? (
-                          <p className="history-card-meta">
-                            Correlation ID: <code>{item.correlationId}</code>
-                          </p>
-                        ) : null}
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </section>
+                            <span className="history-row-text">{item.rawText}</span>
+                            <span className="history-row-meta">{formatSubmissionQueueTimestamp(item.submittedAtMs)}</span>
+                          </button>
+                        )
+                      }
 
-              <section className="history-section">
-                <div className="history-section-header">
-                  <h3>Submissions</h3>
-                  <span>{persistedHistorySubmissions.length}</span>
-                </div>
-                {isHistoryLoading && !historyData ? (
-                  <p className="history-empty">Loading History...</p>
-                ) : persistedHistorySubmissions.length === 0 ? (
-                  <p className="history-empty">No persisted submissions this week.</p>
-                ) : (
-                  <div className="history-list">
-                    {persistedHistorySubmissions.map((submission) => (
-                      <article key={submission.id} className="history-card">
-                        <div className="history-card-header">
-                          <div>
+                      if (historyItem.kind === 'submission') {
+                        const { submission } = historyItem
+                        return (
+                          <button
+                            key={historyItem.key}
+                            type="button"
+                            className={`history-list-row submission ${isSelected ? 'active' : ''}`}
+                            onClick={() => setSelectedHistoryItemKey(historyItem.key)}
+                            role="option"
+                            aria-selected={isSelected}
+                          >
+                            <span className="history-row-kicker">
+                              Submission
+                              <span className="history-pill">{formatHistorySourceLabel(submission.status)}</span>
+                            </span>
                             <strong>{formatHistorySourceLabel(submission.captureSource)}</strong>
-                            <span>{formatHistoryTimestamp(submission.messageTimestamp)}</span>
-                          </div>
-                          <span className="history-pill">{formatHistorySourceLabel(submission.status)}</span>
-                        </div>
-                        <p className="history-card-text">{submission.rawText}</p>
-                        <div className="history-meta-grid">
-                          <span>Created {formatHistoryTimestamp(submission.createdAt)}</span>
-                          <span>Entries {submission.savedEntryCount}/{submission.interpretedEntryCount}</span>
-                          <span>Unique {submission.uniqueEntryCount}</span>
-                          <span>Confidence {formatHistoryConfidence(submission.confidence)}</span>
-                          {submission.modelUsedLabel ? (
-                            <span>Model {submission.modelUsedLabel}</span>
-                          ) : null}
-                          {submission.transcriptionModelUsedLabel ? (
-                            <span>Transcription {submission.transcriptionModelUsedLabel}</span>
-                          ) : null}
-                          {submission.containsMultipleEvents ? (
-                            <span>Multiple events</span>
-                          ) : null}
-                          {submission.truncatedEntryCount > 0 ? (
-                            <span>Truncated {submission.truncatedEntryCount}</span>
-                          ) : null}
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </section>
+                            <span className="history-row-text">{submission.rawText}</span>
+                            <span className="history-row-meta">
+                              {formatHistoryTimestamp(submission.messageTimestamp)}
+                              {' | '}
+                              Entries {submission.savedEntryCount}/{submission.interpretedEntryCount}
+                            </span>
+                          </button>
+                        )
+                      }
 
-              <section className="history-section">
-                <div className="history-section-header">
-                  <h3>Entries</h3>
-                  <span>{persistedHistoryEntries.length}</span>
-                </div>
-                {isHistoryLoading && !historyData ? (
-                  <p className="history-empty">Loading entries...</p>
-                ) : persistedHistoryEntries.length === 0 ? (
-                  <p className="history-empty">No entries created this week.</p>
-                ) : (
-                  <div className="history-list history-entry-list">
-                    {persistedHistoryEntries.map((entry) => {
+                      const { entry } = historyItem
                       const blockColor = resolveTimelineBlockColor(
                         entry,
                         activityColorById,
                         engagementColorById,
                       )
-                      const warnings = entry.warningFlags
 
                       return (
-                        <article
-                          key={entry.id}
-                          className="history-card entry"
+                        <button
+                          key={historyItem.key}
+                          type="button"
+                          className={`history-list-row entry ${isSelected ? 'active' : ''}`}
                           style={{ '--history-entry-color': blockColor } as CSSProperties}
+                          onClick={() => setSelectedHistoryItemKey(historyItem.key)}
+                          role="option"
+                          aria-selected={isSelected}
                         >
-                          <div className="history-card-header">
-                            <div>
-                              <strong>{formatHistoryEntryTitle(entry)}</strong>
-                              <span>{formatHistoryEntryTime(entry)}</span>
-                            </div>
+                          <span className="history-row-kicker">
+                            Entry
                             <span className="history-pill">{formatHistorySourceLabel(entry.source)}</span>
-                          </div>
-                          <p className="history-card-text">{entry.description || 'No description'}</p>
-                          <div className="history-meta-grid">
-                            <span>Created {formatHistoryTimestamp(entry.createdAt)}</span>
-                            <span>Updated {formatHistoryTimestamp(entry.updatedAt)}</span>
-                            <span>{formatQuickBlockDuration(entry.durationMinutes)}</span>
-                            <span>Confidence {formatHistoryConfidence(entry.confidence)}</span>
-                            {entry.engagementName || entry.engagementCode ? (
-                              <span>{formatEntityDisplayLabel(entry.engagementName, entry.engagementCode)}</span>
-                            ) : null}
-                            {entry.modelUsedLabel ? (
-                              <span>Model {entry.modelUsedLabel}</span>
-                            ) : null}
-                            {entry.transcriptionModelUsedLabel ? (
-                              <span>Transcription {entry.transcriptionModelUsedLabel}</span>
-                            ) : null}
-                          </div>
-                          {warnings.length > 0 ? (
-                            <div className="history-warning-row">
-                              {warnings.map((warningType) => (
-                                <WarningBadge key={`${entry.id}-${warningType}`} type={warningType} />
-                              ))}
-                            </div>
-                          ) : null}
-                        </article>
+                          </span>
+                          <strong>{formatHistoryEntryTitle(entry)}</strong>
+                          <span className="history-row-text">{entry.description || 'No description'}</span>
+                          <span className="history-row-meta">
+                            {formatHistoryEntryTime(entry)}
+                            {' | '}
+                            {formatQuickBlockDuration(entry.durationMinutes)}
+                          </span>
+                        </button>
                       )
                     })}
                   </div>
                 )}
               </section>
+
+              <aside className="history-detail-section">
+                {selectedHistoryItem ? (
+                  <>
+                    <div className="history-detail-header">
+                      <div>
+                        <span>
+                          {selectedHistoryItem.kind === 'queue'
+                            ? 'Live Queue'
+                            : selectedHistoryItem.kind === 'submission'
+                              ? 'Submission'
+                              : 'Entry'}
+                        </span>
+                        <h3>
+                          {selectedHistoryItem.kind === 'queue'
+                            ? formatHistorySourceLabel(selectedHistoryItem.item.captureSource)
+                            : selectedHistoryItem.kind === 'submission'
+                              ? formatHistorySourceLabel(selectedHistoryItem.submission.captureSource)
+                              : formatHistoryEntryTitle(selectedHistoryItem.entry)}
+                        </h3>
+                      </div>
+                      {selectedHistoryItem.kind === 'queue' ? (
+                        <span className={`submission-queue-item-badge ${selectedHistoryItem.item.state}`}>
+                          {formatSubmissionQueueStateLabel(selectedHistoryItem.item.state)}
+                        </span>
+                      ) : selectedHistoryItem.kind === 'submission' ? (
+                        <span className="history-pill">{formatHistorySourceLabel(selectedHistoryItem.submission.status)}</span>
+                      ) : (
+                        <span className="history-pill">{formatHistorySourceLabel(selectedHistoryItem.entry.source)}</span>
+                      )}
+                    </div>
+
+                    {selectedHistoryItem.kind === 'queue' ? (
+                      <div className="history-detail-body">
+                        <p className="history-detail-text">{selectedHistoryItem.item.rawText}</p>
+                        <div className="history-meta-grid">
+                          <span>Submitted {formatSubmissionQueueTimestamp(selectedHistoryItem.item.submittedAtMs)}</span>
+                          <span>{selectedHistoryItem.item.statusMessage}</span>
+                          {selectedHistoryItem.item.createdEntryCount !== undefined ? (
+                            <span>Entries created {selectedHistoryItem.item.createdEntryCount}</span>
+                          ) : null}
+                          {selectedHistoryItem.item.completedDurationMs !== undefined ? (
+                            <span>Completed in {formatSubmissionQueueDuration(selectedHistoryItem.item.completedDurationMs)}</span>
+                          ) : null}
+                          {selectedHistoryItem.item.modelUsedLabel ? (
+                            <span>Model {selectedHistoryItem.item.modelUsedLabel}</span>
+                          ) : null}
+                          {selectedHistoryItem.item.transcriptionModelUsedLabel ? (
+                            <span>Transcription {selectedHistoryItem.item.transcriptionModelUsedLabel}</span>
+                          ) : null}
+                        </div>
+                        {selectedHistoryItem.item.correlationId ? (
+                          <p className="history-card-meta">
+                            Correlation ID: <code>{selectedHistoryItem.item.correlationId}</code>
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    {selectedHistoryItem.kind === 'submission' ? (
+                      <div className="history-detail-body">
+                        <p className="history-detail-text">{selectedHistoryItem.submission.rawText}</p>
+                        <div className="history-meta-grid">
+                          <span>Submitted {formatHistoryTimestamp(selectedHistoryItem.submission.messageTimestamp)}</span>
+                          <span>Created {formatHistoryTimestamp(selectedHistoryItem.submission.createdAt)}</span>
+                          <span>
+                            Entries {selectedHistoryItem.submission.savedEntryCount}/
+                            {selectedHistoryItem.submission.interpretedEntryCount}
+                          </span>
+                          <span>Unique {selectedHistoryItem.submission.uniqueEntryCount}</span>
+                          <span>Confidence {formatHistoryConfidence(selectedHistoryItem.submission.confidence)}</span>
+                          {selectedHistoryItem.submission.modelUsedLabel ? (
+                            <span>Model {selectedHistoryItem.submission.modelUsedLabel}</span>
+                          ) : null}
+                          {selectedHistoryItem.submission.transcriptionModelUsedLabel ? (
+                            <span>Transcription {selectedHistoryItem.submission.transcriptionModelUsedLabel}</span>
+                          ) : null}
+                          {selectedHistoryItem.submission.containsMultipleEvents ? (
+                            <span>Multiple events</span>
+                          ) : null}
+                          {selectedHistoryItem.submission.truncatedEntryCount > 0 ? (
+                            <span>Truncated {selectedHistoryItem.submission.truncatedEntryCount}</span>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {selectedHistoryItem.kind === 'entry' ? (
+                      <div className="history-detail-body">
+                        <p className="history-detail-text">{selectedHistoryItem.entry.description || 'No description'}</p>
+                        <div className="history-meta-grid">
+                          <span>{formatHistoryEntryTime(selectedHistoryItem.entry)}</span>
+                          <span>{formatQuickBlockDuration(selectedHistoryItem.entry.durationMinutes)}</span>
+                          <span>Created {formatHistoryTimestamp(selectedHistoryItem.entry.createdAt)}</span>
+                          <span>Updated {formatHistoryTimestamp(selectedHistoryItem.entry.updatedAt)}</span>
+                          <span>Confidence {formatHistoryConfidence(selectedHistoryItem.entry.confidence)}</span>
+                          {selectedHistoryItem.entry.engagementName || selectedHistoryItem.entry.engagementCode ? (
+                            <span>
+                              {formatEntityDisplayLabel(
+                                selectedHistoryItem.entry.engagementName,
+                                selectedHistoryItem.entry.engagementCode,
+                              )}
+                            </span>
+                          ) : null}
+                          {selectedHistoryItem.entry.activityName || selectedHistoryItem.entry.activityCode ? (
+                            <span>
+                              {formatEntityDisplayLabel(
+                                selectedHistoryItem.entry.activityName,
+                                selectedHistoryItem.entry.activityCode,
+                              )}
+                            </span>
+                          ) : null}
+                          {selectedHistoryItem.entry.modelUsedLabel ? (
+                            <span>Model {selectedHistoryItem.entry.modelUsedLabel}</span>
+                          ) : null}
+                          {selectedHistoryItem.entry.transcriptionModelUsedLabel ? (
+                            <span>Transcription {selectedHistoryItem.entry.transcriptionModelUsedLabel}</span>
+                          ) : null}
+                        </div>
+                        {selectedHistoryItem.entry.warningFlags.length > 0 ? (
+                          <div className="history-warning-row">
+                            {selectedHistoryItem.entry.warningFlags.map((warningType) => (
+                              <WarningBadge key={`${selectedHistoryItem.entry.id}-${warningType}`} type={warningType} />
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="history-empty">Select a history item.</p>
+                )}
+              </aside>
             </div>
           </section>
         ) : null}
 
         {activeView === 'codes' ? (
-          <section className="panel code-panel">
-            <div className="code-forms">
-              <div className="code-panel-header">
-                <h2>Engagements and Activities</h2>
-                <p>These are the projects/engagements that OmniSheet will match to your submitted activity.</p>
-              </div>
-
-              <div ref={codeFormsBodyRef} className="code-forms-body">
-                <div className="code-editor-accordion">
-                  <section className={`code-editor-section ${isEngagementEditorOpen ? 'expanded' : ''}`}>
-                    <button
-                      type="button"
-                      className="code-editor-trigger"
-                      aria-expanded={isEngagementEditorOpen}
-                      aria-controls="engagement-editor-panel"
-                      onClick={toggleEngagementEditor}
-                    >
-                      <span className="code-editor-trigger-title">
-                        {isEditingEngagement ? 'Edit Engagement' : 'Create Engagement'}
-                      </span>
-                      <span
-                        className={`code-editor-trigger-icon ${isEngagementEditorOpen ? 'open' : ''}`}
-                        aria-hidden="true"
-                      />
-                    </button>
-
-                    {isEngagementEditorOpen ? (
-                      <div id="engagement-editor-panel" className="code-editor-panel">
-                        <form className="stack code-editor-form" onSubmit={onSubmitEngagement}>
-                          <label>
-                            <span className="field-label-row">
-                              Name
-                              <span className="required-indicator" aria-hidden="true">*</span>
-                            </span>
-                            <span className="field-helper">Required for matching</span>
-                            <input
-                              ref={engagementNameInputRef}
-                              value={engagementForm.name}
-                              onChange={(event) =>
-                                setEngagementForm((previous) => ({
-                                  ...previous,
-                                  name: event.target.value,
-                                }))
-                              }
-                              required
-                            />
-                          </label>
-                          <label>
-                            Code
-                            <input
-                              value={engagementForm.code}
-                              onChange={(event) => {
-                                const nextCode = event.target.value
-                                setEngagementForm((previous) => ({
-                                  ...previous,
-                                  code: nextCode,
-                                  engagementType: hasManualEngagementTypeSelection
-                                    ? previous.engagementType
-                                    : inferEngagementTypeFromCode(nextCode),
-                                }))
-                              }}
-                            />
-                          </label>
-                          <label>
-                            <span className="field-label-row">
-                              Describe when to use this engagement
-                              <span className="required-indicator" aria-hidden="true">*</span>
-                            </span>
-                            <span className="field-helper">Required for matching</span>
-                            <textarea
-                              rows={3}
-                              maxLength={500}
-                              value={engagementForm.describeWhenToUse}
-                              onChange={(event) =>
-                                setEngagementForm((previous) => ({
-                                  ...previous,
-                                  describeWhenToUse: event.target.value,
-                                }))
-                              }
-                              placeholder="Use this engagement when..."
-                              required
-                            />
-                          </label>
-                          <label>
-                            Tags / Key Words (comma separated)
-                            <input
-                              value={engagementForm.tags}
-                              onChange={(event) =>
-                                setEngagementForm((previous) => ({
-                                  ...previous,
-                                  tags: event.target.value,
-                                }))
-                              }
-                            />
-                          </label>
-                          <label>
-                            Client
-                            <input
-                              value={engagementForm.client}
-                              onChange={(event) =>
-                                setEngagementForm((previous) => ({
-                                  ...previous,
-                                  client: event.target.value,
-                                }))
-                              }
-                            />
-                          </label>
-                          <div className="code-editor-field">
-                            <span className="code-editor-field-label">Type</span>
-                            <div
-                              className="segmented-control engagement-type-segmented"
-                              role="group"
-                              aria-label="Engagement type"
-                            >
-                              {(['external', 'internal'] as const).map((engagementType) => (
-                                <button
-                                  key={engagementType}
-                                  type="button"
-                                  className={engagementForm.engagementType === engagementType ? 'active' : ''}
-                                  aria-pressed={engagementForm.engagementType === engagementType}
-                                  onClick={() => {
-                                    setHasManualEngagementTypeSelection(true)
-                                    setEngagementForm((previous) => ({
-                                      ...previous,
-                                      engagementType,
-                                    }))
-                                  }}
-                                >
-                                  {engagementType === 'external' ? 'External' : 'Internal'}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                          <label>
-                            Color
-                            <div className="color-input-row">
-                              <input
-                                type="color"
-                                value={engagementFormColorValue ?? TIMELINE_NEUTRAL_COLOR}
-                                onChange={(event) =>
-                                  setEngagementForm((previous) => ({
-                                    ...previous,
-                                    colorHex: event.target.value.toUpperCase(),
-                                  }))
-                                }
-                                aria-label="Select engagement color"
-                              />
-                              <input
-                                value={engagementForm.colorHex}
-                                onChange={(event) =>
-                                  setEngagementForm((previous) => ({
-                                    ...previous,
-                                    colorHex: event.target.value.toUpperCase(),
-                                  }))
-                                }
-                                placeholder="#RRGGBB"
-                                maxLength={7}
-                              />
-                              <button
-                                type="button"
-                                className="ghost color-clear-button"
-                                onClick={() =>
-                                  setEngagementForm((previous) => ({
-                                    ...previous,
-                                    colorHex: '',
-                                  }))
-                                }
-                              >
-                                Use Default
-                              </button>
-                            </div>
-                          </label>
-                          <div className="code-editor-actions">
-                            <button type="submit" disabled={isBusy}>
-                              {isEditingEngagement ? 'Update Engagement' : 'Create Engagement'}
-                            </button>
-                            <button type="button" className="ghost" onClick={closeCodeEditor}>
-                              Cancel
-                            </button>
-                          </div>
-                        </form>
-                      </div>
-                    ) : null}
-                  </section>
-
-                  <section className={`code-editor-section ${isActivityEditorOpen ? 'expanded' : ''}`}>
-                    <button
-                      type="button"
-                      className="code-editor-trigger"
-                      aria-expanded={isActivityEditorOpen}
-                      aria-controls="activity-editor-panel"
-                      onClick={toggleActivityEditor}
-                      disabled={!canCreateActivity}
-                    >
-                      <span className="code-editor-trigger-title">
-                        {isEditingActivity ? 'Edit Activity' : 'Create Activity'}
-                      </span>
-                      <span
-                        className={`code-editor-trigger-icon ${isActivityEditorOpen ? 'open' : ''}`}
-                        aria-hidden="true"
-                      />
-                    </button>
-
-                    {isActivityEditorOpen ? (
-                      <div id="activity-editor-panel" className="code-editor-panel">
-                        {isEditingActivity && selectedActivityEngagement ? (
-                          <p className="code-editor-context">
-                            Editing activity in <strong>{selectedActivityEngagement.code}</strong>
-                            {' '}{selectedActivityEngagement.name}
-                          </p>
-                        ) : null}
-                        <form className="stack code-editor-form" onSubmit={onSubmitActivity}>
-                          <label>
-                            Engagement
-                            <select
-                              ref={activityEngagementSelectRef}
-                              value={activityForm.engagementId}
-                              onChange={(event) =>
-                                setActivityForm((previous) => ({
-                                  ...previous,
-                                  engagementId: event.target.value,
-                                }))
-                              }
-                              required
-                            >
-                              <option value="" disabled>
-                                Select engagement
-                              </option>
-                              {engagements.map((engagement) => (
-                                <option key={engagement.id} value={engagement.id}>
-                                  {formatEntityDisplayLabel(engagement.name, engagement.code)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label>
-                            <span className="field-label-row">
-                              Name
-                              <span className="required-indicator" aria-hidden="true">*</span>
-                            </span>
-                            <span className="field-helper">Required for matching</span>
-                            <input
-                              value={activityForm.name}
-                              onChange={(event) =>
-                                setActivityForm((previous) => ({
-                                  ...previous,
-                                  name: event.target.value,
-                                }))
-                              }
-                              required
-                            />
-                          </label>
-                          <label>
-                            Code
-                            <input
-                              value={activityForm.code}
-                              onChange={(event) =>
-                                setActivityForm((previous) => ({
-                                  ...previous,
-                                  code: event.target.value,
-                                }))
-                              }
-                            />
-                          </label>
-                          <label>
-                            <span className="field-label-row">
-                              Describe when to use this activity
-                              <span className="required-indicator" aria-hidden="true">*</span>
-                            </span>
-                            <span className="field-helper">Required for matching</span>
-                            <textarea
-                              rows={3}
-                              maxLength={500}
-                              value={activityForm.describeWhenToUse}
-                              onChange={(event) =>
-                                setActivityForm((previous) => ({
-                                  ...previous,
-                                  describeWhenToUse: event.target.value,
-                                }))
-                              }
-                              placeholder="Use this activity when..."
-                              required
-                            />
-                          </label>
-                          <label>
-                            Tags / Key Words (comma separated)
-                            <input
-                              value={activityForm.tags}
-                              onChange={(event) =>
-                                setActivityForm((previous) => ({
-                                  ...previous,
-                                  tags: event.target.value,
-                                }))
-                              }
-                            />
-                          </label>
-                          <label>
-                            Color
-                            <div className="color-input-row">
-                              <input
-                                type="color"
-                                value={activityFormColorValue ?? selectedEngagementColorValue ?? TIMELINE_NEUTRAL_COLOR}
-                                onChange={(event) =>
-                                  setActivityForm((previous) => ({
-                                    ...previous,
-                                    colorHex: event.target.value.toUpperCase(),
-                                  }))
-                                }
-                                aria-label="Select activity color"
-                              />
-                              <input
-                                value={activityForm.colorHex || selectedEngagementColorValue || ''}
-                                onChange={(event) =>
-                                  setActivityForm((previous) => ({
-                                    ...previous,
-                                    colorHex: event.target.value.toUpperCase(),
-                                  }))
-                                }
-                                placeholder="#RRGGBB"
-                                maxLength={7}
-                              />
-                              <button
-                                type="button"
-                                className="ghost color-clear-button"
-                                onClick={() =>
-                                  setActivityForm((previous) => ({
-                                    ...previous,
-                                    colorHex: '',
-                                  }))
-                                }
-                              >
-                                Use Default
-                              </button>
-                            </div>
-                          </label>
-                          <div className="code-editor-actions">
-                            <button type="submit" disabled={isBusy || engagements.length === 0}>
-                              {isEditingActivity ? 'Update Activity' : 'Create Activity'}
-                            </button>
-                            <button type="button" className="ghost" onClick={closeCodeEditor}>
-                              Cancel
-                            </button>
-                          </div>
-                        </form>
-                      </div>
-                    ) : null}
-
-                    {!canCreateActivity ? (
-                      <p className="code-editor-choice-hint">Create an engagement first.</p>
-                    ) : null}
-                  </section>
+          <section className="panel codes-prototype codes3-panel">
+            <div className="codes3-layout">
+              <aside className="codes3-rail" aria-label="Engagement hierarchy">
+                <div className="codes3-rail-header">
+                  <div className="codes3-pane-title">
+                    <h2>Engagements</h2>
+                  </div>
+                  <input
+                    type="search"
+                    className="quick-add-search codes3-engagement-search"
+                    value={codes3EngagementSearch}
+                    onChange={(event) => setCodes3EngagementSearch(event.target.value)}
+                    placeholder="Search engagements"
+                    aria-label="Search engagements"
+                  />
                 </div>
-              </div>
-            </div>
+                <div className="codes3-rail-list">
+                  {engagements.length === 0 ? (
+                    <p className="code-list-empty">No engagements yet.</p>
+                  ) : filteredCodes3Engagements.length === 0 ? (
+                    <p className="code-list-empty">No matching engagements.</p>
+                  ) : (
+                    filteredCodes3Engagements.map((engagement) => {
+                      const engagementColor =
+                        normalizeColorHexInput(engagement.colorHex) ?? TIMELINE_NEUTRAL_COLOR
+                      const isSelected = selectedCodes3Engagement?.id === engagement.id
 
-            <div className="code-browse-panel">
-              <div className="code-panel-header">
-                <h2>Existing Engagements & Activities</h2>
-                <p>Click to expand and review/edit the related activities.</p>
-              </div>
-
-              <div className="code-list" aria-label="Existing engagements and activities">
-                {engagements.length === 0 ? (
-                  <p className="code-list-empty">No engagements yet. Create one to get started.</p>
-                ) : (
-                  engagements.map((engagement) => {
-                    const engagementColor =
-                      normalizeColorHexInput(engagement.colorHex) ?? TIMELINE_NEUTRAL_COLOR
-                    const engagementUsage =
-                      engagement.describeWhenToUse?.trim() || 'Usage guidance not added yet.'
-                    const isExpanded = engagement.id === expandedEngagementId
-                    const engagementPanelId = `engagement-panel-${engagement.id}`
-
-                    return (
-                      <article
-                        key={engagement.id}
-                        className={`engagement-card ${isExpanded ? 'expanded' : ''}`}
-                        style={{ borderLeftColor: engagementColor }}
-                      >
-                        <div className="engagement-card-header">
-                          <div className="engagement-card-main">
-                            <h3 className="engagement-card-heading">
-                              <button
-                                type="button"
-                                className="engagement-disclosure"
-                                aria-expanded={isExpanded}
-                                aria-controls={engagementPanelId}
-                                onClick={() =>
-                                  setExpandedEngagementId((previous) =>
-                                    previous === engagement.id ? null : engagement.id,
-                                  )
-                                }
-                              >
-                                <span className="engagement-disclosure-main">
-                                  <span className="engagement-disclosure-icon" aria-hidden="true" />
-                                    <span className="code-item-copy">
-                                      <span className="code-item-title">
-                                      {engagement.code ? (
-                                        <span className="code-item-badge">{engagement.code}</span>
-                                      ) : null}
-                                      <span className="code-item-name">{engagement.name}</span>
-                                    </span>
-                                    <span
-                                      className={`code-item-usage ${engagement.describeWhenToUse?.trim() ? '' : 'is-placeholder'}`}
-                                    >
-                                      {engagementUsage}
-                                    </span>
-                                    <ResponsiveCodeTagList tags={engagement.tags} itemKeyPrefix={engagement.id} />
-                                  </span>
-                                </span>
-                                <span className="activity-count-pill">
-                                  {formatActivityCount(engagement.activities.length)}
-                                </span>
-                              </button>
-                            </h3>
-                          </div>
-
-                          <div className="code-item-actions">
+                      return (
+                        <div
+                          key={engagement.id}
+                          className={`codes3-rail-item ${isSelected ? 'active' : ''} ${
+                            engagement.isActive ? '' : 'is-inactive'
+                          }`}
+                          style={{ '--codes3-engagement-color': engagementColor } as CSSProperties}
+                        >
+                          <button
+                            type="button"
+                            className="codes3-rail-select"
+                            onClick={() => {
+                              setCodes3SelectedEngagementId(engagement.id)
+                              setCodes4CreateContextEngagementId(engagement.id)
+                              setCodes3ActivitySearch('')
+                              closeCodeEditor()
+                            }}
+                          >
+                            <span className="codes3-rail-copy">
+                              <span className="codes3-rail-title">
+                                {engagement.code ? (
+                                  <span className="code-item-badge">{engagement.code}</span>
+                                ) : null}
+                                <span>{engagement.name}</span>
+                                {engagement.isActive ? null : (
+                                  <span className="codes4-state-pill">Inactive</span>
+                                )}
+                              </span>
+                              <small>
+                                {engagement.describeWhenToUse?.trim() || 'Usage guidance not added yet.'}
+                              </small>
+                            </span>
+                          </button>
+                          <div className="codes3-rail-actions">
                             <button
                               type="button"
                               className="icon-action-button"
-                              aria-label={`Edit engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
+                              aria-label={`Edit engagement ${formatEntityDisplayLabel(
+                                engagement.name,
+                                engagement.code,
+                              )}`}
                               title={`Edit engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
-                              onClick={() => onEditEngagement(engagement)}
+                              onClick={() => {
+                                setCodes3SelectedEngagementId(engagement.id)
+                                setCodes4CreateContextEngagementId(engagement.id)
+                                setCodes3ActivitySearch('')
+                                onEditEngagement(engagement)
+                                setCodes3DetailMode('edit-engagement')
+                              }}
                             >
                               <img src={editIcon} alt="" aria-hidden="true" />
                             </button>
                             <button
                               type="button"
                               className="icon-action-button is-danger"
-                              aria-label={`Delete engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
+                              aria-label={`Delete engagement ${formatEntityDisplayLabel(
+                                engagement.name,
+                                engagement.code,
+                              )}`}
                               title={`Delete engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
-                              onClick={() => onDeleteEngagement(engagement.id)}
+                              onClick={() => {
+                                setCodes3DetailMode('activities')
+                                onDeleteEngagement(engagement.id)
+                              }}
                             >
                               <img src={deleteIcon} alt="" aria-hidden="true" />
                             </button>
                           </div>
                         </div>
+                      )
+                    })
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="ghost codes3-pane-create-button codes3-floating-add-button"
+                  onClick={openCodes3CreateEngagementModal}
+                  disabled={isBusy}
+                >
+                  <span className="control-icon plus-icon" aria-hidden="true" />
+                  Add Engagement
+                </button>
+              </aside>
 
-                        <div id={engagementPanelId} className="engagement-activities" hidden={!isExpanded}>
-                          {engagement.activities.length === 0 ? (
-                            <p className="engagement-empty-state">No activities yet.</p>
-                          ) : (
-                            <ul>
-                              {engagement.activities.map((activity) => {
-                                const activityColor =
-                                  normalizeColorHexInput(activity.colorHex)
-                                  ?? normalizeColorHexInput(engagement.colorHex)
-                                  ?? TIMELINE_NEUTRAL_COLOR
-                                const activityUsage =
-                                  activity.describeWhenToUse?.trim() || 'Usage guidance not added yet.'
+              <section
+                className={`codes3-detail ${codes3IsEditing ? 'is-editing' : ''}`}
+              >
+                {codes3IsEditing ? (
+                  <div className="codes3-activities-surface is-under-editing" aria-hidden="true">
+                    {codes3ActivitiesPane}
+                  </div>
+                ) : null}
+                {codes3DetailMode === 'edit-engagement' && isEditingEngagement ? (
+                  <form className="stack code-editor-form codes4-edit-form codes3-edit-form" onSubmit={onSubmitEngagement}>
+                    <div className="codes4-edit-header">
+                      <h3>Edit Engagement</h3>
+                      <div className="codes4-edit-header-actions">
+                        <button type="button" className="ghost" onClick={closeCodeEditor}>
+                          Cancel
+                        </button>
+                        <button type="submit" className="button-soft-primary" disabled={isBusy}>
+                          Update
+                        </button>
+                      </div>
+                    </div>
+                    <label>
+                      <span className="field-label-row">
+                        Engagement Name
+                        <span className="required-indicator" aria-hidden="true">*</span>
+                      </span>
+                      <span className="field-helper">Required for matching</span>
+                      <input
+                        value={engagementForm.name}
+                        onChange={(event) =>
+                          setEngagementForm((previous) => ({
+                            ...previous,
+                            name: event.target.value,
+                          }))
+                        }
+                        required
+                      />
+                    </label>
+                    <label>
+                      Engagement Code
+                      <input
+                        value={engagementForm.code}
+                        onChange={(event) => {
+                          const nextCode = event.target.value
+                          setEngagementForm((previous) => ({
+                            ...previous,
+                            code: nextCode,
+                            engagementType: hasManualEngagementTypeSelection
+                              ? previous.engagementType
+                              : inferEngagementTypeFromCode(nextCode),
+                          }))
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <span className="field-label-row">
+                        Describe when to use this engagement
+                        <span className="required-indicator" aria-hidden="true">*</span>
+                      </span>
+                      <span className="field-helper">Required for matching</span>
+                      <textarea
+                        rows={3}
+                        maxLength={500}
+                        value={engagementForm.describeWhenToUse}
+                        onChange={(event) =>
+                          setEngagementForm((previous) => ({
+                            ...previous,
+                            describeWhenToUse: event.target.value,
+                          }))
+                        }
+                        placeholder="Use this engagement when..."
+                        required
+                      />
+                    </label>
+                    <label>
+                      Tags / Key Words (comma separated)
+                      <input
+                        value={engagementForm.tags}
+                        onChange={(event) =>
+                          setEngagementForm((previous) => ({
+                            ...previous,
+                            tags: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Client
+                      <input
+                        value={engagementForm.client}
+                        onChange={(event) =>
+                          setEngagementForm((previous) => ({
+                            ...previous,
+                            client: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <div className="code-editor-field">
+                      <span className="code-editor-field-label">Engagement Type</span>
+                      <div
+                        className="segmented-control engagement-type-segmented"
+                        role="group"
+                        aria-label="Engagement type"
+                      >
+                        {(['external', 'internal'] as const).map((engagementType) => (
+                          <button
+                            key={engagementType}
+                            type="button"
+                            className={engagementForm.engagementType === engagementType ? 'active' : ''}
+                            aria-pressed={engagementForm.engagementType === engagementType}
+                            onClick={() => {
+                              setHasManualEngagementTypeSelection(true)
+                              setEngagementForm((previous) => ({
+                                ...previous,
+                                engagementType,
+                              }))
+                            }}
+                          >
+                            {engagementType === 'external' ? 'External' : 'Internal'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <label>
+                      Color
+                      <div className="color-input-row">
+                        <input
+                          type="color"
+                          value={engagementFormColorValue ?? TIMELINE_NEUTRAL_COLOR}
+                          onChange={(event) =>
+                            setEngagementForm((previous) => ({
+                              ...previous,
+                              colorHex: event.target.value.toUpperCase(),
+                            }))
+                          }
+                          aria-label="Select engagement color"
+                        />
+                        <input
+                          value={engagementForm.colorHex}
+                          onChange={(event) =>
+                            setEngagementForm((previous) => ({
+                              ...previous,
+                              colorHex: event.target.value.toUpperCase(),
+                            }))
+                          }
+                          placeholder="#RRGGBB"
+                          maxLength={7}
+                        />
+                        <button
+                          type="button"
+                          className="ghost color-clear-button"
+                          onClick={() =>
+                            setEngagementForm((previous) => ({
+                              ...previous,
+                              colorHex: '',
+                            }))
+                          }
+                        >
+                          Use Default
+                        </button>
+                      </div>
+                    </label>
+                    <div className="codes-active-field">
+                      <div className="codes-active-toggle">
+                        <span>Active</span>
+                        <label className="settings-toggle-group">
+                          <input
+                            type="checkbox"
+                            checked={engagementForm.isActive}
+                            onChange={(event) =>
+                              setEngagementForm((previous) => ({
+                                ...previous,
+                                isActive: event.target.checked,
+                              }))
+                            }
+                            aria-label="Active"
+                          />
+                        </label>
+                      </div>
+                      <small>Show in timeline code selection and quick entry panels</small>
+                    </div>
+                  </form>
+                ) : codes3DetailMode === 'edit-activity' && isEditingActivity ? (
+                  <form className="stack code-editor-form codes4-edit-form codes3-edit-form" onSubmit={onSubmitActivity}>
+                    <div className="codes4-edit-header">
+                      <h3>Edit Activity</h3>
+                      <div className="codes4-edit-header-actions">
+                        <button type="button" className="ghost" onClick={closeCodeEditor}>
+                          Cancel
+                        </button>
+                        <button type="submit" className="button-soft-primary" disabled={isBusy || engagements.length === 0}>
+                          Update
+                        </button>
+                      </div>
+                    </div>
+                    <label>
+                      Engagement Name
+                      <select
+                        value={activityForm.engagementId}
+                        onChange={(event) =>
+                          setActivityForm((previous) => ({
+                            ...previous,
+                            engagementId: event.target.value,
+                          }))
+                        }
+                        required
+                      >
+                        <option value="" disabled>
+                          Select engagement
+                        </option>
+                        {engagements.map((engagement) => (
+                          <option key={engagement.id} value={engagement.id}>
+                            {formatEntityDisplayLabel(engagement.name, engagement.code)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span className="field-label-row">
+                        Activity Name
+                        <span className="required-indicator" aria-hidden="true">*</span>
+                      </span>
+                      <span className="field-helper">Required for matching</span>
+                      <input
+                        value={activityForm.name}
+                        onChange={(event) =>
+                          setActivityForm((previous) => ({
+                            ...previous,
+                            name: event.target.value,
+                          }))
+                        }
+                        required
+                      />
+                    </label>
+                    <label>
+                      Activity Code
+                      <input
+                        value={activityForm.code}
+                        onChange={(event) =>
+                          setActivityForm((previous) => ({
+                            ...previous,
+                            code: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span className="field-label-row">
+                        Describe when to use this activity
+                      </span>
+                      <textarea
+                        rows={3}
+                        maxLength={500}
+                        value={activityForm.describeWhenToUse}
+                        onChange={(event) =>
+                          setActivityForm((previous) => ({
+                            ...previous,
+                            describeWhenToUse: event.target.value,
+                          }))
+                        }
+                        placeholder="Use this activity when..."
+                      />
+                    </label>
+                    <label>
+                      Tags / Key Words (comma separated)
+                      <input
+                        value={activityForm.tags}
+                        onChange={(event) =>
+                          setActivityForm((previous) => ({
+                            ...previous,
+                            tags: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Color
+                      <div className="color-input-row">
+                        <input
+                          type="color"
+                          value={activityFormColorValue ?? selectedEngagementColorValue ?? TIMELINE_NEUTRAL_COLOR}
+                          onChange={(event) =>
+                            setActivityForm((previous) => ({
+                              ...previous,
+                              colorHex: event.target.value.toUpperCase(),
+                            }))
+                          }
+                          aria-label="Select activity color"
+                        />
+                        <input
+                          value={activityForm.colorHex || selectedEngagementColorValue || ''}
+                          onChange={(event) =>
+                            setActivityForm((previous) => ({
+                              ...previous,
+                              colorHex: event.target.value.toUpperCase(),
+                            }))
+                          }
+                          placeholder="#RRGGBB"
+                          maxLength={7}
+                        />
+                        <button
+                          type="button"
+                          className="ghost color-clear-button"
+                          onClick={() =>
+                            setActivityForm((previous) => ({
+                              ...previous,
+                              colorHex: '',
+                            }))
+                          }
+                        >
+                          Use Default
+                        </button>
+                      </div>
+                    </label>
+                    <div className="codes-active-field">
+                      <div className="codes-active-toggle">
+                        <span>Active</span>
+                        <label className="settings-toggle-group">
+                          <input
+                            type="checkbox"
+                            checked={activityForm.isActive}
+                            onChange={(event) =>
+                              setActivityForm((previous) => ({
+                                ...previous,
+                                isActive: event.target.checked,
+                              }))
+                            }
+                            aria-label="Active"
+                          />
+                        </label>
+                      </div>
+                      <small>Show in timeline code selection and quick entry panels</small>
+                    </div>
+                  </form>
+                ) : selectedCodes3Engagement ? (
+                  <>
+                    <div className="codes3-activities-toolbar">
+                      <div className="codes3-pane-title">
+                        <h2 title={codes3ActivitiesHeading}>{codes3ActivitiesHeading}</h2>
+                      </div>
+                      <input
+                        type="search"
+                        className="quick-add-search codes3-activity-search"
+                        value={codes3ActivitySearch}
+                        onChange={(event) => setCodes3ActivitySearch(event.target.value)}
+                        placeholder="Search activities"
+                        aria-label="Search activities"
+                      />
+                    </div>
 
-                                return (
-                                  <li
-                                    key={activity.id}
-                                    className="activity-row"
-                                    style={{ borderLeftColor: activityColor }}
-                                  >
-                                    <div className="code-item-copy">
-                                      <div className="code-item-title">
-                                        {activity.code ? (
-                                          <span className="code-item-badge">{activity.code}</span>
-                                        ) : null}
-                                        <span className="code-item-name">{activity.name}</span>
-                                      </div>
-                                      <p
-                                        className={`code-item-usage ${activity.describeWhenToUse?.trim() ? '' : 'is-placeholder'}`}
-                                      >
-                                        {activityUsage}
-                                      </p>
-                                      <ResponsiveCodeTagList tags={activity.tags} itemKeyPrefix={activity.id} />
-                                    </div>
+                    <div className="codes3-activity-list">
+                      {selectedCodes3Engagement.activities.length === 0 ? (
+                        <p className="engagement-empty-state">No activities yet.</p>
+                      ) : filteredCodes3Activities.length === 0 ? (
+                        <p className="engagement-empty-state">No matching activities.</p>
+                      ) : (
+                        filteredCodes3Activities.map((activity) => {
+                          const activityColor =
+                            normalizeColorHexInput(activity.colorHex)
+                            ?? normalizeColorHexInput(selectedCodes3Engagement.colorHex)
+                            ?? TIMELINE_NEUTRAL_COLOR
 
-                                    <div className="code-item-actions">
-                                      <button
-                                        type="button"
-                                        className="icon-action-button"
-                                        aria-label={`Edit activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
-                                        title={`Edit activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
-                                        onClick={() => onEditActivity(activity)}
-                                      >
-                                        <img src={editIcon} alt="" aria-hidden="true" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="icon-action-button is-danger"
-                                        aria-label={`Delete activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
-                                        title={`Delete activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
-                                        onClick={() => onDeleteActivity(activity.id)}
-                                      >
-                                        <img src={deleteIcon} alt="" aria-hidden="true" />
-                                      </button>
-                                    </div>
-                                  </li>
-                                )
-                              })}
-                            </ul>
-                          )}
-                        </div>
-                      </article>
-                    )
-                  })
+                          return (
+                            <div
+                              key={activity.id}
+                              className={`codes3-activity-row ${activity.isActive ? '' : 'is-inactive'}`}
+                              style={{ '--codes3-activity-color': activityColor } as CSSProperties}
+                            >
+                              <div>
+                                <div className="codes4-title-line">
+                                  {activity.code ? (
+                                    <span className="code-item-badge">{activity.code}</span>
+                                  ) : null}
+                                  <strong>{activity.name}</strong>
+                                  {activity.isActive ? null : (
+                                    <span className="codes4-state-pill">Inactive</span>
+                                  )}
+                                </div>
+                                <span className="codes3-activity-usage">
+                                  {activity.describeWhenToUse || 'Usage guidance not added yet.'}
+                                </span>
+                                <ResponsiveCodeTagList
+                                  tags={activity.tags}
+                                  itemKeyPrefix={`codes3-activity-${activity.id}`}
+                                />
+                              </div>
+                              <div className="code-item-actions">
+                                <button
+                                  type="button"
+                                  className="icon-action-button"
+                                  aria-label={`Edit activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
+                                  onClick={() => {
+                                    setCodes3SelectedEngagementId(activity.engagementId)
+                                    onEditActivity(activity)
+                                    setCodes3DetailMode('edit-activity')
+                                  }}
+                                >
+                                  <img src={editIcon} alt="" aria-hidden="true" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="icon-action-button is-danger"
+                                  aria-label={`Delete activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
+                                  onClick={() => {
+                                    setCodes3DetailMode('activities')
+                                    onDeleteActivity(activity.id)
+                                  }}
+                                >
+                                  <img src={deleteIcon} alt="" aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <p className="code-list-empty">No engagement selected.</p>
                 )}
-              </div>
+                {selectedCodes3Engagement && !codes3IsEditing ? (
+                  <button
+                    type="button"
+                    className="ghost codes3-pane-create-button codes3-floating-add-button"
+                    onClick={openCodes3CreateActivityModal}
+                    disabled={isBusy || !selectedCodes3Engagement}
+                  >
+                    <span className="control-icon plus-icon" aria-hidden="true" />
+                    Add Activity
+                  </button>
+                ) : null}
+              </section>
             </div>
           </section>
         ) : null}
@@ -8455,210 +11203,267 @@ function App() {
           </section>
         ) : null}
 
-        {activeView === 'summary' ? (
-          <section className="panel summary-panel">
-            <div className="summary-toolbar">
-              <div className="summary-title-block">
-                <h2>Weekly Summary</h2>
-                {weeklySummary ? (
-                  <p className="summary-week-range">
-                    Week: {weeklySummary.weekStartDate} - {weeklySummary.weekEndDate}
-                  </p>
-                ) : (
-                  <p className="summary-week-range">Week: {selectedDate}</p>
-                )}
+        {activeView === 'reporting' ? (
+          <section className="panel reporting-panel">
+            <header className="reporting-toolbar">
+              <div className="reporting-title-block">
+                <h2>Reporting</h2>
+                <p>
+                  {weeklySummary
+                    ? `${weeklySummary.weekStartDate} - ${weeklySummary.weekEndDate}`
+                    : selectedDate}
+                </p>
               </div>
-              <div className="summary-week-controls">
+
+              <div className="reporting-toolbar-main">
+                <div className="timeline-controls timeline-stepper reporting-week-stepper" aria-label="Reporting week navigation">
+                  <button
+                    type="button"
+                    className="timeline-arrow-button stepper-button stepper-prev"
+                    aria-label="Previous week"
+                    title="Previous week"
+                    onClick={() => onShiftSummaryWeek(-1)}
+                    disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
+                  >
+                    <span className="control-icon chevron-left" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="stepper-button stepper-center"
+                    onClick={onJumpToThisWeek}
+                    disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
+                  >
+                    This Week
+                  </button>
+                  <button
+                    type="button"
+                    className="timeline-arrow-button stepper-button stepper-next"
+                    aria-label="Next week"
+                    title="Next week"
+                    onClick={() => onShiftSummaryWeek(1)}
+                    disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
+                  >
+                    <span className="control-icon chevron-right" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            </header>
+
+            <section className="reporting-command-row" aria-label="Reporting controls and weekly totals">
+              <div className="reporting-week-total-strip" aria-label="Weekly total breakdown">
+                <span className="reporting-command-label">Weekly Total Hours</span>
+                <div className="reporting-week-total-values">
+                  {reportingWeeklyTotalSegments.length > 0 ? (
+                    reportingWeeklyTotalSegments.map((segment, segmentIndex) => {
+                      const segmentLabel = splitTimelineTotalSegmentLabel(segment.label)
+
+                      return (
+                        <Fragment key={segment.key}>
+                          {segmentIndex > 0 ? (
+                            <span
+                              className={`reporting-total-separator ${
+                                segment.key === 'total' ? 'primary' : 'secondary'
+                              }`}
+                              aria-hidden="true"
+                            >
+                              &bull;
+                            </span>
+                          ) : null}
+                          <span
+                            className={`reporting-total-segment ${
+                              segment.key === 'total' ? 'primary' : 'secondary'
+                            }`}
+                          >
+                            <strong>{segmentLabel.amount}</strong>
+                            <span>{segmentLabel.label}</span>
+                          </span>
+                        </Fragment>
+                      )
+                    })
+                  ) : (
+                    <span className="reporting-total-empty">No weekly total</span>
+                  )}
+                </div>
+              </div>
+              <div className="reporting-table-layout-controls" aria-label="Table layout controls">
+                <label className="reporting-table-preset-select">
+                  <span>Table Layout Preset</span>
+                  <select
+                    value={selectedReportingDisplayPreset?.id ?? ''}
+                    onChange={(event) => onSelectReportingDisplayPreset(event.target.value)}
+                    disabled={isBusy || isReportingStateSaving}
+                  >
+                    {resolvedReportingState.displayPresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="reporting-table-preset-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => openReportingDisplayPresetEditor('edit')}
+                    disabled={isBusy || isReportingStateSaving || !selectedReportingDisplayPreset}
+                  >
+                    <img className="reporting-preset-button-icon" src={editIcon} alt="" aria-hidden="true" />
+                    Edit Preset
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => openReportingDisplayPresetEditor('create')}
+                    disabled={isBusy || isReportingStateSaving || !selectedReportingDisplayPreset}
+                  >
+                    <span className="control-icon plus-icon" aria-hidden="true" />
+                    New Preset
+                  </button>
+                </div>
                 <button
                   type="button"
-                  onClick={() => onShiftSummaryWeek(-1)}
-                  disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
-                >
-                  Previous Week
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onShiftSummaryWeek(1)}
-                  disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
-                >
-                  Next Week
-                </button>
-                <button
-                  type="button"
-                  onClick={onExportSummaryWeek}
+                  className="button-soft-primary reporting-toolbar-button"
+                  onClick={() => {
+                    setReportingExportPreviewSheet('weeklyHours')
+                    setIsReportingExportModalOpen(true)
+                  }}
                   disabled={
                     isBusy
                     || isWeeklySummaryLoading
                     || isSummaryExporting
                     || isSummaryLayoutSaving
                     || !weeklySummary
-                    || !selectedSummaryLayoutPreset
                   }
                 >
+                  <span className="control-icon download-icon" aria-hidden="true" />
                   {isSummaryExporting ? 'Exporting...' : 'Export'}
                 </button>
               </div>
-            </div>
-
-            <section className="summary-layout-toolbar" aria-label="Table layout presets">
-              <div className="summary-layout-toolbar-copy">
-                <span className="summary-layout-toolbar-eyebrow">Table Layout Presets</span>
-                <p>Choose a saved layout or open the editor to change columns and ordering.</p>
-              </div>
-              <div className="summary-layout-toolbar-main">
-                <div className="summary-layout-preset-list" role="tablist" aria-label="Summary layout presets">
-                  {resolvedSummaryLayoutState.presets.map((preset) => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      className={preset.id === selectedSummaryLayoutPreset?.id ? 'active' : ''}
-                      role="tab"
-                      aria-selected={preset.id === selectedSummaryLayoutPreset?.id}
-                      onClick={() => onSelectSummaryLayoutPreset(preset.id)}
-                      disabled={isBusy || isSummaryLayoutSaving}
-                    >
-                      {preset.name}
-                    </button>
-                  ))}
-                </div>
-                <div className="summary-layout-toolbar-actions">
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => openSummaryLayoutEditor('edit')}
-                    disabled={isBusy || isSummaryLayoutSaving || !selectedSummaryLayoutPreset}
-                  >
-                    Edit Layout
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => openSummaryLayoutEditor('create')}
-                    disabled={isBusy || isSummaryLayoutSaving || !selectedSummaryLayoutPreset}
-                  >
-                    New Preset
-                  </button>
-                </div>
-              </div>
             </section>
-
-            <div className="summary-week-total">
-              <span>Week Total Hours</span>
-              <strong>
-                {displayedSummaryWeekTotalBreakdown
-                  ? `${formatTimelineHoursCompact(displayedSummaryWeekTotalBreakdown.primaryMinutes)} total`
-                  : '--'}
-              </strong>
-              {displayedSummaryWeekTotalBreakdown ? (
-                <span className="summary-week-total-breakdown">
-                  {buildTimelineTotalDisplaySegments(displayedSummaryWeekTotalBreakdown, {
-                    includePrimaryTotal: false,
-                    separateEngagementTypeTotals: timelineSeparateEngagementTypeTotals,
-                    showUncategorizedTotal: shouldShowTimelineUncategorizedDailyTotal,
-                  }).map((segment, segmentIndex) => (
-                    <Fragment key={segment.key}>
-                      {segmentIndex > 0 ? (
-                        <span className="summary-total-separator" aria-hidden="true">•</span>
-                      ) : null}
-                      <span>{segment.label}</span>
-                    </Fragment>
-                  ))}
-                </span>
-              ) : null}
-            </div>
 
             {weeklySummaryError ? (
               <p className="mini-calendar-error">{weeklySummaryError}</p>
             ) : null}
 
-            <div className="summary-table-wrap" aria-busy={isWeeklySummaryLoading}>
-              {isWeeklySummaryLoading ? (
-                <p>Loading weekly summary...</p>
-              ) : weeklySummary ? (
-                <table className="summary-table">
-                  <thead>
-                    <tr>
-                      {summaryViewColumns.map((column) => (
-                        <th
-                          key={column.id}
-                          className={column.wraps ? 'summary-cell-wrap' : ''}
-                          style={{ minWidth: column.width }}
-                        >
-                          {column.kind === 'day' && column.dayIndex !== undefined
-                            ? `${SUMMARY_DAY_NAMES[column.dayIndex]} (${formatMonthDay(weeklySummary.days[column.dayIndex]?.date ?? weeklySummary.weekStartDate)})`
-                            : column.header}
-                        </th>
+            <div
+              className="reporting-table-wrap"
+              aria-busy={isWeeklySummaryLoading}
+            >
+                {isWeeklySummaryLoading ? (
+                  <p className="reporting-empty-state">Loading weekly summary...</p>
+                ) : weeklySummary ? (
+                  <div
+                    className="reporting-table"
+                    role="table"
+                    aria-label="Reporting weekly summary"
+                    style={{ '--reporting-day-count': reportingDayIndexes.length } as CSSProperties}
+                  >
+                    <div className="reporting-row reporting-head" role="row">
+                      <span role="columnheader">Activity</span>
+                      {reportingDayIndexes.map((dayIndex) => (
+                        <span key={weeklySummary.days[dayIndex]?.date ?? dayIndex} role="columnheader">
+                          {SUMMARY_DAY_NAMES[dayIndex]?.slice(0, 3) ?? 'Day'}
+                          <small>{formatMonthDay(weeklySummary.days[dayIndex]?.date ?? weeklySummary.weekStartDate)}</small>
+                        </span>
                       ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {weeklySummary.rows.length === 0 ? (
-                      <tr>
-                        <td colSpan={summaryViewColumns.length} className="summary-empty-row">
-                          No time entries for this week.
-                        </td>
-                      </tr>
-                    ) : (
-                      weeklySummary.rows.map((row, rowIndex) => (
-                        <tr key={`${row.engagementCode}-${row.activityCode}-${rowIndex}`}>
-                          {summaryViewColumns.map((column) => (
-                            <td
-                              key={`${rowIndex}-${column.id}`}
-                              className={buildSummaryTableCellClassName(column, row)}
-                              style={{ minWidth: column.width }}
+                      <span role="columnheader">Total</span>
+                    </div>
+
+                    <div className="reporting-table-body">
+                      {weeklySummary.rows.length === 0 ? (
+                        <p className="reporting-empty-state">No time entries for this week.</p>
+                      ) : (
+                        weeklySummary.rows.map((row, rowIndex) => {
+                          const rowKey = getSummaryRowKey(row, rowIndex)
+                          const rowMeta = formatReportingRowMeta(row, previewReportingDisplayPreset)
+
+                          return (
+                            <div
+                              key={rowKey}
+                              className={`reporting-row ${row.isUncategorized ? 'is-uncategorized' : ''}`}
+                              role="row"
                             >
-                              {renderSummaryTableCell(
-                                column,
-                                row,
-                                rowIndex,
-                                engagementById,
-                                activityById,
-                                onOpenSummaryNotes,
-                              )}
-                            </td>
-                          ))}
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                  <tfoot>
-                    <tr className="summary-total-row">
-                      {summaryViewColumns.map((column, columnIndex) => (
-                        <td
-                          key={`total-${column.id}`}
-                          className={(
-                            column.wraps
-                            || (
-                              summaryFooterLabelIndex >= 0
-                              && columnIndex === summaryFooterLabelIndex
-                              && column.kind !== 'day'
-                              && column.kind !== 'rowTotal'
-                            )
-                          ) ? 'summary-cell-wrap' : ''}
-                          style={{ minWidth: column.width }}
-                        >
-                          {renderSummaryFooterCell(
-                            column,
-                            columnIndex,
-                            summaryFooterLabelIndex,
-                            weeklySummary,
-                            timelineTotalPreferences,
-                            timelineSeparateEngagementTypeTotals,
-                            shouldShowTimelineUncategorizedDailyTotal,
+                              <div
+                                className="reporting-row-label"
+                                role="cell"
+                              >
+                                <strong>
+                                  {formatReportingRowPrimary(row, previewReportingDisplayPreset)}
+                                </strong>
+                                <span>
+                                  {formatReportingRowSecondary(row, previewReportingDisplayPreset)}
+                                </span>
+                                {rowMeta.length > 0 ? (
+                                  <small>{rowMeta.join(' | ')}</small>
+                                ) : null}
+                              </div>
+                              {reportingDayIndexes.map((dayIndex) => {
+                                const cell = row.cells[dayIndex]
+                                const hasHours = Boolean(cell && cell.totalMinutes > 0)
+                                return (
+                                  <span
+                                    key={`${rowKey}-${dayIndex}`}
+                                    className="reporting-day-cell"
+                                    role="cell"
+                                  >
+                                    {hasHours && cell ? (
+                                      <button
+                                        type="button"
+                                        className={`reporting-hours-button ${cell.notes.length > 0 ? 'has-notes' : ''}`}
+                                        onClick={() => onOpenSummaryNotes(rowIndex, dayIndex)}
+                                        aria-label={`Open notes for ${formatEntityDisplayLabel(row.activityName, row.activityCode)} on ${SUMMARY_DAY_NAMES[dayIndex]}`}
+                                      >
+                                        {formatMinutesAsHours(cell.totalMinutes)}
+                                        {cell.notes.length > 0 ? (
+                                          <span className="reporting-note-mark" aria-hidden="true" />
+                                        ) : null}
+                                      </button>
+                                    ) : (
+                                      <span className="reporting-zero">-</span>
+                                    )}
+                                  </span>
+                                )
+                              })}
+                              <strong className="reporting-total-cell" role="cell">
+                                {formatMinutesAsHours(row.rowTotalMinutes)}
+                              </strong>
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+
+                    <div className="reporting-row reporting-foot" role="row">
+                      <strong role="cell">Day Totals</strong>
+                      {reportingDayIndexes.map((dayIndex) => (
+                        <span key={`reporting-total-${dayIndex}`} role="cell">
+                          {formatMinutesAsHours(
+                            finalizeTimelineTotalBreakdown(
+                              weeklySummary.dayTotalBreakdowns[dayIndex],
+                              timelineTotalPreferences,
+                            ).primaryMinutes,
                           )}
-                        </td>
+                        </span>
                       ))}
-                    </tr>
-                  </tfoot>
-                </table>
-              ) : (
-                <p>No summary data available.</p>
-              )}
-            </div>
+                      <strong role="cell">
+                        {displayedSummaryWeekTotalBreakdown
+                          ? formatMinutesAsHours(displayedSummaryWeekTotalBreakdown.primaryMinutes)
+                          : formatMinutesAsHours(weeklySummary.weekTotalMinutes)}
+                      </strong>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="reporting-empty-state">No summary data available.</p>
+                )}
+              </div>
           </section>
         ) : null}
+
           </div>
         </main>
       </div>
+      {codes4CreateModal}
+      {quickAddSettingsModal}
       {calendarBulkModal}
       {timelineContextMenu ? createPortal(
         <div
@@ -8708,6 +11513,314 @@ function App() {
         </div>,
         document.body,
       ) : null}
+      {isReportingExportModalOpen ? createPortal(
+        <div
+          className="summary-layout-editor-backdrop reporting-config-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsReportingExportModalOpen(false)
+            }
+          }}
+        >
+          <div
+            className="reporting-config-modal reporting-export-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Export reporting week"
+          >
+            <header className="reporting-config-header">
+              <div>
+                <h3>Export to Excel</h3>
+                <p>
+                  {weeklySummary
+                    ? `${weeklySummary.weekStartDate} - ${weeklySummary.weekEndDate}`
+                    : selectedDate}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="timeline-editor-close"
+                onClick={() => setIsReportingExportModalOpen(false)}
+                aria-label="Close export"
+                title="Close"
+              >
+                <span className="control-icon close-icon" aria-hidden="true" />
+              </button>
+            </header>
+
+            <div className="reporting-config-body">
+              <div className="reporting-export-preset-controls">
+                <label>
+                  <span>Export Preset</span>
+                  <select
+                    value={selectedReportingExportPreset?.id ?? ''}
+                    onChange={(event) => onSelectReportingExportPreset(event.target.value)}
+                    disabled={isBusy || isReportingStateSaving || isSummaryLayoutSaving}
+                  >
+                    {resolvedSummaryLayoutState.presets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="reporting-config-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => openSummaryLayoutEditor('edit')}
+                    disabled={isBusy || isSummaryLayoutSaving || !selectedReportingExportPreset}
+                  >
+                    <img className="reporting-preset-button-icon" src={editIcon} alt="" aria-hidden="true" />
+                    Edit Preset
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => openSummaryLayoutEditor('create')}
+                    disabled={isBusy || isSummaryLayoutSaving || !selectedReportingExportPreset}
+                  >
+                    <span className="control-icon plus-icon" aria-hidden="true" />
+                    New Preset
+                  </button>
+                </div>
+              </div>
+
+              {selectedReportingExportPreset ? (
+                <section className="reporting-export-preview" aria-label="Export column preview">
+                  <div className="reporting-export-preview-header">
+                    <strong>Excel Export Preview</strong>
+                    <button
+                      type="button"
+                      className="button-soft-primary reporting-export-preview-action"
+                      onClick={() => {
+                        setIsReportingExportModalOpen(false)
+                        onExportSummaryWeek()
+                      }}
+                      disabled={
+                        isBusy
+                        || isWeeklySummaryLoading
+                        || isSummaryExporting
+                        || isSummaryLayoutSaving
+                        || isReportingStateSaving
+                        || !weeklySummary
+                        || !selectedReportingExportPreset
+                      }
+                    >
+                      <span className="control-icon download-icon" aria-hidden="true" />
+                      {isSummaryExporting ? 'Exporting...' : 'Export'}
+                    </button>
+                  </div>
+                  <div className="reporting-export-preview-tabs" role="tablist" aria-label="Excel workbook sheets">
+                    <button
+                      type="button"
+                      className={reportingExportPreviewSheet === 'weeklyHours' ? 'active' : ''}
+                      role="tab"
+                      aria-selected={reportingExportPreviewSheet === 'weeklyHours'}
+                      onClick={() => setReportingExportPreviewSheet('weeklyHours')}
+                    >
+                      Weekly Hours
+                    </button>
+                    <button
+                      type="button"
+                      className={reportingExportPreviewSheet === 'weeklyHoursNotes' ? 'active' : ''}
+                      role="tab"
+                      aria-selected={reportingExportPreviewSheet === 'weeklyHoursNotes'}
+                      onClick={() => setReportingExportPreviewSheet('weeklyHoursNotes')}
+                    >
+                      Weekly Hours + Notes
+                    </button>
+                  </div>
+                  <div
+                    className="reporting-export-preview-grid"
+                    style={{
+                      '--reporting-export-column-count': reportingExportPreviewColumns.length,
+                      '--reporting-export-grid-columns': reportingExportPreviewGridColumns,
+                    } as CSSProperties}
+                  >
+                    <div className="reporting-export-preview-row reporting-export-preview-head">
+                      {reportingExportPreviewColumns.map((column) => (
+                        <span key={`export-preview-head-${column.id}`} title={column.header}>
+                          {column.header}
+                        </span>
+                      ))}
+                    </div>
+                    {(weeklySummary && weeklySummary.rows.length > 0
+                      ? weeklySummary.rows
+                      : [null]).map((row, previewRowIndex) => (
+                      <div
+                        key={`export-preview-row-${previewRowIndex}`}
+                        className="reporting-export-preview-row"
+                      >
+                        {reportingExportPreviewColumns.map((column) => (
+                          <span
+                            key={`export-preview-${column.id}-${previewRowIndex}`}
+                            title={column.header}
+                          >
+                            {row
+                              ? renderReportingExportPreviewCell(
+                                column,
+                                row,
+                                engagementById,
+                                activityById,
+                              )
+                              : '-'}
+                          </span>
+                        ))}
+                      </div>
+                    ))}
+                    <div className="reporting-export-preview-row reporting-export-preview-foot">
+                      {reportingExportPreviewColumns.map((column, columnIndex) => (
+                        <span key={`export-preview-foot-${column.id}`}>
+                          {renderReportingExportPreviewFooter(
+                            column,
+                            weeklySummary,
+                            columnIndex === reportingExportPreviewFooterLabelIndex,
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              ) : null}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+      {reportingDisplayPresetModal && reportingDisplayPresetDraft ? createPortal(
+        <div
+          className="summary-layout-editor-backdrop reporting-display-preset-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              resetReportingDisplayPresetEditor()
+            }
+          }}
+        >
+          <div
+            className="reporting-display-preset-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={
+              reportingDisplayPresetModal.mode === 'create'
+                ? 'Create reporting table preset'
+                : 'Edit reporting table preset'
+            }
+          >
+            <header className="reporting-display-preset-header">
+              <div>
+                <h3>
+                  {reportingDisplayPresetModal.mode === 'create'
+                    ? 'New Table Preset'
+                    : 'Edit Table Preset'}
+                </h3>
+                <p>Adjust the Reporting table. Export columns are managed separately.</p>
+              </div>
+              <button
+                type="button"
+                className="timeline-editor-close"
+                onClick={resetReportingDisplayPresetEditor}
+                aria-label="Close table preset editor"
+                title="Close"
+              >
+                <span className="control-icon close-icon" aria-hidden="true" />
+              </button>
+            </header>
+
+            <div className="reporting-display-preset-form">
+              <label>
+                <span>Preset Name</span>
+                <input
+                  type="text"
+                  value={reportingDisplayPresetDraftName}
+                  onChange={(event) => {
+                    setReportingDisplayPresetDraftName(event.target.value)
+                    setReportingDisplayPresetDraftError(null)
+                  }}
+                  maxLength={REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH}
+                  placeholder="Preset name"
+                />
+              </label>
+
+              <label>
+                <span>Row Label</span>
+                <select
+                  value={reportingDisplayPresetDraft.rowLabelMode}
+                  onChange={(event) =>
+                    setReportingDisplayPresetDraft((previous) => (
+                      previous
+                        ? {
+                          ...previous,
+                          rowLabelMode: event.target.value as ReportingDisplayPreset['rowLabelMode'],
+                        }
+                        : previous
+                    ))
+                  }
+                >
+                  <option value="combined">Engagement / Activity</option>
+                  <option value="separate">Engagement over Activity</option>
+                  <option value="activityOnly">Activity focused</option>
+                </select>
+              </label>
+
+              <div className="reporting-display-options" role="group" aria-label="Reporting display options">
+                {([
+                  ['showCodes', 'Show codes'],
+                  ['showClient', 'Show client'],
+                  ['showEngagementType', 'Show engagement type'],
+                  ['showEmptyDays', 'Show empty days'],
+                ] as const).map(([key, label]) => (
+                  <label key={key} className="reporting-display-option">
+                    <input
+                      type="checkbox"
+                      checked={reportingDisplayPresetDraft[key]}
+                      onChange={(event) =>
+                        setReportingDisplayPresetDraft((previous) => (
+                          previous ? { ...previous, [key]: event.target.checked } : previous
+                        ))
+                      }
+                    />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {reportingDisplayPresetDraftError ? (
+              <p className="mini-calendar-error">{reportingDisplayPresetDraftError}</p>
+            ) : null}
+
+            <footer className="reporting-display-preset-actions">
+              {reportingDisplayPresetModal.mode === 'edit' ? (
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={onDeleteReportingDisplayPreset}
+                  disabled={isReportingStateSaving || resolvedReportingState.displayPresets.length <= 1}
+                >
+                  <span className="control-icon trash-icon" aria-hidden="true" />
+                  Delete Preset
+                </button>
+              ) : <span />}
+              <div>
+                <button type="button" className="ghost" onClick={resetReportingDisplayPresetEditor}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={onSaveReportingDisplayPreset}
+                  disabled={isReportingStateSaving}
+                >
+                  <span className="control-icon save-icon" aria-hidden="true" />
+                  {isReportingStateSaving ? 'Saving...' : 'Save Preset'}
+                </button>
+              </div>
+            </footer>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
       {summaryLayoutModal && summaryLayoutDraft ? createPortal(
         <div
           className="summary-layout-editor-backdrop"
@@ -8719,22 +11832,34 @@ function App() {
         >
           <div
             ref={summaryLayoutModalRef}
-            className="summary-layout-editor-modal"
+            className="summary-layout-editor-modal is-reporting-export-editor"
             role="dialog"
             aria-modal="true"
-            aria-label={summaryLayoutModal.mode === 'create' ? 'Create summary layout preset' : 'Edit summary layout preset'}
+            aria-label={
+              summaryLayoutModal.mode === 'create'
+                ? 'Create export preset'
+                : 'Edit export preset'
+            }
             >
               <div className="summary-layout-editor-header">
               <div>
-                <h3>{summaryLayoutModal.mode === 'create' ? 'New Layout Preset' : 'Edit Layout Preset'}</h3>
-                <p>Reorder, remove, or insert columns. Row Total stays required, but you can move it.</p>
+                <h3>
+                  {summaryLayoutModal.mode === 'create'
+                    ? 'New Export Preset'
+                    : 'Edit Export Preset'}
+                </h3>
+                <p>
+                  Reorder, remove, or insert Excel columns. Row Total stays required, but you can move it.
+                </p>
               </div>
               <button
                 type="button"
-                className="ghost"
+                className="timeline-editor-close"
                 onClick={resetSummaryLayoutEditor}
+                aria-label="Close export preset editor"
+                title="Close"
               >
-                Close
+                <span className="control-icon close-icon" aria-hidden="true" />
               </button>
             </div>
 
@@ -8770,6 +11895,7 @@ function App() {
                   </button>
                   {summaryLayoutDraft.columns.map((column, columnIndex) => {
                     const previewColumn = buildSummaryViewColumn(column)
+                    const shouldWrapPreviewColumn = true
                     const isDragging = summaryLayoutDragState?.columnId === column.id
                     const isCommitReset = summaryLayoutDropCommitColumnIds.includes(column.id)
                     const activeTransformX = (
@@ -8785,9 +11911,9 @@ function App() {
                           ref={(node) => {
                             summaryLayoutColumnRefs.current[column.id] = node
                           }}
-                          className={`summary-layout-editor-column ${previewColumn.wraps ? 'wraps' : ''} ${previewColumn.kind === 'rowTotal' ? 'summary-layout-editor-column-required' : ''} ${isDragging ? 'dragging' : ''} ${isDisplaced ? 'displaced' : ''} ${isCommitReset ? 'commit-reset' : ''}`}
+                          className={`summary-layout-editor-column ${shouldWrapPreviewColumn ? 'wraps' : ''} ${previewColumn.kind === 'rowTotal' ? 'summary-layout-editor-column-required' : ''} ${isDragging ? 'dragging' : ''} ${isDisplaced ? 'displaced' : ''} ${isCommitReset ? 'commit-reset' : ''}`}
                           style={{
-                            width: previewColumn.width,
+                            width: SUMMARY_LAYOUT_DAY_COLUMN_WIDTH,
                             transform: buildSummaryLayoutColumnTransform(activeTransformX, isDragging),
                             zIndex: isDragging ? 5 : isDisplaced ? 2 : undefined,
                           }}
@@ -8814,7 +11940,7 @@ function App() {
                               <span className="summary-layout-editor-dots" aria-hidden="true" />
                             </button>
                           </div>
-                          <div className={`summary-layout-editor-cell summary-layout-editor-header-cell ${previewColumn.wraps ? 'wraps' : ''}`}>
+                          <div className={`summary-layout-editor-cell summary-layout-editor-header-cell ${shouldWrapPreviewColumn ? 'wraps' : ''}`}>
                             {column.kind === 'freeText' ? (
                               <input
                                 type="text"
@@ -8832,26 +11958,63 @@ function App() {
                           {(summaryLayoutPreviewRows.length > 0 ? summaryLayoutPreviewRows : [null, null, null]).map((row, previewRowIndex) => (
                             <div
                               key={`${column.id}-preview-${previewRowIndex}`}
-                              className={`summary-layout-editor-cell ${previewColumn.wraps ? 'wraps' : ''}`}
+                              className={`summary-layout-editor-cell ${shouldWrapPreviewColumn ? 'wraps' : ''}`}
                             >
-                              {row
-                                ? renderSummaryPreviewCell(
-                                  previewColumn,
-                                  row,
-                                  engagementById,
-                                  activityById,
-                                )
-                                : <span className="summary-layout-editor-placeholder">Preview</span>}
+                              {row ? (
+                                column.kind === 'freeText'
+                                  ? (() => {
+                                    const rowKey = buildSummaryFreeTextRowKey(row)
+                                    const freeTextValue = resolveSummaryFreeTextValue(column, rowKey)
+                                    const shouldShowRepeatAction = previewRowIndex === 0
+                                    const isRepeatSource = column.repeat
+
+                                    return (
+                                      <div
+                                        className={`summary-layout-free-text-editor-cell ${
+                                          shouldShowRepeatAction ? 'has-repeat-action' : ''
+                                        }`}
+                                      >
+                                        <input
+                                          type="text"
+                                          value={freeTextValue}
+                                          onChange={(event) => onUpdateSummaryLayoutFreeTextRowValue(
+                                            column.id,
+                                            rowKey,
+                                            event.target.value,
+                                          )}
+                                          placeholder="Blank"
+                                          aria-label={`${column.label} text for ${formatSummaryRowLabel(row)}`}
+                                        />
+                                        {shouldShowRepeatAction ? (
+                                          <button
+                                            type="button"
+                                            className={`summary-layout-free-text-repeat ${isRepeatSource ? 'active' : ''}`}
+                                            onClick={() => onToggleSummaryLayoutFreeTextRepeat(column.id, rowKey, freeTextValue)}
+                                            aria-pressed={isRepeatSource}
+                                            aria-label={
+                                              isRepeatSource
+                                                ? `Stop repeating ${column.label}`
+                                                : `Repeat ${column.label} from this row`
+                                            }
+                                            title={isRepeatSource ? 'Stop repeating' : 'Repeat this text'}
+                                          >
+                                            <span className="control-icon repeat-icon" aria-hidden="true" />
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                    )
+                                  })()
+                                  : renderSummaryPreviewCell(
+                                    previewColumn,
+                                    row,
+                                    engagementById,
+                                    activityById,
+                                  )
+                              ) : <span className="summary-layout-editor-placeholder">Preview</span>}
                             </div>
                           ))}
                           <div className="summary-layout-editor-cell summary-layout-editor-footer-cell">
-                            {renderSummaryPreviewFooter(
-                              previewColumn,
-                              weeklySummary,
-                              timelineTotalPreferences,
-                              timelineSeparateEngagementTypeTotals,
-                              shouldShowTimelineUncategorizedDailyTotal,
-                            )}
+                            {renderSummaryPreviewSimpleFooter(previewColumn, weeklySummary)}
                           </div>
                         </div>
                         <button
@@ -8869,34 +12032,33 @@ function App() {
                     )
                   })}
                 </div>
-
-                {summaryLayoutInsertionIndex !== null ? (
-                  <div className="summary-layout-picker">
-                    <div className="summary-layout-picker-header">
-                      <h4>Add Column</h4>
-                      <p>Select a hidden field, a hidden day, or add a new free-text column.</p>
-                    </div>
-                    <div className="summary-layout-picker-table" role="table" aria-label="Available summary columns">
-                      <div className="summary-layout-picker-head" role="row">
-                        <span role="columnheader">Column</span>
-                        <span role="columnheader">Description</span>
-                      </div>
-                      {buildSummaryLayoutInsertOptions(summaryLayoutDraft).map((option) => (
-                        <button
-                          key={option.key}
-                          type="button"
-                          className="summary-layout-picker-row"
-                          role="row"
-                          onClick={() => onInsertSummaryLayoutColumn(option.createColumn(), summaryLayoutInsertionIndex)}
-                        >
-                          <span role="cell">{option.label}</span>
-                          <span role="cell">{option.description}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
               </div>
+              {summaryLayoutInsertionIndex !== null ? (
+                <div className="summary-layout-picker">
+                  <div className="summary-layout-picker-header">
+                    <h4>Add Column</h4>
+                    <p>Select a hidden field, a hidden day, or add a new free-text column.</p>
+                  </div>
+                  <div className="summary-layout-picker-table" role="table" aria-label="Available summary columns">
+                    <div className="summary-layout-picker-head" role="row">
+                      <span role="columnheader">Column</span>
+                      <span role="columnheader">Description</span>
+                    </div>
+                    {buildSummaryLayoutInsertOptions(summaryLayoutDraft).map((option) => (
+                      <button
+                        key={option.key}
+                        type="button"
+                        className="summary-layout-picker-row"
+                        role="row"
+                        onClick={() => onInsertSummaryLayoutColumn(option.createColumn(), summaryLayoutInsertionIndex)}
+                      >
+                        <span role="cell">{option.label}</span>
+                        <span role="cell">{option.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="summary-layout-editor-actions">
@@ -8907,6 +12069,7 @@ function App() {
                   onClick={onDeleteSummaryLayoutPreset}
                   disabled={isSummaryLayoutSaving || resolvedSummaryLayoutState.presets.length <= 1}
                 >
+                  <span className="control-icon trash-icon" aria-hidden="true" />
                   Delete Preset
                 </button>
               ) : <span />}
@@ -8919,6 +12082,7 @@ function App() {
                   onClick={onSaveSummaryLayoutPreset}
                   disabled={isSummaryLayoutSaving}
                 >
+                  <span className="control-icon save-icon" aria-hidden="true" />
                   {isSummaryLayoutSaving ? 'Saving...' : 'Save Preset'}
                 </button>
               </div>
@@ -8947,10 +12111,12 @@ function App() {
               <h3>Notes</h3>
               <button
                 type="button"
-                className="ghost"
+                className="timeline-editor-close"
                 onClick={onCloseSummaryNotes}
+                aria-label="Close notes"
+                title="Close"
               >
-                Close
+                <span className="control-icon close-icon" aria-hidden="true" />
               </button>
             </div>
             <p className="summary-notes-context">
@@ -9130,6 +12296,67 @@ function buildEntryDraft(entry: TimelineEntry): EntryDraft {
     description: entry.description,
     startTime: minuteToTimeInput(entry.startMinute),
     ...endState,
+  }
+}
+
+function serializeEntryDraft(entryDraft: EntryDraft): string {
+  return JSON.stringify([
+    entryDraft.id,
+    entryDraft.date,
+    entryDraft.engagementId,
+    entryDraft.activityId,
+    entryDraft.description,
+    entryDraft.startTime,
+    entryDraft.endTime,
+    entryDraft.preserveEndOfDay,
+  ])
+}
+
+function buildEntryDraftSavePlan(entryDraft: EntryDraft): EntryDraftSavePlan {
+  if (entryDraft.date.trim().length === 0) {
+    return {
+      ok: false,
+      errorMessage: 'Date is required.',
+    }
+  }
+
+  if (entryDraft.startTime.trim().length === 0) {
+    return {
+      ok: false,
+      errorMessage: 'Start time is required.',
+    }
+  }
+
+  if (entryDraft.endTime.trim().length === 0) {
+    return {
+      ok: false,
+      errorMessage: 'End time is required.',
+    }
+  }
+
+  const startMinute = timeInputToMinute(entryDraft.startTime)
+  const endMinute = resolveEntryDraftEndMinute(entryDraft)
+  if (endMinute <= startMinute) {
+    return {
+      ok: false,
+      errorMessage: 'End time must be later than start time.',
+    }
+  }
+
+  const nextDraftEndState = buildEntryDraftEndState(endMinute)
+  const normalizedDraft: EntryDraft = {
+    ...entryDraft,
+    startTime: minuteToTimeInput(startMinute),
+    endTime: nextDraftEndState.endTime,
+    preserveEndOfDay: nextDraftEndState.preserveEndOfDay,
+  }
+
+  return {
+    ok: true,
+    startMinute,
+    endMinute,
+    normalizedDraft,
+    key: serializeEntryDraft(normalizedDraft),
   }
 }
 
@@ -9554,6 +12781,17 @@ function formatSubmissionQueueTimestamp(timestampMs: number): string {
   return formatSubmissionQueueOutcomeTimestamp(new Date(timestampMs))
 }
 
+function formatSubmissionQueueDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000))
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`
+  }
+
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+}
+
 function formatHistorySourceLabel(value: string): string {
   if (value === 'manual') {
     return 'Manual'
@@ -9757,20 +12995,41 @@ function buildWeekViewDays(anchorDate: string): TimelineWeekView['days'] {
   })
 }
 
-function formatTimelineWeekRange(startDate: string, endDate: string): string {
+function formatTimelineWeekRangeLabel(startDate: string, endDate: string): TimelineWeekRangeLabel {
   const startValue = new Date(`${startDate}T00:00:00`)
   const endValue = new Date(`${endDate}T00:00:00`)
-  const startLabel = new Intl.DateTimeFormat('en-US', {
+  const startMonthDay = new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
   }).format(startValue)
-  const endLabel = new Intl.DateTimeFormat('en-US', {
+  const endMonthDay = new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
+  }).format(endValue)
+  const startYear = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+  }).format(startValue)
+  const endYear = new Intl.DateTimeFormat('en-US', {
     year: 'numeric',
   }).format(endValue)
 
-  return `${startLabel} - ${endLabel}`
+  return {
+    startMonthDay,
+    startYear,
+    endMonthDay,
+    endYear,
+    isSameYear: startYear === endYear,
+  }
+}
+
+function formatTimelineWeekRange(startDate: string, endDate: string): string {
+  const label = formatTimelineWeekRangeLabel(startDate, endDate)
+
+  if (label.isSameYear) {
+    return `${label.startMonthDay} - ${label.endMonthDay}, ${label.endYear}`
+  }
+
+  return `${label.startMonthDay}, ${label.startYear} - ${label.endMonthDay}, ${label.endYear}`
 }
 
 function formatWeekTimelineDayLabel(date: string): string {
@@ -9950,6 +13209,18 @@ function createTimelineTotalSegment(
   return {
     key,
     label: `${formatTimelineHoursCompact(minutes)} ${label}`,
+  }
+}
+
+function splitTimelineTotalSegmentLabel(label: string): { amount: string; label: string } {
+  const [amount = label, ...labelParts] = label.split(' ')
+  const segmentLabel = labelParts.join(' ')
+
+  return {
+    amount,
+    label: segmentLabel
+      ? segmentLabel.charAt(0).toUpperCase() + segmentLabel.slice(1)
+      : '',
   }
 }
 
@@ -10724,10 +13995,6 @@ function clampTimelineContextMenuPosition(
   }
 }
 
-function buildSummaryViewColumns(preset: SummaryLayoutPreset | undefined): SummaryLayoutViewColumn[] {
-  return (preset?.columns ?? []).map((column) => buildSummaryViewColumn(column))
-}
-
 function buildSummaryViewColumn(column: SummaryLayoutColumn): SummaryLayoutViewColumn {
   if (column.kind === 'field') {
     const option = getSummaryLayoutFieldOption(column.fieldKey)
@@ -10771,29 +14038,112 @@ function buildSummaryViewColumn(column: SummaryLayoutColumn): SummaryLayoutViewC
   }
 }
 
-function buildSummaryTableCellClassName(
-  column: SummaryLayoutViewColumn,
-  row: TimelineWeeklySummary['rows'][number],
+function formatReportingExportDayHeader(
+  weeklySummary: TimelineWeeklySummary | null,
+  dayIndex: number,
 ): string {
-  const classNames: string[] = []
+  const dayName = SUMMARY_DAY_NAMES[dayIndex] ?? 'Day'
+  const date = weeklySummary?.days[dayIndex]?.date ?? weeklySummary?.weekStartDate
+
+  return date ? `${dayName} (${formatMonthDay(date)})` : dayName
+}
+
+function buildReportingExportPreviewColumns(
+  preset: SummaryLayoutPreset | undefined,
+  weeklySummary: TimelineWeeklySummary | null,
+  sheet: ReportingExportPreviewSheet,
+): ReportingExportPreviewColumn[] {
+  const columns: ReportingExportPreviewColumn[] = []
+  const presetColumns = preset?.columns ?? []
+  let columnIndex = 0
+
+  while (columnIndex < presetColumns.length) {
+    const column = presetColumns[columnIndex]
+
+    if (column.kind === 'field') {
+      const option = getSummaryLayoutFieldOption(column.fieldKey)
+      columns.push({
+        kind: 'field',
+        id: column.id,
+        header: option?.label ?? 'Column',
+        fieldKey: column.fieldKey,
+      })
+    } else if (column.kind === 'day') {
+      const dayHeader = formatReportingExportDayHeader(weeklySummary, column.dayIndex)
+
+      if (sheet === 'weeklyHours') {
+        columns.push({
+          kind: 'dayHours',
+          id: column.id,
+          header: dayHeader,
+          dayIndex: column.dayIndex,
+        })
+      } else {
+        columns.push({
+          kind: 'dayHours',
+          id: `${column.id}-hours`,
+          header: `${dayHeader} Hours`,
+          dayIndex: column.dayIndex,
+        })
+        columns.push({
+          kind: 'dayNotes',
+          id: `${column.id}-notes`,
+          header: 'Notes',
+          dayIndex: column.dayIndex,
+        })
+      }
+    } else if (column.kind === 'freeText') {
+      columns.push({
+        kind: 'freeText',
+        id: column.id,
+        header: column.label,
+        rowValues: column.rowValues,
+        repeat: column.repeat,
+        repeatValue: column.repeatValue,
+        repeatRowKey: column.repeatRowKey,
+      })
+    } else {
+      columns.push({
+        kind: 'rowTotal',
+        id: column.id,
+        header: 'Row Total',
+      })
+    }
+
+    columnIndex += 1
+  }
+
+  return columns
+}
+
+function getReportingExportPreviewColumnWidth(column: ReportingExportPreviewColumn): string {
+  const headerWidth = (minRem: number, maxRem: number): string => {
+    const widthRem = Math.min(maxRem, Math.max(minRem, column.header.length * 0.42 + 1.2))
+    const width = `${widthRem.toFixed(2)}rem`
+    return `minmax(${width}, ${width})`
+  }
+
+  if (column.kind === 'dayNotes') {
+    return 'minmax(3.4rem, 4.4rem)'
+  }
+
+  if (column.kind === 'dayHours') {
+    return 'minmax(4.6rem, 5.4rem)'
+  }
 
   if (column.kind === 'rowTotal') {
-    classNames.push('summary-row-total')
+    return headerWidth(4.8, 5.8)
   }
 
-  if (
-    column.kind === 'field'
-    && (column.fieldKey === 'engagementCode' || column.fieldKey === 'activityCode')
-    && row.isUncategorized
-  ) {
-    classNames.push('summary-uncategorized')
+  if (column.kind === 'freeText') {
+    return headerWidth(4.5, 8.5)
   }
 
-  if (column.wraps) {
-    classNames.push('summary-cell-wrap')
+  if (column.fieldKey) {
+    return headerWidth(4.5, 8.25)
   }
 
-  return classNames.join(' ')
+  return headerWidth(4.5, 8.25)
 }
 
 function resolveSummaryFieldValue(
@@ -10829,48 +14179,126 @@ function resolveSummaryFieldValue(
   }
 }
 
-function renderSummaryTableCell(
-  column: SummaryLayoutViewColumn,
-  row: TimelineWeeklySummary['rows'][number],
-  rowIndex: number,
-  engagementById: Map<string, Engagement>,
-  activityById: Map<string, Activity>,
-  onOpenSummaryNotes: (rowIndex: number, dayIndex: number) => void,
-) {
-  if (column.kind === 'day' && column.dayIndex !== undefined) {
-    const cell = row.cells[column.dayIndex]
-    if (!cell || cell.totalMinutes <= 0) {
-      return <span className="summary-zero">-</span>
+function formatReportingEntityLabel(
+  name: string | null | undefined,
+  code: string | null | undefined,
+  showCodes: boolean,
+  fallback = 'Uncategorized',
+): string {
+  return showCodes
+    ? formatEntityDisplayLabel(name, code, fallback)
+    : formatEntityPrimaryLabel(name, code, fallback)
+}
+
+function formatSummaryRowLabel(row: TimelineWeeklySummary['rows'][number]): string {
+  if (row.isUncategorized) {
+    return row.engagementId
+      ? `${row.engagementName} uncategorized`
+      : 'Uncategorized'
+  }
+
+  return formatEntityDisplayLabel(row.activityName, row.activityCode)
+}
+
+function buildSummaryFreeTextRowKey(row: TimelineWeeklySummary['rows'][number]): string {
+  const activityId = normalizeDisplayText(row.activityId)
+  if (activityId) {
+    return `activity:${activityId}`
+  }
+
+  if (row.isUncategorized) {
+    const engagementId = normalizeDisplayText(row.engagementId)
+    if (engagementId) {
+      return `engagement:${engagementId}:uncategorized`
     }
-
-    return (
-      <div className="summary-cell-value-wrap">
-        <span>{formatMinutesAsHours(cell.totalMinutes)}</span>
-        <button
-          type="button"
-          className="ghost summary-notes-button"
-          onClick={() => onOpenSummaryNotes(rowIndex, column.dayIndex ?? 0)}
-        >
-          Notes
-        </button>
-      </div>
-    )
   }
 
-  if (column.kind === 'rowTotal') {
-    return formatMinutesAsHours(row.rowTotalMinutes)
-  }
+  return 'uncategorized'
+}
 
-  if (column.kind === 'freeText') {
-    return <span className="summary-free-text-cell" aria-hidden="true" />
-  }
+function resolveSummaryFreeTextValue(
+  column: Extract<SummaryLayoutColumn, { kind: 'freeText' }>,
+  rowKey: string,
+): string {
+  return column.repeat ? column.repeatValue : column.rowValues?.[rowKey] ?? ''
+}
 
-  return resolveSummaryFieldValue(
-    column.fieldKey ?? 'engagementName',
-    row,
-    engagementById,
-    activityById,
+function formatEngagementTypeLabel(value: EngagementType): string {
+  return value === 'external' ? 'External' : 'Internal'
+}
+
+function formatReportingRowPrimary(
+  row: TimelineWeeklySummary['rows'][number],
+  preset: ReportingDisplayPreset | undefined,
+): string {
+  const showCodes = preset?.showCodes ?? true
+  const rowLabelMode = preset?.rowLabelMode ?? 'combined'
+  const engagementLabel = formatReportingEntityLabel(
+    row.engagementName,
+    row.engagementCode,
+    showCodes,
+    'Uncategorized',
   )
+  const activityLabel = formatReportingEntityLabel(
+    row.activityName,
+    row.activityCode,
+    showCodes,
+    'Uncategorized',
+  )
+
+  if (rowLabelMode === 'activityOnly') {
+    return activityLabel
+  }
+
+  if (rowLabelMode === 'separate') {
+    return engagementLabel
+  }
+
+  if (engagementLabel === activityLabel) {
+    return activityLabel
+  }
+
+  return `${engagementLabel} / ${activityLabel}`
+}
+
+function formatReportingRowSecondary(
+  row: TimelineWeeklySummary['rows'][number],
+  preset: ReportingDisplayPreset | undefined,
+): string {
+  const showCodes = preset?.showCodes ?? true
+  const rowLabelMode = preset?.rowLabelMode ?? 'combined'
+
+  if (rowLabelMode === 'separate') {
+    return formatReportingEntityLabel(row.activityName, row.activityCode, showCodes, 'Uncategorized')
+  }
+
+  if (rowLabelMode === 'activityOnly') {
+    return formatReportingEntityLabel(row.engagementName, row.engagementCode, showCodes, 'Uncategorized')
+  }
+
+  return normalizeDisplayText(row.clientName) ?? (
+    row.engagementType ? formatEngagementTypeLabel(row.engagementType) : 'Weekly activity'
+  )
+}
+
+function formatReportingRowMeta(
+  row: TimelineWeeklySummary['rows'][number],
+  preset: ReportingDisplayPreset | undefined,
+): string[] {
+  const values: string[] = []
+
+  if (preset?.showClient) {
+    const client = normalizeDisplayText(row.clientName)
+    if (client) {
+      values.push(client)
+    }
+  }
+
+  if (preset?.showEngagementType && row.engagementType) {
+    values.push(formatEngagementTypeLabel(row.engagementType))
+  }
+
+  return values
 }
 
 function renderSummaryPreviewCell(
@@ -10900,107 +14328,87 @@ function renderSummaryPreviewCell(
   )
 }
 
-function renderSummaryPreviewFooter(
-  column: SummaryLayoutViewColumn,
-  weeklySummary: TimelineWeeklySummary | null,
-  timelineTotalPreferences: TimelineTotalPreferences,
-  separateEngagementTypeTotals: boolean,
-  showUncategorizedTotal: boolean,
+function formatReportingExportPreviewHours(minutes: number): string {
+  return (minutes / 60)
+    .toFixed(2)
+    .replace(/(?:\.0+|(\.\d*?)0+)$/, '$1')
+}
+
+function renderReportingExportPreviewCell(
+  column: ReportingExportPreviewColumn,
+  row: TimelineWeeklySummary['rows'][number],
+  engagementById: Map<string, Engagement>,
+  activityById: Map<string, Activity>,
 ) {
+  if (column.kind === 'dayHours' && column.dayIndex !== undefined) {
+    const totalMinutes = row.cells[column.dayIndex]?.totalMinutes ?? 0
+    return totalMinutes > 0 ? formatReportingExportPreviewHours(totalMinutes) : '-'
+  }
+
+  if (column.kind === 'dayNotes' && column.dayIndex !== undefined) {
+    return ''
+  }
+
+  if (column.kind === 'rowTotal') {
+    return formatReportingExportPreviewHours(row.rowTotalMinutes)
+  }
+
+  if (column.kind === 'freeText') {
+    const rowKey = buildSummaryFreeTextRowKey(row)
+    const value = column.repeat ? column.repeatValue ?? '' : column.rowValues?.[rowKey] ?? ''
+    return value || <span className="summary-layout-editor-placeholder">Blank</span>
+  }
+
+  return resolveSummaryFieldValue(
+    column.fieldKey ?? 'engagementName',
+    row,
+    engagementById,
+    activityById,
+  )
+}
+
+function renderReportingExportPreviewFooter(
+  column: ReportingExportPreviewColumn,
+  weeklySummary: TimelineWeeklySummary | null,
+  isFooterLabelColumn: boolean,
+): string {
   if (!weeklySummary) {
     return ''
   }
 
-  if (column.kind === 'day' && column.dayIndex !== undefined) {
-    return renderSummaryTotalBreakdown(
-      weeklySummary.dayTotalBreakdowns[column.dayIndex],
-      timelineTotalPreferences,
-      separateEngagementTypeTotals,
-      showUncategorizedTotal,
-    )
+  if (column.kind === 'dayHours' && column.dayIndex !== undefined) {
+    const totalMinutes = weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0
+    return formatReportingExportPreviewHours(totalMinutes)
   }
 
   if (column.kind === 'rowTotal') {
-    return renderSummaryTotalBreakdown(
-      weeklySummary.weekTotalBreakdown,
-      timelineTotalPreferences,
-      separateEngagementTypeTotals,
-      showUncategorizedTotal,
-    )
+    return formatReportingExportPreviewHours(weeklySummary.weekTotalMinutes)
+  }
+
+  if (isFooterLabelColumn) {
+    return 'Day Totals'
   }
 
   return ''
 }
 
-function renderSummaryFooterCell(
+function renderSummaryPreviewSimpleFooter(
   column: SummaryLayoutViewColumn,
-  columnIndex: number,
-  summaryFooterLabelIndex: number,
-  weeklySummary: TimelineWeeklySummary,
-  timelineTotalPreferences: TimelineTotalPreferences,
-  separateEngagementTypeTotals: boolean,
-  showUncategorizedTotal: boolean,
-) {
+  weeklySummary: TimelineWeeklySummary | null,
+): string {
+  if (!weeklySummary) {
+    return ''
+  }
+
   if (column.kind === 'day' && column.dayIndex !== undefined) {
-    return renderSummaryTotalBreakdown(
-      weeklySummary.dayTotalBreakdowns[column.dayIndex],
-      timelineTotalPreferences,
-      separateEngagementTypeTotals,
-      showUncategorizedTotal,
-    )
+    return formatReportingExportPreviewHours(weeklySummary.dayTotalMinutes[column.dayIndex] ?? 0)
   }
 
   if (column.kind === 'rowTotal') {
-    return renderSummaryTotalBreakdown(
-      weeklySummary.weekTotalBreakdown,
-      timelineTotalPreferences,
-      separateEngagementTypeTotals,
-      showUncategorizedTotal,
-    )
+    return formatReportingExportPreviewHours(weeklySummary.weekTotalMinutes)
   }
 
-  return (
-    summaryFooterLabelIndex >= 0
-    && columnIndex === summaryFooterLabelIndex
-    && column.kind !== 'day'
-  ) ? 'Day Totals' : ''
-}
-
-function renderSummaryTotalBreakdown(
-  breakdown: TimelineTotalBreakdown | undefined,
-  timelineTotalPreferences: TimelineTotalPreferences,
-  separateEngagementTypeTotals: boolean,
-  showUncategorizedTotal: boolean,
-) {
-  if (!breakdown) {
-    return formatMinutesAsHours(0)
-  }
-
-  const displayedBreakdown = finalizeTimelineTotalBreakdown(breakdown, timelineTotalPreferences)
-
-  const segments = buildTimelineTotalDisplaySegments(displayedBreakdown, {
-    includePrimaryTotal: false,
-    separateEngagementTypeTotals,
-    showUncategorizedTotal,
-  })
-
-  return (
-    <span className="summary-total-breakdown">
-      <span>{formatMinutesAsHours(displayedBreakdown.primaryMinutes)}</span>
-      {segments.length > 0 ? (
-        <span className="summary-total-breakdown-detail">
-          {segments.map((segment, segmentIndex) => (
-            <Fragment key={segment.key}>
-              {segmentIndex > 0 ? (
-                <span className="summary-total-separator" aria-hidden="true">•</span>
-              ) : null}
-              <span>{segment.label}</span>
-            </Fragment>
-          ))}
-        </span>
-      ) : null}
-    </span>
-  )
+  return ''
 }
 
 function buildSummaryLayoutInsertOptions(preset: SummaryLayoutPreset): Array<{

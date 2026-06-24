@@ -469,12 +469,6 @@ pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> App
             "engagement name is required".to_string(),
         ));
     }
-    if input.describe_when_to_use.trim().is_empty() {
-        return Err(AppError::InvalidInput(
-            "engagement usage guidance is required".to_string(),
-        ));
-    }
-
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let code = normalize_optional_code(input.code);
@@ -536,12 +530,6 @@ pub fn upsert_activity(conn: &Connection, input: ActivityUpsertInput) -> AppResu
             "activity engagement and name are required".to_string(),
         ));
     }
-    if input.describe_when_to_use.trim().is_empty() {
-        return Err(AppError::InvalidInput(
-            "activity usage guidance is required".to_string(),
-        ));
-    }
-
     let now = current_unix_timestamp();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let code = normalize_optional_code(input.code);
@@ -1966,12 +1954,10 @@ fn db_value_to_engagement_type(value: Option<&str>, code: Option<&str>) -> Engag
     }
 }
 
-fn normalize_usage_description(raw_value: String) -> AppResult<String> {
+fn normalize_usage_description(raw_value: String) -> AppResult<Option<String>> {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
-        return Err(AppError::InvalidInput(
-            "usage guidance is required".to_string(),
-        ));
+        return Ok(None);
     }
 
     if trimmed.chars().count() > MAX_USAGE_DESCRIPTION_LENGTH {
@@ -1981,7 +1967,7 @@ fn normalize_usage_description(raw_value: String) -> AppResult<String> {
         )));
     }
 
-    Ok(trimmed.to_string())
+    Ok(Some(trimmed.to_string()))
 }
 
 fn parse_tags(tags_json: &str) -> Option<Vec<String>> {
@@ -2125,6 +2111,56 @@ mod tests {
         assert!(saved.code.is_none());
         assert_eq!(saved.name, "No Code Engagement");
         assert_eq!(saved.engagement_type, EngagementType::External);
+    }
+
+    #[test]
+    fn code_upserts_allow_empty_usage_guidance() {
+        let connection = test_connection();
+
+        let engagement_id = upsert_engagement(
+            &connection,
+            EngagementUpsertInput {
+                id: None,
+                code: Some("E-Optional".to_string()),
+                name: "Optional Guidance Engagement".to_string(),
+                client: None,
+                engagement_type: Some(EngagementType::External),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "   ".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("engagement should save with blank usage guidance");
+
+        let activity_id = upsert_activity(
+            &connection,
+            ActivityUpsertInput {
+                id: None,
+                engagement_id: engagement_id.clone(),
+                code: Some("OPT".to_string()),
+                name: "Optional Guidance Activity".to_string(),
+                color_hex: None,
+                tags: vec![],
+                describe_when_to_use: "".to_string(),
+                is_active: Some(true),
+            },
+        )
+        .expect("activity should save with blank usage guidance");
+
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        let saved = engagements
+            .into_iter()
+            .find(|engagement| engagement.id == engagement_id)
+            .expect("saved engagement should exist");
+        let saved_activity = saved
+            .activities
+            .iter()
+            .find(|activity| activity.id == activity_id)
+            .expect("saved activity should exist");
+
+        assert!(saved.describe_when_to_use.is_none());
+        assert!(saved_activity.describe_when_to_use.is_none());
     }
 
     #[test]
@@ -2273,7 +2309,7 @@ mod tests {
     fn quick_add_suggestions_count_usage_across_entry_sources() {
         let connection = test_connection();
         let engagement_id =
-            create_test_engagement(&connection, "QA-COUNT", "Quick Add Count", true);
+            create_test_engagement(&connection, "QA-COUNT", "Quick Entry Count", true);
         let activity_id = create_test_activity(
             &connection,
             &engagement_id,
@@ -2411,7 +2447,7 @@ mod tests {
     #[test]
     fn quick_add_suggestions_sort_by_usage_count_then_recent_use() {
         let connection = test_connection();
-        let engagement_id = create_test_engagement(&connection, "QA-SORT", "Quick Add Sort", true);
+        let engagement_id = create_test_engagement(&connection, "QA-SORT", "Quick Entry Sort", true);
         let high_count_activity_id =
             create_test_activity(&connection, &engagement_id, "HIGH", "High Count", true);
         let recent_activity_id =
@@ -2498,7 +2534,7 @@ mod tests {
     #[test]
     fn quick_add_suggestions_include_zero_usage_active_activity_fallbacks() {
         let connection = test_connection();
-        let engagement_id = create_test_engagement(&connection, "QA-FILL", "Quick Add Fill", true);
+        let engagement_id = create_test_engagement(&connection, "QA-FILL", "Quick Entry Fill", true);
         let used_activity_id =
             create_test_activity(&connection, &engagement_id, "USED", "Used Activity", true);
         let unused_activity_id = create_test_activity(

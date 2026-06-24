@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +200,21 @@ pub struct SettingsSetCalendarBulkPreferencesInput {
     pub calendar_bulk_ignore_all_day_events: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddPreferences {
+    pub engagement_order: Vec<String>,
+    pub hidden_engagement_ids: Vec<String>,
+    pub activity_order: HashMap<String, Vec<String>>,
+    pub hidden_activity_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSetQuickAddPreferencesInput {
+    pub quick_add_preferences: QuickAddPreferences,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsStatus {
@@ -218,6 +235,7 @@ pub struct SettingsStatus {
     pub timeline_separate_engagement_type_totals: bool,
     pub calendar_bulk_ignored_keywords: Vec<String>,
     pub calendar_bulk_ignore_all_day_events: bool,
+    pub quick_add_preferences: QuickAddPreferences,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -676,6 +694,14 @@ pub enum SummaryLayoutColumn {
     FreeText {
         id: String,
         label: String,
+        #[serde(rename = "rowValues", alias = "row_values", default)]
+        row_values: HashMap<String, String>,
+        #[serde(default)]
+        repeat: bool,
+        #[serde(rename = "repeatValue", alias = "repeat_value", default)]
+        repeat_value: String,
+        #[serde(rename = "repeatRowKey", alias = "repeat_row_key", default)]
+        repeat_row_key: Option<String>,
     },
     RowTotal {
         id: String,
@@ -696,6 +722,51 @@ pub struct SummaryLayoutState {
     pub version: i64,
     pub selected_preset_id: String,
     pub presets: Vec<SummaryLayoutPreset>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReportingViewMode {
+    Table,
+    ActivityDetail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReportingDisplayDensity {
+    Compact,
+    Comfortable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReportingRowLabelMode {
+    Combined,
+    Separate,
+    ActivityOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportingDisplayPreset {
+    pub id: String,
+    pub name: String,
+    pub density: ReportingDisplayDensity,
+    pub row_label_mode: ReportingRowLabelMode,
+    pub show_codes: bool,
+    pub show_client: bool,
+    pub show_engagement_type: bool,
+    pub show_empty_days: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportingState {
+    pub version: i64,
+    pub selected_view_mode: ReportingViewMode,
+    pub selected_display_preset_id: String,
+    pub selected_export_preset_id: Option<String>,
+    pub display_presets: Vec<ReportingDisplayPreset>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
