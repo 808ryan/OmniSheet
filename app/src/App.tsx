@@ -1003,6 +1003,8 @@ function ResponsiveCodeTagList({ tags, itemKeyPrefix }: ResponsiveCodeTagListPro
 function App() {
   const tauriRuntime = isTauriRuntime()
   const appRuntime = isAppRuntime()
+  const credentialStoreName = formatCredentialStoreName(detectVoicePlatform())
+  const credentialHelpText = 'An API key is required for LLM based timesheet entries.'
   const [timelineClock, setTimelineClock] = useState(() => new Date())
   const todayDate = useMemo(() => formatDate(timelineClock), [timelineClock])
 
@@ -1015,6 +1017,18 @@ function App() {
 
   const [settingsStatus, setSettingsStatus] = useState<SettingsStatus | null>(null)
   const [openAiKey, setOpenAiKey] = useState('')
+  const credentialStatusTone =
+    settingsStatus === null
+      ? 'is-checking'
+      : settingsStatus.hasOpenAiKey
+        ? 'is-configured'
+        : 'is-missing'
+  const credentialStatusLabel =
+    settingsStatus === null
+      ? 'Checking key status'
+      : settingsStatus.hasOpenAiKey
+        ? 'Key configured'
+        : 'Key not configured'
   const [selectedOpenAiModelDraft, setSelectedOpenAiModelDraft] =
     useState<OpenAiModelId>(DEFAULT_OPENAI_MODEL)
   const [selectedCalendarBulkModelDraft, setSelectedCalendarBulkModelDraft] =
@@ -6324,14 +6338,16 @@ function App() {
       setSelectedTranscriptionModelDraft(status.selectedTranscriptionModel)
 
       if (!status.hasOpenAiKey) {
+        const keySaveFailureReason =
+          status.lastError ?? `${credentialStoreName} reported ${status.storageHealth}.`
         throw new Error(
-          `Key save verification failed. Storage health: ${status.storageHealth}. ${status.lastError ?? ''}`.trim(),
+          `Key save verification failed. ${keySaveFailureReason}`.trim(),
         )
       }
 
       if (status.statusLevel === 'warning') {
         setSuccessMessage(
-          'OpenAI API key saved for this app session only because OS keyring is unavailable.',
+          `OpenAI API key saved for this app session only because ${credentialStoreName} is unavailable.`,
         )
       } else {
         setSuccessMessage('OpenAI API key saved securely.')
@@ -10785,24 +10801,41 @@ function App() {
                 <div className="settings-card-header">
                   <h3>Credentials</h3>
                 </div>
-                <form className="settings-preference-row" onSubmit={onSaveApiKey}>
-                  <label htmlFor="settings-openai-key">OpenAI API Key</label>
-                  <div className="settings-control-group">
-                    <input
-                      id="settings-openai-key"
-                      type="password"
-                      value={openAiKey}
-                      onChange={(event) => setOpenAiKey(event.target.value)}
-                      placeholder="sk-..."
-                      required
-                    />
-                    <button
-                      type="submit"
-                      className="settings-save-button button-soft-primary"
-                      disabled={isBusy || openAiKey.trim().length === 0}
+                <form className="settings-preference-row settings-credential-row" onSubmit={onSaveApiKey}>
+                  <label htmlFor="settings-openai-key">
+                    OpenAI API Key
+                    <span className="field-helper">{credentialHelpText}</span>
+                  </label>
+                  <div className="settings-credential-stack">
+                    <div className="settings-control-group">
+                      <input
+                        id="settings-openai-key"
+                        type="password"
+                        value={openAiKey}
+                        onChange={(event) => setOpenAiKey(event.target.value)}
+                        placeholder="sk-..."
+                        required
+                      />
+                      <button
+                        type="submit"
+                        className="settings-save-button button-soft-primary"
+                        disabled={isBusy || openAiKey.trim().length === 0}
+                      >
+                        Save Key
+                      </button>
+                    </div>
+                    <div
+                      className={`settings-credential-status ${credentialStatusTone}`}
+                      aria-live="polite"
                     >
-                      Save Key
-                    </button>
+                      <span className="settings-credential-status-mark" aria-hidden="true" />
+                      <span>{credentialStatusLabel}</span>
+                    </div>
+                    {settingsStatus?.lastError ? (
+                      <p className={`settings-alert alert ${settingsStatus.statusLevel === 'error' ? 'error' : 'warning'}`}>
+                        Last key status: {settingsStatus.lastError}
+                      </p>
+                    ) : null}
                   </div>
                 </form>
               </section>
@@ -11081,77 +11114,7 @@ function App() {
                 </div>
               </section>
 
-              <section className="settings-card">
-                <div className="settings-card-header">
-                  <h3>Status</h3>
-                </div>
-                <div className="settings-status-grid">
-                  <div className="settings-status-item">
-                    <span>Key configured</span>
-                    <strong
-                      className={`settings-status-pill ${
-                        settingsStatus?.hasOpenAiKey ? 'is-success' : 'is-warning'
-                      }`}
-                    >
-                      {settingsStatus?.hasOpenAiKey ? 'Yes' : 'No'}
-                    </strong>
-                  </div>
-                  <div className="settings-status-item">
-                    <span>Interpretation</span>
-                    <strong>
-                      {settingsStatus
-                        ? settingsStatus.availableOpenAiModels.find(
-                            (model) => model.id === settingsStatus.selectedOpenAiModel,
-                          )?.label ?? 'unknown'
-                        : 'unknown'}
-                    </strong>
-                  </div>
-                  <div className="settings-status-item">
-                    <span>Calendar Bulk Add</span>
-                    <strong>
-                      {settingsStatus
-                        ? settingsStatus.availableOpenAiModels.find(
-                            (model) => model.id === settingsStatus.selectedCalendarBulkModel,
-                          )?.label ?? 'unknown'
-                        : 'unknown'}
-                    </strong>
-                  </div>
-                  <div className="settings-status-item">
-                    <span>Speech-to-Text</span>
-                    <strong>
-                      {settingsStatus
-                        ? settingsStatus.availableTranscriptionModels.find(
-                            (model) => model.id === settingsStatus.selectedTranscriptionModel,
-                          )?.label ?? 'unknown'
-                        : 'unknown'}
-                    </strong>
-                  </div>
-                  <div className="settings-status-item">
-                    <span>Storage health</span>
-                    <strong
-                      className={`settings-status-pill ${
-                        settingsStatus?.statusLevel === 'error'
-                          ? 'is-danger'
-                          : settingsStatus?.statusLevel === 'warning'
-                            ? 'is-warning'
-                            : 'is-success'
-                      }`}
-                    >
-                      {settingsStatus?.storageHealth ?? 'unknown'}
-                    </strong>
-                  </div>
-                  <div className="settings-status-item">
-                    <span>Key source</span>
-                    <strong>{formatKeySource(settingsStatus?.keySource)}</strong>
-                  </div>
-                </div>
-              </section>
             </div>
-            {settingsStatus?.lastError ? (
-              <p className={`settings-alert alert ${settingsStatus?.statusLevel === 'error' ? 'error' : 'warning'}`}>
-                Last key status: {settingsStatus.lastError}
-              </p>
-            ) : null}
           </section>
         ) : null}
 
@@ -12719,6 +12682,18 @@ function detectVoicePlatform(): VoicePlatform {
   return 'unknown'
 }
 
+function formatCredentialStoreName(platform: VoicePlatform): string {
+  if (platform === 'macos') {
+    return 'Keychain'
+  }
+
+  if (platform === 'windows') {
+    return 'Credential Manager'
+  }
+
+  return 'the system credential store'
+}
+
 function getVoiceErrorName(error: unknown): string | null {
   if (error instanceof Error && typeof error.name === 'string' && error.name.length > 0) {
     return error.name
@@ -12856,22 +12831,6 @@ function formatHistoryEntryTitle(entry: TimelineEntry): string {
 
 function formatHistoryConfidence(confidence: number): string {
   return `${Math.round(confidence * 100)}%`
-}
-
-function formatKeySource(value: SettingsStatus['keySource'] | undefined): string {
-  if (value === 'keyring') {
-    return 'OS keyring'
-  }
-
-  if (value === 'session_cache') {
-    return 'In-memory session cache'
-  }
-
-  if (value === 'none') {
-    return 'None'
-  }
-
-  return 'unknown'
 }
 
 function extractErrorMessage(error: unknown): string {
