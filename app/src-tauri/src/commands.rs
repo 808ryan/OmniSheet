@@ -25,8 +25,7 @@ use crate::models::{
     MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
     QuickAddPreferences, QuickAddSuggestionInput, QuickAddSuggestionResult,
     ReportingDisplayDensity, ReportingDisplayPreset, ReportingRowLabelMode, ReportingState,
-    ReportingViewMode,
-    SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
+    ReportingViewMode, SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
     SettingsSetOpenAiModelInput, SettingsSetQuickAddPreferencesInput,
     SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
     StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
@@ -47,6 +46,7 @@ const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
 const GLOBAL_ACTIVITY_FALLBACK_MIN_SCORE: f64 = 2.5;
 const GLOBAL_ACTIVITY_FALLBACK_MIN_MARGIN: f64 = 0.75;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
+const APP_SETTING_OPENAI_KEY_CONFIGURED: &str = "openai_key_configured";
 const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
 const APP_SETTING_CALENDAR_BULK_OPENAI_MODEL: &str = "calendar_bulk_openai_model";
 const APP_SETTING_TRANSCRIPTION_MODEL: &str = "openai_transcription_model";
@@ -186,6 +186,23 @@ fn read_saved_transcription_model(
 ) -> AppResult<(TranscriptionModelId, Option<String>)> {
     let saved_value = db::get_app_setting(connection, APP_SETTING_TRANSCRIPTION_MODEL)?;
     Ok(resolve_saved_transcription_model_value(saved_value))
+}
+
+fn read_saved_openai_key_configured_marker(connection: &Connection) -> AppResult<Option<bool>> {
+    let saved_value = db::get_app_setting(connection, APP_SETTING_OPENAI_KEY_CONFIGURED)?;
+    Ok(saved_value.map(|value| resolve_saved_bool_setting_value(Some(value), false)))
+}
+
+fn read_saved_openai_key_configured(connection: &Connection) -> AppResult<bool> {
+    Ok(read_saved_openai_key_configured_marker(connection)?.unwrap_or(false))
+}
+
+fn write_openai_key_configured(connection: &Connection, value: bool) -> AppResult<()> {
+    db::upsert_app_setting(
+        connection,
+        APP_SETTING_OPENAI_KEY_CONFIGURED,
+        bool_app_setting_value(value),
+    )
 }
 
 fn bool_app_setting_value(value: bool) -> &'static str {
@@ -2052,34 +2069,59 @@ fn cached_api_key(state: &State<'_, AppState>) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn read_key_status(state: &State<'_, AppState>) -> KeyStatus {
+fn session_cache_key_status(
+    storage_health: StorageHealth,
+    last_error: Option<String>,
+) -> KeyStatus {
+    let key_source = KeySource::SessionCache;
+    let has_open_ai_key = true;
+    KeyStatus {
+        has_open_ai_key,
+        storage_health,
+        key_source: key_source.clone(),
+        status_level: derive_key_status_level(has_open_ai_key, &key_source),
+        last_error,
+    }
+}
+
+fn no_openai_key_status(storage_health: StorageHealth, last_error: Option<String>) -> KeyStatus {
+    let key_source = KeySource::None;
+    let has_open_ai_key = false;
+    KeyStatus {
+        has_open_ai_key,
+        storage_health,
+        key_source: key_source.clone(),
+        status_level: derive_key_status_level(has_open_ai_key, &key_source),
+        last_error,
+    }
+}
+
+fn read_key_status(state: &State<'_, AppState>, open_ai_key_configured: bool) -> KeyStatus {
+    if !open_ai_key_configured {
+        return if cached_api_key(state).is_some() {
+            session_cache_key_status(
+                StorageHealth::Ok,
+                Some("Using in-memory session key for this app session".to_string()),
+            )
+        } else {
+            no_openai_key_status(StorageHealth::Ok, None)
+        };
+    }
+
     let entry = match keyring_entry() {
         Ok(value) => value,
         Err(error) => {
             if let Some(_cached_key) = cached_api_key(state) {
-                let key_source = KeySource::SessionCache;
-                let has_open_ai_key = true;
-                return KeyStatus {
-                    has_open_ai_key,
-                    storage_health: StorageHealth::Unavailable,
-                    key_source: key_source.clone(),
-                    status_level: derive_key_status_level(has_open_ai_key, &key_source),
-                    last_error: Some(
+                return session_cache_key_status(
+                    StorageHealth::Unavailable,
+                    Some(
                         "Keyring unavailable; using in-memory session key for this app session"
                             .to_string(),
                     ),
-                };
+                );
             }
 
-            let key_source = KeySource::None;
-            let has_open_ai_key = false;
-            return KeyStatus {
-                has_open_ai_key,
-                storage_health: StorageHealth::Unavailable,
-                key_source: key_source.clone(),
-                status_level: derive_key_status_level(has_open_ai_key, &key_source),
-                last_error: Some(error.to_string()),
-            };
+            return no_openai_key_status(StorageHealth::Unavailable, Some(error.to_string()));
         }
     };
 
@@ -2101,59 +2143,54 @@ fn read_key_status(state: &State<'_, AppState>) -> KeyStatus {
         }
         Err(KeyringError::NoEntry) => {
             if let Some(_cached_key) = cached_api_key(state) {
-                let key_source = KeySource::SessionCache;
-                let has_open_ai_key = true;
-                KeyStatus {
-                    has_open_ai_key,
-                    storage_health: StorageHealth::ReadError,
-                    key_source: key_source.clone(),
-                    status_level: derive_key_status_level(has_open_ai_key, &key_source),
-                    last_error: Some(
+                session_cache_key_status(
+                    StorageHealth::ReadError,
+                    Some(
                         "Keyring returned no entry; using in-memory session key for this app session"
                             .to_string(),
                     ),
-                }
+                )
             } else {
-                let key_source = KeySource::None;
-                let has_open_ai_key = false;
-                KeyStatus {
-                    has_open_ai_key,
-                    storage_health: StorageHealth::Ok,
-                    key_source: key_source.clone(),
-                    status_level: derive_key_status_level(has_open_ai_key, &key_source),
-                    last_error: None,
-                }
+                no_openai_key_status(StorageHealth::Ok, None)
             }
         }
         Err(error) => {
             if let Some(_cached_key) = cached_api_key(state) {
-                let key_source = KeySource::SessionCache;
-                let has_open_ai_key = true;
-                KeyStatus {
-                    has_open_ai_key,
-                    storage_health: StorageHealth::ReadError,
-                    key_source: key_source.clone(),
-                    status_level: derive_key_status_level(has_open_ai_key, &key_source),
-                    last_error: Some(format!(
+                session_cache_key_status(
+                    StorageHealth::ReadError,
+                    Some(format!(
                         "OpenAI API key could not be read from keyring ({error}); using in-memory session key for this app session"
                     )),
-                }
+                )
             } else {
-                let key_source = KeySource::None;
-                let has_open_ai_key = false;
-                KeyStatus {
-                    has_open_ai_key,
-                    storage_health: StorageHealth::ReadError,
-                    key_source: key_source.clone(),
-                    status_level: derive_key_status_level(has_open_ai_key, &key_source),
-                    last_error: Some(format!("OpenAI API key could not be read: {error}")),
-                }
+                no_openai_key_status(
+                    StorageHealth::ReadError,
+                    Some(format!("OpenAI API key could not be read: {error}")),
+                )
             }
         }
     }
 }
 
 fn get_openai_api_key(state: &State<'_, AppState>) -> AppResult<String> {
+    if let Some(cached_key) = cached_api_key(state) {
+        return Ok(cached_key);
+    }
+
+    let open_ai_key_configured_marker = {
+        let connection = state
+            .connection
+            .lock()
+            .map_err(|_| AppError::Config(state_lock_error()))?;
+        read_saved_openai_key_configured_marker(&connection)?
+    };
+
+    if matches!(open_ai_key_configured_marker, Some(false)) {
+        return Err(AppError::Config(
+            "OpenAI API key is not configured".to_string(),
+        ));
+    }
+
     let entry = match keyring_entry() {
         Ok(value) => value,
         Err(error) => {
@@ -2172,6 +2209,14 @@ fn get_openai_api_key(state: &State<'_, AppState>) -> AppResult<String> {
                 return Ok(cached_key);
             }
 
+            if open_ai_key_configured_marker.is_none() {
+                let connection = state
+                    .connection
+                    .lock()
+                    .map_err(|_| AppError::Config(state_lock_error()))?;
+                write_openai_key_configured(&connection, false)?;
+            }
+
             return Err(AppError::Config(
                 "OpenAI API key is not configured".to_string(),
             ));
@@ -2188,9 +2233,29 @@ fn get_openai_api_key(state: &State<'_, AppState>) -> AppResult<String> {
     };
 
     if api_key.trim().is_empty() {
+        if open_ai_key_configured_marker.is_none() {
+            let connection = state
+                .connection
+                .lock()
+                .map_err(|_| AppError::Config(state_lock_error()))?;
+            write_openai_key_configured(&connection, false)?;
+        }
+
         return Err(AppError::Config(
             "OpenAI API key is configured but empty".to_string(),
         ));
+    }
+
+    if open_ai_key_configured_marker.is_none() {
+        let connection = state
+            .connection
+            .lock()
+            .map_err(|_| AppError::Config(state_lock_error()))?;
+        write_openai_key_configured(&connection, true)?;
+    }
+
+    if let Ok(mut cache) = state.api_key_cache.lock() {
+        *cache = Some(api_key.trim().to_string());
     }
 
     Ok(api_key)
@@ -2385,8 +2450,8 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
     let correlation_id = Uuid::new_v4().to_string();
     let started_at = Instant::now();
 
-    let key_status = read_key_status(&state);
     let (
+        open_ai_key_configured_marker,
         selected_open_ai_model,
         invalid_saved_model,
         selected_calendar_bulk_model,
@@ -2412,6 +2477,27 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             );
             format_command_error(&correlation_id, message)
         })?;
+
+        let open_ai_key_configured_marker = match read_saved_openai_key_configured_marker(
+            &connection,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "read_openai_key_configured_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
 
         let (selected_open_ai_model, invalid_saved_model) =
             match read_saved_openai_model(&connection) {
@@ -2532,6 +2618,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         };
 
         (
+            open_ai_key_configured_marker,
             selected_open_ai_model,
             invalid_saved_model,
             selected_calendar_bulk_model,
@@ -2544,6 +2631,38 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             quick_add_preferences,
         )
     };
+
+    let should_read_keyring = open_ai_key_configured_marker.unwrap_or(true);
+    let key_status = read_key_status(&state, should_read_keyring);
+    let open_ai_key_configured = open_ai_key_configured_marker.unwrap_or(
+        key_status.has_open_ai_key && matches!(key_status.key_source, KeySource::Keyring),
+    );
+
+    if open_ai_key_configured_marker.is_none() {
+        let marker_result = (|| -> AppResult<()> {
+            let connection = state
+                .connection
+                .lock()
+                .map_err(|_| AppError::Config(state_lock_error()))?;
+            write_openai_key_configured(&connection, open_ai_key_configured)
+        })();
+
+        if let Err(error) = marker_result {
+            record_backend_event_with_state(
+                &state,
+                &correlation_id,
+                "command_warning",
+                command,
+                "warning",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "migrate_openai_key_configured_setting",
+                  "message": error.to_string(),
+                }),
+            );
+        }
+    }
 
     if let Some(invalid_value) = invalid_saved_model.as_deref() {
         record_invalid_saved_openai_model(&state, &correlation_id, command, invalid_value);
@@ -2593,6 +2712,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "hasOpenAiKey": status.has_open_ai_key,
           "storageHealth": storage_health_label(&status.storage_health),
           "keySource": key_source_label(&status.key_source),
+          "openAiKeyConfiguredFlag": open_ai_key_configured,
           "statusLevel": status_level_label(&status.status_level),
           "lastError": status.last_error,
           "selectedOpenAiModel": status.selected_open_ai_model.api_name(),
@@ -2673,6 +2793,28 @@ pub fn settings_set_openai_key(
         Ok(()) => {
             if let Ok(mut cache) = state.api_key_cache.lock() {
                 *cache = Some(trimmed_api_key.to_string());
+            }
+
+            if let Err(error) = (|| -> AppResult<()> {
+                let connection = state
+                    .connection
+                    .lock()
+                    .map_err(|_| AppError::Config(state_lock_error()))?;
+                write_openai_key_configured(&connection, true)?;
+                Ok(())
+            })() {
+                let message = error.to_string();
+                record_backend_event_with_state(
+                    &state,
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "save_openai_key_configured_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
             }
 
             record_backend_event_with_state(
@@ -5655,8 +5797,10 @@ pub fn diagnostics_copy_bundle(state: State<'_, AppState>) -> Result<Diagnostics
         db::list_diagnostics_events(&connection, 120, None).map_err(|error| error.to_string())?;
     let recent_errors = db::list_diagnostics_events(&connection, 20, Some("errors"))
         .map_err(|error| error.to_string())?;
+    let open_ai_key_configured =
+        read_saved_openai_key_configured(&connection).map_err(|error| error.to_string())?;
 
-    let key_status = read_key_status(&state);
+    let key_status = read_key_status(&state, open_ai_key_configured);
 
     let mut lines = Vec::<String>::new();
     lines.push("# OmniSheet Diagnostics Bundle".to_string());
@@ -5669,6 +5813,7 @@ pub fn diagnostics_copy_bundle(state: State<'_, AppState>) -> Result<Diagnostics
         std::env::consts::ARCH
     ));
     lines.push(format!("keyConfigured: {}", key_status.has_open_ai_key));
+    lines.push(format!("keyConfiguredFlag: {}", open_ai_key_configured));
     lines.push(format!(
         "storageHealth: {}",
         storage_health_label(&key_status.storage_health)
@@ -7313,7 +7458,8 @@ mod tests {
         message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
         normalize_calendar_bulk_ignored_keywords, normalize_confidence, normalize_llm_entry,
         normalize_snapped_update_window, normalize_summary_layout_preset_for_export,
-        normalize_summary_layout_state, reconcile_context_refs,
+        normalize_summary_layout_state, read_saved_openai_key_configured,
+        read_saved_openai_key_configured_marker, reconcile_context_refs,
         resolve_calendar_candidate_ignored_state, resolve_calendar_event_date,
         resolve_calendar_event_time, resolve_requested_openai_model,
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
@@ -7322,7 +7468,8 @@ mod tests {
         timeline_week_bounds, timeline_week_view_bounds, validate_calendar_import_entry,
         validate_manual_create_refs, validate_manual_update_window, validate_timeline_preferences,
         PreparedEntry, SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType,
-        TemporalReference, TimelinePreferenceValues, MINUTES_IN_DAY,
+        TemporalReference, TimelinePreferenceValues, APP_SETTING_OPENAI_KEY_CONFIGURED,
+        MINUTES_IN_DAY,
     };
 
     fn test_connection() -> Connection {
@@ -7831,6 +7978,27 @@ mod tests {
     }
 
     #[test]
+    fn openai_key_configured_setting_defaults_to_false() {
+        let connection = test_connection();
+
+        assert!(read_saved_openai_key_configured_marker(&connection)
+            .expect("missing key marker should resolve")
+            .is_none());
+        assert!(!read_saved_openai_key_configured(&connection)
+            .expect("missing key setting should resolve"));
+    }
+
+    #[test]
+    fn openai_key_configured_setting_reads_saved_true_value() {
+        let connection = test_connection();
+        db::upsert_app_setting(&connection, APP_SETTING_OPENAI_KEY_CONFIGURED, "true")
+            .expect("setting should save");
+
+        assert!(read_saved_openai_key_configured(&connection)
+            .expect("saved key setting should resolve"));
+    }
+
+    #[test]
     fn saved_openai_model_defaults_when_missing_or_invalid() {
         let (missing_model, missing_invalid_value) = resolve_saved_openai_model_value(None);
         assert_eq!(missing_model, OpenAiModelId::Gpt5Nano);
@@ -7950,7 +8118,14 @@ mod tests {
         assert_eq!(normalized.selected_preset_id, "preset-a");
         assert_eq!(normalized.presets[0].name, "Working Layout");
         match &normalized.presets[0].columns[2] {
-            SummaryLayoutColumn::FreeText { id, label, row_values, repeat, repeat_value, repeat_row_key } => {
+            SummaryLayoutColumn::FreeText {
+                id,
+                label,
+                row_values,
+                repeat,
+                repeat_value,
+                repeat_row_key,
+            } => {
                 assert_eq!(id, "free-text");
                 assert_eq!(label, "Notes");
                 assert!(row_values.is_empty());
@@ -8317,7 +8492,14 @@ mod tests {
         assert_eq!(normalized.id, "preset-a");
         assert_eq!(normalized.name, "Export Layout");
         match &normalized.columns[1] {
-            SummaryLayoutColumn::FreeText { id, label, row_values, repeat, repeat_value, repeat_row_key } => {
+            SummaryLayoutColumn::FreeText {
+                id,
+                label,
+                row_values,
+                repeat,
+                repeat_value,
+                repeat_row_key,
+            } => {
                 assert_eq!(id, "free-text");
                 assert_eq!(label, "Notes Slot");
                 assert!(row_values.is_empty());

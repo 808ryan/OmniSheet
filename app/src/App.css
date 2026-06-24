@@ -879,8 +879,7 @@
   font-size: 0.93rem;
 }
 
-.settings-preference-row,
-.settings-status-item {
+.settings-preference-row {
   display: grid;
   grid-template-columns: minmax(9rem, 13rem) minmax(0, 1fr);
   gap: 0.9rem;
@@ -888,13 +887,11 @@
   padding: 0.72rem 0.9rem;
 }
 
-.settings-preference-row + .settings-preference-row,
-.settings-status-item + .settings-status-item {
+.settings-preference-row + .settings-preference-row {
   border-top: 1px solid rgba(170, 188, 218, 0.32);
 }
 
-.settings-preference-row > label,
-.settings-status-item > span {
+.settings-preference-row > label {
   color: var(--ink-soft);
   font-size: 0.86rem;
   font-weight: 600;
@@ -907,6 +904,53 @@
 
 .settings-toggle-row {
   grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.settings-credential-row {
+  align-items: start;
+}
+
+.settings-credential-stack {
+  min-width: 0;
+  display: grid;
+  gap: 0.52rem;
+  justify-items: end;
+}
+
+.settings-credential-stack .settings-control-group,
+.settings-alert {
+  width: min(28rem, 100%);
+}
+
+.settings-credential-status {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.settings-credential-status-mark {
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.settings-credential-status.is-configured {
+  color: var(--success);
+}
+
+.settings-credential-status.is-missing {
+  color: var(--warning);
+}
+
+.settings-credential-status.is-checking {
+  color: var(--ink-soft);
 }
 
 .settings-control-group {
@@ -999,50 +1043,7 @@
   white-space: nowrap;
 }
 
-.settings-status-grid {
-  display: grid;
-}
-
-.settings-status-item strong {
-  min-width: 0;
-  color: var(--ink);
-  justify-self: end;
-  text-align: right;
-  overflow-wrap: anywhere;
-}
-
-.settings-status-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: fit-content;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 0.22rem 0.58rem;
-  font-size: 0.77rem;
-  line-height: 1;
-}
-
-.settings-status-pill.is-success {
-  background: rgba(2, 122, 72, 0.1);
-  border-color: rgba(2, 122, 72, 0.18);
-  color: var(--success);
-}
-
-.settings-status-pill.is-warning {
-  background: rgba(181, 71, 8, 0.1);
-  border-color: rgba(181, 71, 8, 0.18);
-  color: var(--warning);
-}
-
-.settings-status-pill.is-danger {
-  background: var(--danger-soft);
-  border-color: rgba(180, 35, 24, 0.18);
-  color: var(--danger);
-}
-
 .settings-alert {
-  width: min(64rem, 100%);
   margin: 0;
 }
 
@@ -6222,10 +6223,18 @@ button.danger:hover:not(:disabled) {
     grid-template-columns: 1fr;
   }
 
-  .settings-preference-row,
-  .settings-status-item {
+  .settings-preference-row {
     grid-template-columns: 1fr;
     gap: 0.45rem;
+  }
+
+  .settings-credential-stack {
+    justify-items: stretch;
+  }
+
+  .settings-credential-stack .settings-control-group,
+  .settings-alert {
+    width: 100%;
   }
 
   .settings-control-group {
@@ -6300,11 +6309,6 @@ button.danger:hover:not(:disabled) {
   .calendar-review-actions {
     grid-template-columns: 1fr;
     width: 100%;
-  }
-
-  .settings-status-item strong {
-    justify-self: start;
-    text-align: left;
   }
 
   .timeline-toolbar {
