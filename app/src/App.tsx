@@ -4560,6 +4560,10 @@ function App() {
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (isCodesCreateModalOpen) {
+        return
+      }
+
       if (event.key === 'Escape') {
         closeQuickAddSettings()
       }
@@ -4567,9 +4571,19 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => {
-    window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [closeQuickAddSettings, isQuickAddSettingsOpen])
+  }, [closeQuickAddSettings, isCodesCreateModalOpen, isQuickAddSettingsOpen])
+
+  useEffect(() => {
+    if (!isQuickAddSettingsOpen || !quickAddSettingsDraftRef.current) {
+      return
+    }
+
+    const nextDraft = buildQuickAddSettingsDraft(quickAddSettingsDraftRef.current, engagements)
+    quickAddSettingsDraftRef.current = nextDraft
+    setQuickAddSettingsDraft(nextDraft)
+  }, [engagements, isQuickAddSettingsOpen])
 
   const moveQuickAddEngagement = (engagementId: string, direction: -1 | 1) => {
     updateQuickAddSettingsDraftWithAnimation((previous) => ({
@@ -5292,9 +5306,6 @@ function App() {
 
     void runAction(async () => {
       const describeWhenToUse = engagementForm.describeWhenToUse.trim()
-      if (describeWhenToUse.length === 0) {
-        throw new Error('"Describe when to use" is required for matching.')
-      }
 
       const colorHex = normalizeColorHexInput(engagementForm.colorHex)
       if (engagementForm.colorHex.trim().length > 0 && !colorHex) {
@@ -7911,7 +7922,7 @@ function App() {
       <section
         className="calendar-bulk-modal quick-add-settings-modal"
         role="dialog"
-        aria-modal="true"
+        aria-modal={!isCodesCreateModalOpen}
         aria-labelledby="quick-add-settings-title"
       >
         <header className="calendar-bulk-header quick-add-settings-header">
@@ -7924,7 +7935,6 @@ function App() {
               type="button"
               className="ghost quick-add-settings-header-button"
               onClick={() => {
-                closeQuickAddSettings()
                 openCodesCreateEngagementModal()
               }}
               disabled={isBusy}
@@ -7936,7 +7946,6 @@ function App() {
               type="button"
               className="ghost quick-add-settings-header-button"
               onClick={() => {
-                closeQuickAddSettings()
                 openCodesCreateActivityModal()
               }}
               disabled={isBusy || engagements.length === 0}
@@ -8878,9 +8887,11 @@ function App() {
                       <span className="codes-state-pill">Inactive</span>
                     )}
                   </div>
-                  <span className="codes-activity-usage">
-                    {activity.describeWhenToUse || 'Usage guidance not added yet.'}
-                  </span>
+                  {activity.describeWhenToUse?.trim() ? (
+                    <span className="codes-activity-usage">
+                      {activity.describeWhenToUse}
+                    </span>
+                  ) : null}
                   <ResponsiveCodeTagList
                     tags={activity.tags}
                     itemKeyPrefix={`codes-activity-${activity.id}`}
@@ -10349,7 +10360,7 @@ function App() {
                         Engagement Name
                         <span className="required-indicator" aria-hidden="true">*</span>
                       </span>
-                      <span className="field-helper">Required for matching</span>
+                      <span className="field-helper">Required</span>
                       <input
                         value={engagementForm.name}
                         onChange={(event) =>
@@ -10380,9 +10391,8 @@ function App() {
                     <label>
                       <span className="field-label-row">
                         Describe when to use this engagement
-                        <span className="required-indicator" aria-hidden="true">*</span>
                       </span>
-                      <span className="field-helper">Required for matching</span>
+                      <span className="field-helper">Used for LLM matching</span>
                       <textarea
                         rows={3}
                         maxLength={500}
@@ -10394,11 +10404,11 @@ function App() {
                           }))
                         }
                         placeholder="Use this engagement when..."
-                        required
                       />
                     </label>
                     <label>
                       Tags / Key Words (comma separated)
+                      <span className="field-helper">Used for LLM matching</span>
                       <input
                         value={engagementForm.tags}
                         onChange={(event) =>
@@ -10546,7 +10556,7 @@ function App() {
                         Activity Name
                         <span className="required-indicator" aria-hidden="true">*</span>
                       </span>
-                      <span className="field-helper">Required for matching</span>
+                      <span className="field-helper">Required</span>
                       <input
                         value={activityForm.name}
                         onChange={(event) =>
@@ -10574,6 +10584,7 @@ function App() {
                       <span className="field-label-row">
                         Describe when to use this activity
                       </span>
+                      <span className="field-helper">Used for LLM matching</span>
                       <textarea
                         rows={3}
                         maxLength={500}
@@ -10589,6 +10600,7 @@ function App() {
                     </label>
                     <label>
                       Tags / Key Words (comma separated)
+                      <span className="field-helper">Used for LLM matching</span>
                       <input
                         value={activityForm.tags}
                         onChange={(event) =>
@@ -10702,9 +10714,11 @@ function App() {
                                     <span className="codes-state-pill">Inactive</span>
                                   )}
                                 </div>
-                                <span className="codes-activity-usage">
-                                  {activity.describeWhenToUse || 'Usage guidance not added yet.'}
-                                </span>
+                                {activity.describeWhenToUse?.trim() ? (
+                                  <span className="codes-activity-usage">
+                                    {activity.describeWhenToUse}
+                                  </span>
+                                ) : null}
                                 <ResponsiveCodeTagList
                                   tags={activity.tags}
                                   itemKeyPrefix={`codes-activity-${activity.id}`}

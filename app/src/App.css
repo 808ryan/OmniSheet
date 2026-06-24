@@ -780,9 +780,10 @@
 }
 
 .main-view-tabs {
-  width: 100%;
+  --main-view-tab-width: 7.2rem;
+  width: max-content;
   max-width: 100%;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(7, var(--main-view-tab-width));
   grid-auto-flow: initial;
   grid-auto-columns: initial;
   overflow-x: auto;
@@ -790,7 +791,8 @@
 }
 
 .main-view-tabs button {
-  min-width: 0;
+  width: var(--main-view-tab-width);
+  min-width: var(--main-view-tab-width);
   justify-content: center;
   padding-inline: 0.5rem;
   white-space: nowrap;
@@ -2375,6 +2377,10 @@ button.danger:hover:not(:disabled) {
   -webkit-backdrop-filter: blur(12px) saturate(1.08);
 }
 
+.codes-create-backdrop {
+  z-index: 1420;
+}
+
 .calendar-bulk-modal {
   width: 92vw;
   height: 86vh;
@@ -3694,12 +3700,12 @@ button.danger:hover:not(:disabled) {
 
 .codes-rail-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(8rem, 13rem);
+  grid-template-columns: minmax(max-content, 1fr) minmax(5rem, 13rem);
 }
 
 .codes-activities-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(10rem, 18rem);
+  grid-template-columns: minmax(0, 1fr) minmax(5rem, 13rem);
 }
 
 .codes-pane-title {
@@ -3714,9 +3720,10 @@ button.danger:hover:not(:disabled) {
   min-width: 0;
   margin: 0;
   font-size: 0.98rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .codes-pane-create-button {
@@ -3752,13 +3759,13 @@ button.danger:hover:not(:disabled) {
 }
 
 .codes-engagement-search {
-  min-width: 8rem;
+  min-width: 0;
   max-width: 13rem;
 }
 
 .codes-activity-search {
-  min-width: 10rem;
-  max-width: 18rem;
+  min-width: 0;
+  max-width: 13rem;
 }
 
 .codes-rail-list {
@@ -6085,8 +6092,9 @@ button.danger:hover:not(:disabled) {
   }
 
   .main-view-tabs {
-    grid-template-columns: repeat(7, minmax(0, 1fr));
-    width: 100%;
+    grid-template-columns: repeat(7, var(--main-view-tab-width));
+    width: max-content;
+    max-width: 100%;
   }
 
   .segmented-control button {
@@ -6094,7 +6102,8 @@ button.danger:hover:not(:disabled) {
   }
 
   .main-view-tabs button {
-    min-width: 0;
+    width: var(--main-view-tab-width);
+    min-width: var(--main-view-tab-width);
   }
 
   .codes-prototype-header {
