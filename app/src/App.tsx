@@ -1075,6 +1075,7 @@ function App() {
   const [quickAddSettingsDraft, setQuickAddSettingsDraft] = useState<QuickAddPreferences | null>(null)
   const [quickAddSettingsDragState, setQuickAddSettingsDragState] =
     useState<QuickAddSettingsDragState | null>(null)
+  const [quickAddSettingsDropCommitKeys, setQuickAddSettingsDropCommitKeys] = useState<string[]>([])
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickBlockDragState | null>(null)
   const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickAddScrollMetrics>({
     canScroll: false,
@@ -1137,6 +1138,7 @@ function App() {
   const quickAddSettingsDragStateRef = useRef<QuickAddSettingsDragState | null>(null)
   const quickAddSettingsRowRefs = useRef<Record<string, HTMLElement | null>>({})
   const quickAddSettingsDragCaptureTargetRef = useRef<HTMLButtonElement | null>(null)
+  const quickAddSettingsDropCommitFrameRef = useRef<number | null>(null)
   const quickAddSettingsSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const timelineEntriesRef = useRef<TimelineEntry[]>([])
   const suppressTimelineClickRef = useRef(false)
@@ -1216,6 +1218,13 @@ function App() {
   const commitQuickAddSettingsDragState = useCallback((next: QuickAddSettingsDragState | null) => {
     quickAddSettingsDragStateRef.current = next
     setQuickAddSettingsDragState(next)
+  }, [])
+  const clearQuickAddSettingsDropAnimation = useCallback(() => {
+    if (quickAddSettingsDropCommitFrameRef.current !== null) {
+      window.cancelAnimationFrame(quickAddSettingsDropCommitFrameRef.current)
+      quickAddSettingsDropCommitFrameRef.current = null
+    }
+    setQuickAddSettingsDropCommitKeys([])
   }, [])
   const releaseQuickAddSettingsPointerCapture = useCallback((pointerId?: number | null) => {
     const captureTarget = quickAddSettingsDragCaptureTargetRef.current
@@ -3292,9 +3301,27 @@ function App() {
     })
   }, [summaryLayoutDropCommitColumnIds])
 
+  useLayoutEffect(() => {
+    if (quickAddSettingsDropCommitKeys.length === 0) {
+      return
+    }
+
+    if (quickAddSettingsDropCommitFrameRef.current !== null) {
+      window.cancelAnimationFrame(quickAddSettingsDropCommitFrameRef.current)
+    }
+
+    quickAddSettingsDropCommitFrameRef.current = window.requestAnimationFrame(() => {
+      quickAddSettingsDropCommitFrameRef.current = null
+      setQuickAddSettingsDropCommitKeys([])
+    })
+  }, [quickAddSettingsDropCommitKeys])
+
   useEffect(() => () => {
     if (summaryLayoutDropCommitFrameRef.current !== null) {
       window.cancelAnimationFrame(summaryLayoutDropCommitFrameRef.current)
+    }
+    if (quickAddSettingsDropCommitFrameRef.current !== null) {
+      window.cancelAnimationFrame(quickAddSettingsDropCommitFrameRef.current)
     }
   }, [])
 
@@ -4559,14 +4586,20 @@ function App() {
     quickAddSettingsDraftRef.current = draft
     setQuickAddSettingsDraft(draft)
     commitQuickAddSettingsDragState(null)
+    clearQuickAddSettingsDropAnimation()
     setIsQuickAddSettingsOpen(true)
   }
 
   const closeQuickAddSettings = useCallback(() => {
     releaseQuickAddSettingsPointerCapture(quickAddSettingsDragStateRef.current?.pointerId ?? null)
     commitQuickAddSettingsDragState(null)
+    clearQuickAddSettingsDropAnimation()
     setIsQuickAddSettingsOpen(false)
-  }, [commitQuickAddSettingsDragState, releaseQuickAddSettingsPointerCapture])
+  }, [
+    clearQuickAddSettingsDropAnimation,
+    commitQuickAddSettingsDragState,
+    releaseQuickAddSettingsPointerCapture,
+  ])
 
   useEffect(() => {
     if (!isQuickAddSettingsOpen) {
@@ -4753,6 +4786,8 @@ function App() {
       return
     }
 
+    setQuickAddSettingsDropCommitKeys(finalDragState.snapshots.map((snapshot) => snapshot.key))
+
     updateQuickAddSettingsDraftWithAnimation((previous) => {
       if (finalDragState.kind === 'engagement') {
         return {
@@ -4780,7 +4815,7 @@ function App() {
           ),
         },
       }
-    })
+    }, { animate: false })
   }
 
   const onQuickAddSettingsDragPointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -5546,7 +5581,7 @@ function App() {
     onSetDate(nextDate)
   }
 
-  const onSelectEntry = (
+  const onSelectEntry = useCallback((
     entry: TimelineEntry,
     options?: {
       syncSelectedDate?: boolean
@@ -5562,7 +5597,7 @@ function App() {
     entryDraftLastSavedKeyRef.current = serializeEntryDraft(nextDraft)
     setEntryAutoSaveStatus('saved')
     setEntryDraft(nextDraft)
-  }
+  }, [updateSelectedDate])
 
   const onSelectTimelineBlock = (entry: TimelineEntry) => {
     if (suppressTimelineClickRef.current) {
@@ -5824,10 +5859,8 @@ function App() {
         return
       }
 
-      const safeDuration = clampQuickBlockDuration(durationMinutes)
-      const endMinute = currentRoundedTimelineEndMinute()
-      const startMinute = Math.max(0, endMinute - safeDuration)
-      const date = selectedDateRef.current
+      const { startMinute, endMinute } = resolveQuickBlockCreateWindow(durationMinutes)
+      const date = formatDate(new Date())
       const monthKey = monthKeyFromDate(date)
 
       void runAction(async () => {
@@ -5855,6 +5888,7 @@ function App() {
         invalidateMonthSummaries([monthKey])
         const createdEntry = entries.find((entry) => entry.id === result.id)
         if (createdEntry) {
+          onSelectEntry(createdEntry)
           setHighlightedEntryId(result.id)
           scrollDayTimelineToEntry(createdEntry)
         }
@@ -5868,6 +5902,7 @@ function App() {
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
+      onSelectEntry,
       runAction,
       scrollDayTimelineToEntry,
       updateSelectedDate,
@@ -7824,6 +7859,7 @@ function App() {
     .filter((engagement): engagement is Engagement => Boolean(engagement?.isActive))
   const quickAddSettingsHiddenEngagementIds = new Set(quickAddSettingsResolvedDraft.hiddenEngagementIds)
   const quickAddSettingsHiddenActivityIds = new Set(quickAddSettingsResolvedDraft.hiddenActivityIds)
+  const quickAddSettingsDropCommitKeySet = new Set(quickAddSettingsDropCommitKeys)
   const quickAddSettingsPreviewGroups = quickAddSettingsEngagements
     .filter((engagement) => !quickAddSettingsHiddenEngagementIds.has(engagement.id))
     .map<QuickAddActivityGroup | null>((engagement) => {
@@ -8015,6 +8051,7 @@ function App() {
                     className={[
                       'quick-add-settings-engagement',
                       engagementHidden ? 'is-hidden' : '',
+                      quickAddSettingsDropCommitKeySet.has(engagementKey) ? 'is-commit-reset' : '',
                       engagementDragPresentation.className,
                     ].filter(Boolean).join(' ')}
                     style={{
@@ -8118,6 +8155,7 @@ function App() {
                                 'quick-add-settings-row',
                                 'quick-add-settings-activity-row',
                                 activityHidden ? 'is-hidden' : '',
+                                quickAddSettingsDropCommitKeySet.has(activityKey) ? 'is-commit-reset' : '',
                                 activityDragPresentation.className,
                               ].filter(Boolean).join(' ')}
                               style={{
@@ -13373,16 +13411,25 @@ function quickBlockDurationFromDrag(originClientX: number, currentClientX: numbe
   )
 }
 
-function currentRoundedTimelineEndMinute(): number {
+function currentRoundedTimelineStartMinute(): number {
   const now = new Date()
   const currentMinute = now.getHours() * HOUR_IN_MINUTES + now.getMinutes()
   return Math.min(
     MINUTES_IN_DAY,
     Math.max(
-      TIMELINE_DRAG_SNAP_MINUTES,
+      0,
       snapMinute(currentMinute, TIMELINE_DRAG_SNAP_MINUTES),
     ),
   )
+}
+
+function resolveQuickBlockCreateWindow(durationMinutes: number): { startMinute: number; endMinute: number } {
+  const safeDuration = clampQuickBlockDuration(durationMinutes)
+  const snappedStartMinute = currentRoundedTimelineStartMinute()
+  const endMinute = Math.min(MINUTES_IN_DAY, snappedStartMinute + safeDuration)
+  const startMinute = Math.max(0, endMinute - safeDuration)
+
+  return { startMinute, endMinute }
 }
 
 function clampTimelineScrollTop(grid: HTMLDivElement, targetTop: number): number {
