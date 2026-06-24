@@ -272,6 +272,10 @@ export type SummaryLayoutColumn =
     kind: 'freeText'
     id: string
     label: string
+    rowValues: Record<string, string>
+    repeat: boolean
+    repeatValue: string
+    repeatRowKey: string | null
   }
   | {
     kind: 'rowTotal'
@@ -293,6 +297,29 @@ export interface SummaryLayoutState {
   version: number
   selectedPresetId: string
   presets: SummaryLayoutPreset[]
+}
+
+export type ReportingViewMode = 'table' | 'activityDetail'
+export type ReportingDisplayDensity = 'compact' | 'comfortable'
+export type ReportingRowLabelMode = 'combined' | 'separate' | 'activityOnly'
+
+export interface ReportingDisplayPreset {
+  id: string
+  name: string
+  density: ReportingDisplayDensity
+  rowLabelMode: ReportingRowLabelMode
+  showCodes: boolean
+  showClient: boolean
+  showEngagementType: boolean
+  showEmptyDays: boolean
+}
+
+export interface ReportingState {
+  version: number
+  selectedViewMode: ReportingViewMode
+  selectedDisplayPresetId: string
+  selectedExportPresetId: string | null
+  displayPresets: ReportingDisplayPreset[]
 }
 
 export interface TimelineUpdateInput {
@@ -328,6 +355,13 @@ export interface QuickAddSuggestion {
 
 export interface QuickAddSuggestionResult {
   suggestions: QuickAddSuggestion[]
+}
+
+export interface QuickAddPreferences {
+  engagementOrder: string[]
+  hiddenEngagementIds: string[]
+  activityOrder: Record<string, string[]>
+  hiddenActivityIds: string[]
 }
 
 export interface HistoryListResult {
@@ -374,6 +408,7 @@ export interface SettingsStatus {
   timelineSeparateEngagementTypeTotals: boolean
   calendarBulkIgnoredKeywords: string[]
   calendarBulkIgnoreAllDayEvents: boolean
+  quickAddPreferences: QuickAddPreferences
 }
 
 export interface SettingsTimelinePreferencesInput {
@@ -387,6 +422,10 @@ export interface SettingsTimelinePreferencesInput {
 export interface SettingsCalendarBulkPreferencesInput {
   calendarBulkIgnoredKeywords: string[]
   calendarBulkIgnoreAllDayEvents: boolean
+}
+
+export interface SettingsQuickAddPreferencesInput {
+  quickAddPreferences: QuickAddPreferences
 }
 
 export interface CalendarExtractInput {
