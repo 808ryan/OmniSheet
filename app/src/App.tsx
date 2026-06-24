@@ -124,8 +124,8 @@ type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 type CodeEditorSurface =
   | 'edit-engagement'
   | 'edit-activity'
-type Codes4CreateStep = 'engagement' | 'activity'
-type Codes3DetailMode = 'activities' | 'edit-engagement' | 'edit-activity'
+type CodesCreateStep = 'engagement' | 'activity'
+type CodesDetailMode = 'activities' | 'edit-engagement' | 'edit-activity'
 type TimelineSurface = 'day' | 'week' | 'calendar-review'
 
 type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
@@ -1028,23 +1028,23 @@ function App() {
     useState<EngagementFormState>(EMPTY_ENGAGEMENT_FORM)
   const [hasManualEngagementTypeSelection, setHasManualEngagementTypeSelection] = useState(false)
   const [activityForm, setActivityForm] = useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
-  const [isCodes4CreateModalOpen, setIsCodes4CreateModalOpen] = useState(false)
-  const [codes4CreateStep, setCodes4CreateStep] = useState<Codes4CreateStep>('engagement')
-  const [codes4CreateEngagementForm, setCodes4CreateEngagementForm] =
+  const [isCodesCreateModalOpen, setIsCodesCreateModalOpen] = useState(false)
+  const [codesCreateStep, setCodesCreateStep] = useState<CodesCreateStep>('engagement')
+  const [codesCreateEngagementForm, setCodesCreateEngagementForm] =
     useState<EngagementFormState>(EMPTY_ENGAGEMENT_FORM)
   const [
-    hasManualCodes4CreateEngagementTypeSelection,
-    setHasManualCodes4CreateEngagementTypeSelection,
+    hasManualCodesCreateEngagementTypeSelection,
+    setHasManualCodesCreateEngagementTypeSelection,
   ] = useState(false)
-  const [codes4CreateActivityForm, setCodes4CreateActivityForm] =
+  const [codesCreateActivityForm, setCodesCreateActivityForm] =
     useState<ActivityFormState>(EMPTY_ACTIVITY_FORM)
-  const [codes4CreateContextEngagementId, setCodes4CreateContextEngagementId] =
+  const [codesCreateContextEngagementId, setCodesCreateContextEngagementId] =
     useState<string | null>(null)
-  const [codes4CreateNotice, setCodes4CreateNotice] = useState<string | null>(null)
-  const [codes3SelectedEngagementId, setCodes3SelectedEngagementId] = useState<string | null>(null)
-  const [codes3DetailMode, setCodes3DetailMode] = useState<Codes3DetailMode>('activities')
-  const [codes3EngagementSearch, setCodes3EngagementSearch] = useState('')
-  const [codes3ActivitySearch, setCodes3ActivitySearch] = useState('')
+  const [codesCreateNotice, setCodesCreateNotice] = useState<string | null>(null)
+  const [codesSelectedEngagementId, setCodesSelectedEngagementId] = useState<string | null>(null)
+  const [codesDetailMode, setCodesDetailMode] = useState<CodesDetailMode>('activities')
+  const [codesEngagementSearch, setCodesEngagementSearch] = useState('')
+  const [codesActivitySearch, setCodesActivitySearch] = useState('')
 
   const [captureMessage, setCaptureMessage] = useState('')
   const [captureDraftMetadata, setCaptureDraftMetadata] = useState<VoiceDraftMetadata | null>(null)
@@ -2405,15 +2405,15 @@ function App() {
     () => engagements.find((engagement) => engagement.id === activityForm.engagementId) ?? null,
     [activityForm.engagementId, engagements],
   )
-  const selectedCodes4CreateActivityEngagement = useMemo(
+  const selectedCodesCreateActivityEngagement = useMemo(
     () =>
-      engagements.find((engagement) => engagement.id === codes4CreateActivityForm.engagementId)
+      engagements.find((engagement) => engagement.id === codesCreateActivityForm.engagementId)
       ?? null,
-    [codes4CreateActivityForm.engagementId, engagements],
+    [codesCreateActivityForm.engagementId, engagements],
   )
   const isEditingEngagement = codeEditorSurface === 'edit-engagement'
   const isEditingActivity = codeEditorSurface === 'edit-activity'
-  const resolveCodes4CreateActivityEngagementId = useCallback(() => {
+  const resolveCodesCreateActivityEngagementId = useCallback(() => {
     const hasEngagement = (id: string | null | undefined) =>
       Boolean(id && engagements.some((engagement) => engagement.id === id))
 
@@ -2425,12 +2425,12 @@ function App() {
       return activityForm.engagementId
     }
 
-    if (activeView === 'codes' && hasEngagement(codes3SelectedEngagementId)) {
-      return codes3SelectedEngagementId ?? ''
+    if (activeView === 'codes' && hasEngagement(codesSelectedEngagementId)) {
+      return codesSelectedEngagementId ?? ''
     }
 
-    if (hasEngagement(codes4CreateContextEngagementId)) {
-      return codes4CreateContextEngagementId ?? ''
+    if (hasEngagement(codesCreateContextEngagementId)) {
+      return codesCreateContextEngagementId ?? ''
     }
 
     return engagements.find((engagement) => engagement.isActive)?.id ?? engagements[0]?.id ?? ''
@@ -2438,72 +2438,72 @@ function App() {
     activityForm.engagementId,
     activeView,
     codeEditorSurface,
-    codes3SelectedEngagementId,
-    codes4CreateContextEngagementId,
+    codesSelectedEngagementId,
+    codesCreateContextEngagementId,
     engagementForm.id,
     engagements,
   ])
-  const selectedCodes3Engagement = useMemo(
+  const selectedCodesEngagement = useMemo(
     () =>
-      engagements.find((engagement) => engagement.id === codes3SelectedEngagementId)
+      engagements.find((engagement) => engagement.id === codesSelectedEngagementId)
       ?? engagements[0]
       ?? null,
-    [codes3SelectedEngagementId, engagements],
+    [codesSelectedEngagementId, engagements],
   )
-  const normalizedCodes3EngagementSearch = codes3EngagementSearch.trim().toLocaleLowerCase()
-  const filteredCodes3Engagements = useMemo(
+  const normalizedCodesEngagementSearch = codesEngagementSearch.trim().toLocaleLowerCase()
+  const filteredCodesEngagements = useMemo(
     () => (
-      normalizedCodes3EngagementSearch.length === 0
+      normalizedCodesEngagementSearch.length === 0
         ? engagements
         : engagements.filter((engagement) =>
-          codeEntitySearchText(engagement).includes(normalizedCodes3EngagementSearch),
+          codeEntitySearchText(engagement).includes(normalizedCodesEngagementSearch),
         )
     ),
-    [engagements, normalizedCodes3EngagementSearch],
+    [engagements, normalizedCodesEngagementSearch],
   )
-  const normalizedCodes3ActivitySearch = codes3ActivitySearch.trim().toLocaleLowerCase()
-  const filteredCodes3Activities = useMemo(
+  const normalizedCodesActivitySearch = codesActivitySearch.trim().toLocaleLowerCase()
+  const filteredCodesActivities = useMemo(
     () => {
-      const activities = selectedCodes3Engagement?.activities ?? []
-      return normalizedCodes3ActivitySearch.length === 0
+      const activities = selectedCodesEngagement?.activities ?? []
+      return normalizedCodesActivitySearch.length === 0
         ? activities
         : activities.filter((activity) =>
-          activityCodeSearchText(activity).includes(normalizedCodes3ActivitySearch),
+          activityCodeSearchText(activity).includes(normalizedCodesActivitySearch),
         )
     },
-    [normalizedCodes3ActivitySearch, selectedCodes3Engagement],
+    [normalizedCodesActivitySearch, selectedCodesEngagement],
   )
-  const codes3IsEditing =
-    (codes3DetailMode === 'edit-engagement' && isEditingEngagement)
-    || (codes3DetailMode === 'edit-activity' && isEditingActivity)
-  const selectedCodes3EngagementName = selectedCodes3Engagement
-    ? selectedCodes3Engagement.name.trim()
-      || selectedCodes3Engagement.code?.trim()
+  const codesIsEditing =
+    (codesDetailMode === 'edit-engagement' && isEditingEngagement)
+    || (codesDetailMode === 'edit-activity' && isEditingActivity)
+  const selectedCodesEngagementName = selectedCodesEngagement
+    ? selectedCodesEngagement.name.trim()
+      || selectedCodesEngagement.code?.trim()
       || 'selected engagement'
     : ''
-  const codes3ActivitiesHeading = selectedCodes3EngagementName
-    ? `Activities in ${selectedCodes3EngagementName}`
+  const codesActivitiesHeading = selectedCodesEngagementName
+    ? `Activities in ${selectedCodesEngagementName}`
     : 'Activities'
 
   const engagementFormColorValue = normalizeColorHexInput(engagementForm.colorHex)
   const activityFormColorValue = normalizeColorHexInput(activityForm.colorHex)
   const selectedEngagementColorValue = normalizeColorHexInput(selectedActivityEngagement?.colorHex)
-  const codes4CreateEngagementColorValue =
-    normalizeColorHexInput(codes4CreateEngagementForm.colorHex)
-  const codes4CreateActivityColorValue =
-    normalizeColorHexInput(codes4CreateActivityForm.colorHex)
-  const selectedCodes4CreateEngagementColorValue =
-    normalizeColorHexInput(selectedCodes4CreateActivityEngagement?.colorHex)
+  const codesCreateEngagementColorValue =
+    normalizeColorHexInput(codesCreateEngagementForm.colorHex)
+  const codesCreateActivityColorValue =
+    normalizeColorHexInput(codesCreateActivityForm.colorHex)
+  const selectedCodesCreateEngagementColorValue =
+    normalizeColorHexInput(selectedCodesCreateActivityEngagement?.colorHex)
 
   useEffect(() => {
     const defaultEngagementId = getDefaultActivityEngagementId(engagements)
     if (!defaultEngagementId) {
-      setCodes3SelectedEngagementId(null)
-      setCodes3DetailMode('activities')
+      setCodesSelectedEngagementId(null)
+      setCodesDetailMode('activities')
       return
     }
 
-    setCodes3SelectedEngagementId((previous) => (
+    setCodesSelectedEngagementId((previous) => (
       previous && engagements.some((engagement) => engagement.id === previous)
         ? previous
         : defaultEngagementId
@@ -2525,57 +2525,57 @@ function App() {
     setHasManualEngagementTypeSelection(false)
     setActivityForm(buildEmptyActivityForm(getDefaultActivityEngagementId(engagements)))
     setCodeEditorSurface(null)
-    setCodes3DetailMode('activities')
+    setCodesDetailMode('activities')
   }, [engagements])
 
-  const openCodes4CreateEngagementModal = useCallback(() => {
-    setCodes4CreateStep('engagement')
-    setCodes4CreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
-    setHasManualCodes4CreateEngagementTypeSelection(false)
-    setCodes4CreateNotice(null)
-    setIsCodes4CreateModalOpen(true)
+  const openCodesCreateEngagementModal = useCallback(() => {
+    setCodesCreateStep('engagement')
+    setCodesCreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    setHasManualCodesCreateEngagementTypeSelection(false)
+    setCodesCreateNotice(null)
+    setIsCodesCreateModalOpen(true)
   }, [])
 
-  const openCodes4CreateActivityModal = useCallback(() => {
-    const engagementId = resolveCodes4CreateActivityEngagementId()
-    setCodes4CreateStep('activity')
-    setCodes4CreateActivityForm(buildEmptyActivityForm(engagementId))
-    setCodes4CreateNotice(null)
-    setIsCodes4CreateModalOpen(true)
-  }, [resolveCodes4CreateActivityEngagementId])
+  const openCodesCreateActivityModal = useCallback(() => {
+    const engagementId = resolveCodesCreateActivityEngagementId()
+    setCodesCreateStep('activity')
+    setCodesCreateActivityForm(buildEmptyActivityForm(engagementId))
+    setCodesCreateNotice(null)
+    setIsCodesCreateModalOpen(true)
+  }, [resolveCodesCreateActivityEngagementId])
 
-  const openCodes3CreateEngagementModal = useCallback(() => {
-    setCodes3DetailMode('activities')
-    openCodes4CreateEngagementModal()
-  }, [openCodes4CreateEngagementModal])
+  const openCodesCreateEngagementFromPane = useCallback(() => {
+    setCodesDetailMode('activities')
+    openCodesCreateEngagementModal()
+  }, [openCodesCreateEngagementModal])
 
-  const openCodes3CreateActivityModal = useCallback(() => {
-    const engagementId = selectedCodes3Engagement?.id ?? resolveCodes4CreateActivityEngagementId()
-    setCodes4CreateContextEngagementId(engagementId || null)
-    setCodes3DetailMode('activities')
-    setCodes4CreateStep('activity')
-    setCodes4CreateActivityForm(buildEmptyActivityForm(engagementId))
-    setCodes4CreateNotice(null)
-    setIsCodes4CreateModalOpen(true)
-  }, [resolveCodes4CreateActivityEngagementId, selectedCodes3Engagement?.id])
+  const openCodesCreateActivityFromPane = useCallback(() => {
+    const engagementId = selectedCodesEngagement?.id ?? resolveCodesCreateActivityEngagementId()
+    setCodesCreateContextEngagementId(engagementId || null)
+    setCodesDetailMode('activities')
+    setCodesCreateStep('activity')
+    setCodesCreateActivityForm(buildEmptyActivityForm(engagementId))
+    setCodesCreateNotice(null)
+    setIsCodesCreateModalOpen(true)
+  }, [resolveCodesCreateActivityEngagementId, selectedCodesEngagement?.id])
 
-  const closeCodes4CreateModal = useCallback(() => {
-    setIsCodes4CreateModalOpen(false)
-    setCodes4CreateStep('engagement')
-    setCodes4CreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
-    setHasManualCodes4CreateEngagementTypeSelection(false)
-    setCodes4CreateActivityForm(buildEmptyActivityForm(''))
-    setCodes4CreateNotice(null)
+  const closeCodesCreateModal = useCallback(() => {
+    setIsCodesCreateModalOpen(false)
+    setCodesCreateStep('engagement')
+    setCodesCreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
+    setHasManualCodesCreateEngagementTypeSelection(false)
+    setCodesCreateActivityForm(buildEmptyActivityForm(''))
+    setCodesCreateNotice(null)
   }, [])
 
   useEffect(() => {
-    if (!isCodes4CreateModalOpen) {
+    if (!isCodesCreateModalOpen) {
       return
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !isBusy) {
-        closeCodes4CreateModal()
+        closeCodesCreateModal()
       }
     }
 
@@ -2583,14 +2583,14 @@ function App() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [closeCodes4CreateModal, isBusy, isCodes4CreateModalOpen])
+  }, [closeCodesCreateModal, isBusy, isCodesCreateModalOpen])
 
   useEffect(() => {
-    if (!isCodes4CreateModalOpen || codes4CreateStep !== 'activity') {
+    if (!isCodesCreateModalOpen || codesCreateStep !== 'activity') {
       return
     }
 
-    setCodes4CreateActivityForm((previous) => {
+    setCodesCreateActivityForm((previous) => {
       if (
         previous.engagementId
         && engagements.some((engagement) => engagement.id === previous.engagementId)
@@ -2598,16 +2598,16 @@ function App() {
         return previous
       }
 
-      const nextEngagementId = resolveCodes4CreateActivityEngagementId()
+      const nextEngagementId = resolveCodesCreateActivityEngagementId()
       return previous.engagementId === nextEngagementId
         ? previous
         : { ...previous, engagementId: nextEngagementId }
     })
   }, [
-    codes4CreateStep,
+    codesCreateStep,
     engagements,
-    isCodes4CreateModalOpen,
-    resolveCodes4CreateActivityEngagementId,
+    isCodesCreateModalOpen,
+    resolveCodesCreateActivityEngagementId,
   ])
 
   useEffect(() => {
@@ -3547,18 +3547,18 @@ function App() {
   }, [successMessage])
 
   useEffect(() => {
-    if (!codes4CreateNotice) {
+    if (!codesCreateNotice) {
       return
     }
 
     const timeoutId = window.setTimeout(() => {
-      setCodes4CreateNotice(null)
+      setCodesCreateNotice(null)
     }, 5000)
 
     return () => {
       window.clearTimeout(timeoutId)
     }
-  }, [codes4CreateNotice])
+  }, [codesCreateNotice])
 
   const refreshAfterMutation = useCallback(async () => {
     await Promise.all([
@@ -5318,8 +5318,8 @@ function App() {
       await refreshAfterMutation()
       setCodeEditorSurface(null)
       if (activeView === 'codes' && savedEngagementId) {
-        setCodes3SelectedEngagementId(savedEngagementId)
-        setCodes3DetailMode('activities')
+        setCodesSelectedEngagementId(savedEngagementId)
+        setCodesDetailMode('activities')
       }
       setSuccessMessage('Engagement saved.')
     }, { formatError: formatCodesMutationError })
@@ -5334,7 +5334,7 @@ function App() {
   }
 
   const onEditEngagement = (engagement: Engagement) => {
-    setCodes4CreateContextEngagementId(engagement.id)
+    setCodesCreateContextEngagementId(engagement.id)
     setCodeEditorSurface('edit-engagement')
     setHasManualEngagementTypeSelection(false)
     setEngagementForm({
@@ -5377,64 +5377,64 @@ function App() {
       await refreshAfterMutation()
       setCodeEditorSurface(null)
       if (activeView === 'codes') {
-        setCodes3SelectedEngagementId(nextEngagementId)
-        setCodes3DetailMode('activities')
+        setCodesSelectedEngagementId(nextEngagementId)
+        setCodesDetailMode('activities')
       }
       setSuccessMessage('Activity saved.')
     }, { formatError: formatCodesMutationError })
   }
 
-  const onSubmitCodes4CreateEngagement = (event: FormEvent<HTMLFormElement>) => {
+  const onSubmitCodesCreateEngagement = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
     void runAction(async () => {
-      const name = codes4CreateEngagementForm.name.trim()
-      const code = codes4CreateEngagementForm.code.trim()
-      const describeWhenToUse = codes4CreateEngagementForm.describeWhenToUse.trim()
+      const name = codesCreateEngagementForm.name.trim()
+      const code = codesCreateEngagementForm.code.trim()
+      const describeWhenToUse = codesCreateEngagementForm.describeWhenToUse.trim()
 
       if (!name) {
         throw new Error('Engagement name is required.')
       }
-      const colorHex = normalizeColorHexInput(codes4CreateEngagementForm.colorHex)
-      if (codes4CreateEngagementForm.colorHex.trim().length > 0 && !colorHex) {
+      const colorHex = normalizeColorHexInput(codesCreateEngagementForm.colorHex)
+      if (codesCreateEngagementForm.colorHex.trim().length > 0 && !colorHex) {
         throw new Error('Engagement color must be a valid #RRGGBB value.')
       }
 
       const result = await engagementUpsert({
         code: code || null,
         name,
-        client: codes4CreateEngagementForm.client.trim() || null,
-        engagementType: codes4CreateEngagementForm.engagementType,
+        client: codesCreateEngagementForm.client.trim() || null,
+        engagementType: codesCreateEngagementForm.engagementType,
         colorHex,
         describeWhenToUse,
-        tags: parseTagInput(codes4CreateEngagementForm.tags),
-        isActive: codes4CreateEngagementForm.isActive,
+        tags: parseTagInput(codesCreateEngagementForm.tags),
+        isActive: codesCreateEngagementForm.isActive,
       })
 
       await refreshAfterMutation()
-      setCodes4CreateContextEngagementId(result.id)
-      setCodes4CreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
-      setHasManualCodes4CreateEngagementTypeSelection(false)
-      setCodes4CreateActivityForm(buildEmptyActivityForm(result.id))
-      setCodes4CreateStep('activity')
+      setCodesCreateContextEngagementId(result.id)
+      setCodesCreateEngagementForm(EMPTY_ENGAGEMENT_FORM)
+      setHasManualCodesCreateEngagementTypeSelection(false)
+      setCodesCreateActivityForm(buildEmptyActivityForm(result.id))
+      setCodesCreateStep('activity')
       if (activeView === 'codes') {
-        setCodes3SelectedEngagementId(result.id)
-        setCodes3DetailMode('activities')
+        setCodesSelectedEngagementId(result.id)
+        setCodesDetailMode('activities')
       }
       setSuccessMessage(null)
-      setCodes4CreateNotice('Engagement created. Proceed to create activities.')
+      setCodesCreateNotice('Engagement created. Proceed to create activities.')
     }, { formatError: formatCodesMutationError })
   }
 
-  const onSubmitCodes4CreateActivity = (event: FormEvent<HTMLFormElement>) => {
+  const onSubmitCodesCreateActivity = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
     void runAction(async () => {
       const engagementId =
-        codes4CreateActivityForm.engagementId || resolveCodes4CreateActivityEngagementId()
-      const name = codes4CreateActivityForm.name.trim()
-      const code = codes4CreateActivityForm.code.trim()
-      const describeWhenToUse = codes4CreateActivityForm.describeWhenToUse.trim()
+        codesCreateActivityForm.engagementId || resolveCodesCreateActivityEngagementId()
+      const name = codesCreateActivityForm.name.trim()
+      const code = codesCreateActivityForm.code.trim()
+      const describeWhenToUse = codesCreateActivityForm.describeWhenToUse.trim()
 
       if (!engagementId) {
         throw new Error('Choose an engagement for the activity.')
@@ -5442,8 +5442,8 @@ function App() {
       if (!name) {
         throw new Error('Activity name is required.')
       }
-      const colorHex = normalizeColorHexInput(codes4CreateActivityForm.colorHex)
-      if (codes4CreateActivityForm.colorHex.trim().length > 0 && !colorHex) {
+      const colorHex = normalizeColorHexInput(codesCreateActivityForm.colorHex)
+      if (codesCreateActivityForm.colorHex.trim().length > 0 && !colorHex) {
         throw new Error('Activity color must be a valid #RRGGBB value.')
       }
 
@@ -5453,20 +5453,20 @@ function App() {
         name,
         colorHex,
         describeWhenToUse,
-        tags: parseTagInput(codes4CreateActivityForm.tags),
-        isActive: codes4CreateActivityForm.isActive,
+        tags: parseTagInput(codesCreateActivityForm.tags),
+        isActive: codesCreateActivityForm.isActive,
       })
 
       await refreshAfterMutation()
-      setCodes4CreateContextEngagementId(engagementId)
-      setCodes4CreateActivityForm(buildEmptyActivityForm(engagementId))
-      setCodes4CreateStep('activity')
+      setCodesCreateContextEngagementId(engagementId)
+      setCodesCreateActivityForm(buildEmptyActivityForm(engagementId))
+      setCodesCreateStep('activity')
       if (activeView === 'codes') {
-        setCodes3SelectedEngagementId(engagementId)
-        setCodes3DetailMode('activities')
+        setCodesSelectedEngagementId(engagementId)
+        setCodesDetailMode('activities')
       }
       setSuccessMessage(null)
-      setCodes4CreateNotice('Activity created. You may create the next activity.')
+      setCodesCreateNotice('Activity created. You may create the next activity.')
     }, { formatError: formatCodesMutationError })
   }
 
@@ -5479,7 +5479,7 @@ function App() {
   }
 
   const onEditActivity = (activity: Activity) => {
-    setCodes4CreateContextEngagementId(activity.engagementId)
+    setCodesCreateContextEngagementId(activity.engagementId)
     setCodeEditorSurface('edit-activity')
     setActivityForm({
       id: activity.id,
@@ -7370,38 +7370,38 @@ function App() {
     </aside>
   )
 
-  const codes4CreateModal = isCodes4CreateModalOpen ? createPortal(
+  const codesCreateModal = isCodesCreateModalOpen ? createPortal(
     <div
-      className="calendar-bulk-backdrop codes4-create-backdrop"
+      className="calendar-bulk-backdrop codes-create-backdrop"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !isBusy) {
-          closeCodes4CreateModal()
+          closeCodesCreateModal()
         }
       }}
     >
       <section
-        className="calendar-bulk-modal codes4-create-modal"
+        className="calendar-bulk-modal codes-create-modal"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="codes4-create-title"
+        aria-labelledby="codes-create-title"
       >
-        <header className="calendar-bulk-header codes4-create-header">
+        <header className="calendar-bulk-header codes-create-header">
           <div>
-            <h3 id="codes4-create-title">Add Codes</h3>
+            <h3 id="codes-create-title">Add Codes</h3>
             <p>
-              {codes4CreateStep === 'engagement'
+              {codesCreateStep === 'engagement'
                 ? 'Start with an engagement, then add its activities.'
                 : 'Add activities for the selected engagement.'}
             </p>
           </div>
-          {codes4CreateNotice ? (
-            <div className="alert success codes4-create-notice" role="status">
-              <span className="alert-message">{codes4CreateNotice}</span>
+          {codesCreateNotice ? (
+            <div className="alert success codes-create-notice" role="status">
+              <span className="alert-message">{codesCreateNotice}</span>
               <button
                 type="button"
                 className="alert-close"
                 aria-label="Dismiss add codes message"
-                onClick={() => setCodes4CreateNotice(null)}
+                onClick={() => setCodesCreateNotice(null)}
               >
                 &times;
               </button>
@@ -7413,7 +7413,7 @@ function App() {
               className="timeline-editor-close"
               aria-label="Close add codes"
               title="Close"
-              onClick={closeCodes4CreateModal}
+              onClick={closeCodesCreateModal}
               disabled={isBusy}
             >
               <span className="control-icon close-icon" aria-hidden="true" />
@@ -7421,14 +7421,14 @@ function App() {
           </div>
         </header>
 
-        <div className="codes4-create-body">
-          <nav className="codes4-create-rail" aria-label="Add code type">
+        <div className="codes-create-body">
+          <nav className="codes-create-rail" aria-label="Add code type">
             <button
               type="button"
-              className={codes4CreateStep === 'engagement' ? 'active' : ''}
+              className={codesCreateStep === 'engagement' ? 'active' : ''}
               onClick={() => {
-                setCodes4CreateStep('engagement')
-                setCodes4CreateNotice(null)
+                setCodesCreateStep('engagement')
+                setCodesCreateNotice(null)
               }}
             >
               <strong>Add Engagement</strong>
@@ -7436,13 +7436,13 @@ function App() {
             </button>
             <button
               type="button"
-              className={codes4CreateStep === 'activity' ? 'active' : ''}
+              className={codesCreateStep === 'activity' ? 'active' : ''}
               onClick={() => {
-                setCodes4CreateStep('activity')
-                setCodes4CreateNotice(null)
-                setCodes4CreateActivityForm((previous) => ({
+                setCodesCreateStep('activity')
+                setCodesCreateNotice(null)
+                setCodesCreateActivityForm((previous) => ({
                   ...previous,
-                  engagementId: previous.engagementId || resolveCodes4CreateActivityEngagementId(),
+                  engagementId: previous.engagementId || resolveCodesCreateActivityEngagementId(),
                 }))
               }}
               disabled={engagements.length === 0}
@@ -7452,10 +7452,10 @@ function App() {
             </button>
           </nav>
 
-          <section className="codes4-create-workspace">
-            {codes4CreateStep === 'engagement' ? (
-              <form className="stack code-editor-form codes4-create-form" onSubmit={onSubmitCodes4CreateEngagement}>
-                <div className="codes4-create-form-header">
+          <section className="codes-create-workspace">
+            {codesCreateStep === 'engagement' ? (
+              <form className="stack code-editor-form codes-create-form" onSubmit={onSubmitCodesCreateEngagement}>
+                <div className="codes-create-form-header">
                   <h4>Add Engagement</h4>
                   <button type="submit" className="button-soft-primary" disabled={isBusy}>
                     Add Engagement
@@ -7467,9 +7467,9 @@ function App() {
                     <span className="required-indicator" aria-hidden="true">*</span>
                   </span>
                   <input
-                    value={codes4CreateEngagementForm.name}
+                    value={codesCreateEngagementForm.name}
                     onChange={(event) =>
-                      setCodes4CreateEngagementForm((previous) => ({
+                      setCodesCreateEngagementForm((previous) => ({
                         ...previous,
                         name: event.target.value,
                       }))
@@ -7480,13 +7480,13 @@ function App() {
                 <label>
                   Engagement Code
                   <input
-                    value={codes4CreateEngagementForm.code}
+                    value={codesCreateEngagementForm.code}
                     onChange={(event) => {
                       const nextCode = event.target.value
-                      setCodes4CreateEngagementForm((previous) => ({
+                      setCodesCreateEngagementForm((previous) => ({
                         ...previous,
                         code: nextCode,
-                        engagementType: hasManualCodes4CreateEngagementTypeSelection
+                        engagementType: hasManualCodesCreateEngagementTypeSelection
                           ? previous.engagementType
                           : inferEngagementTypeFromCode(nextCode),
                       }))
@@ -7499,9 +7499,9 @@ function App() {
                   <textarea
                     rows={2}
                     maxLength={500}
-                    value={codes4CreateEngagementForm.describeWhenToUse}
+                    value={codesCreateEngagementForm.describeWhenToUse}
                     onChange={(event) =>
-                      setCodes4CreateEngagementForm((previous) => ({
+                      setCodesCreateEngagementForm((previous) => ({
                         ...previous,
                         describeWhenToUse: event.target.value,
                       }))
@@ -7511,9 +7511,9 @@ function App() {
                 <label>
                   Tags / Key Words (comma separated)
                   <input
-                    value={codes4CreateEngagementForm.tags}
+                    value={codesCreateEngagementForm.tags}
                     onChange={(event) =>
-                      setCodes4CreateEngagementForm((previous) => ({
+                      setCodesCreateEngagementForm((previous) => ({
                         ...previous,
                         tags: event.target.value,
                       }))
@@ -7523,9 +7523,9 @@ function App() {
                 <label>
                   Client
                   <input
-                    value={codes4CreateEngagementForm.client}
+                    value={codesCreateEngagementForm.client}
                     onChange={(event) =>
-                      setCodes4CreateEngagementForm((previous) => ({
+                      setCodesCreateEngagementForm((previous) => ({
                         ...previous,
                         client: event.target.value,
                       }))
@@ -7543,11 +7543,11 @@ function App() {
                       <button
                         key={engagementType}
                         type="button"
-                        className={codes4CreateEngagementForm.engagementType === engagementType ? 'active' : ''}
-                        aria-pressed={codes4CreateEngagementForm.engagementType === engagementType}
+                        className={codesCreateEngagementForm.engagementType === engagementType ? 'active' : ''}
+                        aria-pressed={codesCreateEngagementForm.engagementType === engagementType}
                         onClick={() => {
-                          setHasManualCodes4CreateEngagementTypeSelection(true)
-                          setCodes4CreateEngagementForm((previous) => ({
+                          setHasManualCodesCreateEngagementTypeSelection(true)
+                          setCodesCreateEngagementForm((previous) => ({
                             ...previous,
                             engagementType,
                           }))
@@ -7563,9 +7563,9 @@ function App() {
                   <div className="color-input-row">
                     <input
                       type="color"
-                      value={codes4CreateEngagementColorValue ?? TIMELINE_NEUTRAL_COLOR}
+                      value={codesCreateEngagementColorValue ?? TIMELINE_NEUTRAL_COLOR}
                       onChange={(event) =>
-                        setCodes4CreateEngagementForm((previous) => ({
+                        setCodesCreateEngagementForm((previous) => ({
                           ...previous,
                           colorHex: event.target.value.toUpperCase(),
                         }))
@@ -7573,9 +7573,9 @@ function App() {
                       aria-label="Select engagement color"
                     />
                     <input
-                      value={codes4CreateEngagementForm.colorHex}
+                      value={codesCreateEngagementForm.colorHex}
                       onChange={(event) =>
-                        setCodes4CreateEngagementForm((previous) => ({
+                        setCodesCreateEngagementForm((previous) => ({
                           ...previous,
                           colorHex: event.target.value.toUpperCase(),
                         }))
@@ -7587,7 +7587,7 @@ function App() {
                       type="button"
                       className="ghost color-clear-button"
                       onClick={() =>
-                        setCodes4CreateEngagementForm((previous) => ({
+                        setCodesCreateEngagementForm((previous) => ({
                           ...previous,
                           colorHex: '',
                         }))
@@ -7603,9 +7603,9 @@ function App() {
                     <label className="settings-toggle-group">
                       <input
                         type="checkbox"
-                        checked={codes4CreateEngagementForm.isActive}
+                        checked={codesCreateEngagementForm.isActive}
                         onChange={(event) =>
-                          setCodes4CreateEngagementForm((previous) => ({
+                          setCodesCreateEngagementForm((previous) => ({
                             ...previous,
                             isActive: event.target.checked,
                           }))
@@ -7618,8 +7618,8 @@ function App() {
                 </div>
               </form>
             ) : (
-              <form className="stack code-editor-form codes4-create-form" onSubmit={onSubmitCodes4CreateActivity}>
-                <div className="codes4-create-form-header">
+              <form className="stack code-editor-form codes-create-form" onSubmit={onSubmitCodesCreateActivity}>
+                <div className="codes-create-form-header">
                   <h4>Add Activity</h4>
                   <button
                     type="submit"
@@ -7632,9 +7632,9 @@ function App() {
                 <label>
                   Engagement Name
                   <select
-                    value={codes4CreateActivityForm.engagementId}
+                    value={codesCreateActivityForm.engagementId}
                     onChange={(event) =>
-                      setCodes4CreateActivityForm((previous) => ({
+                      setCodesCreateActivityForm((previous) => ({
                         ...previous,
                         engagementId: event.target.value,
                       }))
@@ -7658,9 +7658,9 @@ function App() {
                     <span className="required-indicator" aria-hidden="true">*</span>
                   </span>
                   <input
-                    value={codes4CreateActivityForm.name}
+                    value={codesCreateActivityForm.name}
                     onChange={(event) =>
-                      setCodes4CreateActivityForm((previous) => ({
+                      setCodesCreateActivityForm((previous) => ({
                         ...previous,
                         name: event.target.value,
                       }))
@@ -7672,9 +7672,9 @@ function App() {
                 <label>
                   Activity Code
                   <input
-                    value={codes4CreateActivityForm.code}
+                    value={codesCreateActivityForm.code}
                     onChange={(event) =>
-                      setCodes4CreateActivityForm((previous) => ({
+                      setCodesCreateActivityForm((previous) => ({
                         ...previous,
                         code: event.target.value,
                       }))
@@ -7688,9 +7688,9 @@ function App() {
                   <textarea
                     rows={2}
                     maxLength={500}
-                    value={codes4CreateActivityForm.describeWhenToUse}
+                    value={codesCreateActivityForm.describeWhenToUse}
                     onChange={(event) =>
-                      setCodes4CreateActivityForm((previous) => ({
+                      setCodesCreateActivityForm((previous) => ({
                         ...previous,
                         describeWhenToUse: event.target.value,
                       }))
@@ -7701,9 +7701,9 @@ function App() {
                 <label>
                   Tags / Key Words (comma separated)
                   <input
-                    value={codes4CreateActivityForm.tags}
+                    value={codesCreateActivityForm.tags}
                     onChange={(event) =>
-                      setCodes4CreateActivityForm((previous) => ({
+                      setCodesCreateActivityForm((previous) => ({
                         ...previous,
                         tags: event.target.value,
                       }))
@@ -7717,12 +7717,12 @@ function App() {
                     <input
                       type="color"
                       value={
-                        codes4CreateActivityColorValue
-                        ?? selectedCodes4CreateEngagementColorValue
+                        codesCreateActivityColorValue
+                        ?? selectedCodesCreateEngagementColorValue
                         ?? TIMELINE_NEUTRAL_COLOR
                       }
                       onChange={(event) =>
-                        setCodes4CreateActivityForm((previous) => ({
+                        setCodesCreateActivityForm((previous) => ({
                           ...previous,
                           colorHex: event.target.value.toUpperCase(),
                         }))
@@ -7732,12 +7732,12 @@ function App() {
                     />
                     <input
                       value={
-                        codes4CreateActivityForm.colorHex
-                        || selectedCodes4CreateEngagementColorValue
+                        codesCreateActivityForm.colorHex
+                        || selectedCodesCreateEngagementColorValue
                         || ''
                       }
                       onChange={(event) =>
-                        setCodes4CreateActivityForm((previous) => ({
+                        setCodesCreateActivityForm((previous) => ({
                           ...previous,
                           colorHex: event.target.value.toUpperCase(),
                         }))
@@ -7750,7 +7750,7 @@ function App() {
                       type="button"
                       className="ghost color-clear-button"
                       onClick={() =>
-                        setCodes4CreateActivityForm((previous) => ({
+                        setCodesCreateActivityForm((previous) => ({
                           ...previous,
                           colorHex: '',
                         }))
@@ -7767,9 +7767,9 @@ function App() {
                     <label className="settings-toggle-group">
                       <input
                         type="checkbox"
-                        checked={codes4CreateActivityForm.isActive}
+                        checked={codesCreateActivityForm.isActive}
                         onChange={(event) =>
-                          setCodes4CreateActivityForm((previous) => ({
+                          setCodesCreateActivityForm((previous) => ({
                             ...previous,
                             isActive: event.target.checked,
                           }))
@@ -7925,7 +7925,7 @@ function App() {
               className="ghost quick-add-settings-header-button"
               onClick={() => {
                 closeQuickAddSettings()
-                openCodes4CreateEngagementModal()
+                openCodesCreateEngagementModal()
               }}
               disabled={isBusy}
             >
@@ -7937,7 +7937,7 @@ function App() {
               className="ghost quick-add-settings-header-button"
               onClick={() => {
                 closeQuickAddSettings()
-                openCodes4CreateActivityModal()
+                openCodesCreateActivityModal()
               }}
               disabled={isBusy || engagements.length === 0}
             >
@@ -8833,57 +8833,57 @@ function App() {
     document.body,
   ) : null
 
-  const codes3ActivitiesPane = selectedCodes3Engagement ? (
+  const codesActivitiesPane = selectedCodesEngagement ? (
     <>
-      <div className="codes3-activities-toolbar">
-        <div className="codes3-pane-title">
-          <h2 title={codes3ActivitiesHeading}>{codes3ActivitiesHeading}</h2>
+      <div className="codes-activities-toolbar">
+        <div className="codes-pane-title">
+          <h2 title={codesActivitiesHeading}>{codesActivitiesHeading}</h2>
         </div>
         <input
           type="search"
-          className="quick-add-search codes3-activity-search"
-          value={codes3ActivitySearch}
-          onChange={(event) => setCodes3ActivitySearch(event.target.value)}
+          className="quick-add-search codes-activity-search"
+          value={codesActivitySearch}
+          onChange={(event) => setCodesActivitySearch(event.target.value)}
           placeholder="Search activities"
           aria-label="Search activities"
-          disabled={codes3IsEditing}
+          disabled={codesIsEditing}
         />
       </div>
 
-      <div className="codes3-activity-list">
-        {selectedCodes3Engagement.activities.length === 0 ? (
+      <div className="codes-activity-list">
+        {selectedCodesEngagement.activities.length === 0 ? (
           <p className="engagement-empty-state">No activities yet.</p>
-        ) : filteredCodes3Activities.length === 0 ? (
+        ) : filteredCodesActivities.length === 0 ? (
           <p className="engagement-empty-state">No matching activities.</p>
         ) : (
-          filteredCodes3Activities.map((activity) => {
+          filteredCodesActivities.map((activity) => {
             const activityColor =
               normalizeColorHexInput(activity.colorHex)
-              ?? normalizeColorHexInput(selectedCodes3Engagement.colorHex)
+              ?? normalizeColorHexInput(selectedCodesEngagement.colorHex)
               ?? TIMELINE_NEUTRAL_COLOR
 
             return (
               <div
                 key={activity.id}
-                className={`codes3-activity-row ${activity.isActive ? '' : 'is-inactive'}`}
-                style={{ '--codes3-activity-color': activityColor } as CSSProperties}
+                className={`codes-activity-row ${activity.isActive ? '' : 'is-inactive'}`}
+                style={{ '--codes-activity-color': activityColor } as CSSProperties}
               >
                 <div>
-                  <div className="codes4-title-line">
+                  <div className="codes-title-line">
                     {activity.code ? (
                       <span className="code-item-badge">{activity.code}</span>
                     ) : null}
                     <strong>{activity.name}</strong>
                     {activity.isActive ? null : (
-                      <span className="codes4-state-pill">Inactive</span>
+                      <span className="codes-state-pill">Inactive</span>
                     )}
                   </div>
-                  <span className="codes3-activity-usage">
+                  <span className="codes-activity-usage">
                     {activity.describeWhenToUse || 'Usage guidance not added yet.'}
                   </span>
                   <ResponsiveCodeTagList
                     tags={activity.tags}
-                    itemKeyPrefix={`codes3-activity-${activity.id}`}
+                    itemKeyPrefix={`codes-activity-${activity.id}`}
                   />
                 </div>
                 <div className="code-item-actions">
@@ -8892,11 +8892,11 @@ function App() {
                     className="icon-action-button"
                     aria-label={`Edit activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
                     onClick={() => {
-                      setCodes3SelectedEngagementId(activity.engagementId)
+                      setCodesSelectedEngagementId(activity.engagementId)
                       onEditActivity(activity)
-                      setCodes3DetailMode('edit-activity')
+                      setCodesDetailMode('edit-activity')
                     }}
-                    disabled={codes3IsEditing}
+                    disabled={codesIsEditing}
                   >
                     <img src={editIcon} alt="" aria-hidden="true" />
                   </button>
@@ -8905,10 +8905,10 @@ function App() {
                     className="icon-action-button is-danger"
                     aria-label={`Delete activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
                     onClick={() => {
-                      setCodes3DetailMode('activities')
+                      setCodesDetailMode('activities')
                       onDeleteActivity(activity.id)
                     }}
-                    disabled={codes3IsEditing}
+                    disabled={codesIsEditing}
                   >
                     <img src={deleteIcon} alt="" aria-hidden="true" />
                   </button>
@@ -10212,59 +10212,59 @@ function App() {
         ) : null}
 
         {activeView === 'codes' ? (
-          <section className="panel codes-prototype codes3-panel">
-            <div className="codes3-layout">
-              <aside className="codes3-rail" aria-label="Engagement hierarchy">
-                <div className="codes3-rail-header">
-                  <div className="codes3-pane-title">
+          <section className="panel codes-prototype codes-panel">
+            <div className="codes-layout">
+              <aside className="codes-rail" aria-label="Engagement hierarchy">
+                <div className="codes-rail-header">
+                  <div className="codes-pane-title">
                     <h2>Engagements</h2>
                   </div>
                   <input
                     type="search"
-                    className="quick-add-search codes3-engagement-search"
-                    value={codes3EngagementSearch}
-                    onChange={(event) => setCodes3EngagementSearch(event.target.value)}
+                    className="quick-add-search codes-engagement-search"
+                    value={codesEngagementSearch}
+                    onChange={(event) => setCodesEngagementSearch(event.target.value)}
                     placeholder="Search engagements"
                     aria-label="Search engagements"
                   />
                 </div>
-                <div className="codes3-rail-list">
+                <div className="codes-rail-list">
                   {engagements.length === 0 ? (
                     <p className="code-list-empty">No engagements yet.</p>
-                  ) : filteredCodes3Engagements.length === 0 ? (
+                  ) : filteredCodesEngagements.length === 0 ? (
                     <p className="code-list-empty">No matching engagements.</p>
                   ) : (
-                    filteredCodes3Engagements.map((engagement) => {
+                    filteredCodesEngagements.map((engagement) => {
                       const engagementColor =
                         normalizeColorHexInput(engagement.colorHex) ?? TIMELINE_NEUTRAL_COLOR
-                      const isSelected = selectedCodes3Engagement?.id === engagement.id
+                      const isSelected = selectedCodesEngagement?.id === engagement.id
 
                       return (
                         <div
                           key={engagement.id}
-                          className={`codes3-rail-item ${isSelected ? 'active' : ''} ${
+                          className={`codes-rail-item ${isSelected ? 'active' : ''} ${
                             engagement.isActive ? '' : 'is-inactive'
                           }`}
-                          style={{ '--codes3-engagement-color': engagementColor } as CSSProperties}
+                          style={{ '--codes-engagement-color': engagementColor } as CSSProperties}
                         >
                           <button
                             type="button"
-                            className="codes3-rail-select"
+                            className="codes-rail-select"
                             onClick={() => {
-                              setCodes3SelectedEngagementId(engagement.id)
-                              setCodes4CreateContextEngagementId(engagement.id)
-                              setCodes3ActivitySearch('')
+                              setCodesSelectedEngagementId(engagement.id)
+                              setCodesCreateContextEngagementId(engagement.id)
+                              setCodesActivitySearch('')
                               closeCodeEditor()
                             }}
                           >
-                            <span className="codes3-rail-copy">
-                              <span className="codes3-rail-title">
+                            <span className="codes-rail-copy">
+                              <span className="codes-rail-title">
                                 {engagement.code ? (
                                   <span className="code-item-badge">{engagement.code}</span>
                                 ) : null}
                                 <span>{engagement.name}</span>
                                 {engagement.isActive ? null : (
-                                  <span className="codes4-state-pill">Inactive</span>
+                                  <span className="codes-state-pill">Inactive</span>
                                 )}
                               </span>
                               <small>
@@ -10272,7 +10272,7 @@ function App() {
                               </small>
                             </span>
                           </button>
-                          <div className="codes3-rail-actions">
+                          <div className="codes-rail-actions">
                             <button
                               type="button"
                               className="icon-action-button"
@@ -10282,11 +10282,11 @@ function App() {
                               )}`}
                               title={`Edit engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
                               onClick={() => {
-                                setCodes3SelectedEngagementId(engagement.id)
-                                setCodes4CreateContextEngagementId(engagement.id)
-                                setCodes3ActivitySearch('')
+                                setCodesSelectedEngagementId(engagement.id)
+                                setCodesCreateContextEngagementId(engagement.id)
+                                setCodesActivitySearch('')
                                 onEditEngagement(engagement)
-                                setCodes3DetailMode('edit-engagement')
+                                setCodesDetailMode('edit-engagement')
                               }}
                             >
                               <img src={editIcon} alt="" aria-hidden="true" />
@@ -10300,7 +10300,7 @@ function App() {
                               )}`}
                               title={`Delete engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
                               onClick={() => {
-                                setCodes3DetailMode('activities')
+                                setCodesDetailMode('activities')
                                 onDeleteEngagement(engagement.id)
                               }}
                             >
@@ -10314,8 +10314,8 @@ function App() {
                 </div>
                 <button
                   type="button"
-                  className="ghost codes3-pane-create-button codes3-floating-add-button"
-                  onClick={openCodes3CreateEngagementModal}
+                  className="ghost codes-pane-create-button codes-floating-add-button"
+                  onClick={openCodesCreateEngagementFromPane}
                   disabled={isBusy}
                 >
                   <span className="control-icon plus-icon" aria-hidden="true" />
@@ -10324,18 +10324,18 @@ function App() {
               </aside>
 
               <section
-                className={`codes3-detail ${codes3IsEditing ? 'is-editing' : ''}`}
+                className={`codes-detail ${codesIsEditing ? 'is-editing' : ''}`}
               >
-                {codes3IsEditing ? (
-                  <div className="codes3-activities-surface is-under-editing" aria-hidden="true">
-                    {codes3ActivitiesPane}
+                {codesIsEditing ? (
+                  <div className="codes-activities-surface is-under-editing" aria-hidden="true">
+                    {codesActivitiesPane}
                   </div>
                 ) : null}
-                {codes3DetailMode === 'edit-engagement' && isEditingEngagement ? (
-                  <form className="stack code-editor-form codes4-edit-form codes3-edit-form" onSubmit={onSubmitEngagement}>
-                    <div className="codes4-edit-header">
+                {codesDetailMode === 'edit-engagement' && isEditingEngagement ? (
+                  <form className="stack code-editor-form codes-edit-form codes-edit-form" onSubmit={onSubmitEngagement}>
+                    <div className="codes-edit-header">
                       <h3>Edit Engagement</h3>
-                      <div className="codes4-edit-header-actions">
+                      <div className="codes-edit-header-actions">
                         <button type="button" className="ghost" onClick={closeCodeEditor}>
                           Cancel
                         </button>
@@ -10506,11 +10506,11 @@ function App() {
                       <small>Show in timeline code selection and quick entry panels</small>
                     </div>
                   </form>
-                ) : codes3DetailMode === 'edit-activity' && isEditingActivity ? (
-                  <form className="stack code-editor-form codes4-edit-form codes3-edit-form" onSubmit={onSubmitActivity}>
-                    <div className="codes4-edit-header">
+                ) : codesDetailMode === 'edit-activity' && isEditingActivity ? (
+                  <form className="stack code-editor-form codes-edit-form codes-edit-form" onSubmit={onSubmitActivity}>
+                    <div className="codes-edit-header">
                       <h3>Edit Activity</h3>
-                      <div className="codes4-edit-header-actions">
+                      <div className="codes-edit-header-actions">
                         <button type="button" className="ghost" onClick={closeCodeEditor}>
                           Cancel
                         </button>
@@ -10658,56 +10658,56 @@ function App() {
                       <small>Show in timeline code selection and quick entry panels</small>
                     </div>
                   </form>
-                ) : selectedCodes3Engagement ? (
+                ) : selectedCodesEngagement ? (
                   <>
-                    <div className="codes3-activities-toolbar">
-                      <div className="codes3-pane-title">
-                        <h2 title={codes3ActivitiesHeading}>{codes3ActivitiesHeading}</h2>
+                    <div className="codes-activities-toolbar">
+                      <div className="codes-pane-title">
+                        <h2 title={codesActivitiesHeading}>{codesActivitiesHeading}</h2>
                       </div>
                       <input
                         type="search"
-                        className="quick-add-search codes3-activity-search"
-                        value={codes3ActivitySearch}
-                        onChange={(event) => setCodes3ActivitySearch(event.target.value)}
+                        className="quick-add-search codes-activity-search"
+                        value={codesActivitySearch}
+                        onChange={(event) => setCodesActivitySearch(event.target.value)}
                         placeholder="Search activities"
                         aria-label="Search activities"
                       />
                     </div>
 
-                    <div className="codes3-activity-list">
-                      {selectedCodes3Engagement.activities.length === 0 ? (
+                    <div className="codes-activity-list">
+                      {selectedCodesEngagement.activities.length === 0 ? (
                         <p className="engagement-empty-state">No activities yet.</p>
-                      ) : filteredCodes3Activities.length === 0 ? (
+                      ) : filteredCodesActivities.length === 0 ? (
                         <p className="engagement-empty-state">No matching activities.</p>
                       ) : (
-                        filteredCodes3Activities.map((activity) => {
+                        filteredCodesActivities.map((activity) => {
                           const activityColor =
                             normalizeColorHexInput(activity.colorHex)
-                            ?? normalizeColorHexInput(selectedCodes3Engagement.colorHex)
+                            ?? normalizeColorHexInput(selectedCodesEngagement.colorHex)
                             ?? TIMELINE_NEUTRAL_COLOR
 
                           return (
                             <div
                               key={activity.id}
-                              className={`codes3-activity-row ${activity.isActive ? '' : 'is-inactive'}`}
-                              style={{ '--codes3-activity-color': activityColor } as CSSProperties}
+                              className={`codes-activity-row ${activity.isActive ? '' : 'is-inactive'}`}
+                              style={{ '--codes-activity-color': activityColor } as CSSProperties}
                             >
                               <div>
-                                <div className="codes4-title-line">
+                                <div className="codes-title-line">
                                   {activity.code ? (
                                     <span className="code-item-badge">{activity.code}</span>
                                   ) : null}
                                   <strong>{activity.name}</strong>
                                   {activity.isActive ? null : (
-                                    <span className="codes4-state-pill">Inactive</span>
+                                    <span className="codes-state-pill">Inactive</span>
                                   )}
                                 </div>
-                                <span className="codes3-activity-usage">
+                                <span className="codes-activity-usage">
                                   {activity.describeWhenToUse || 'Usage guidance not added yet.'}
                                 </span>
                                 <ResponsiveCodeTagList
                                   tags={activity.tags}
-                                  itemKeyPrefix={`codes3-activity-${activity.id}`}
+                                  itemKeyPrefix={`codes-activity-${activity.id}`}
                                 />
                               </div>
                               <div className="code-item-actions">
@@ -10716,9 +10716,9 @@ function App() {
                                   className="icon-action-button"
                                   aria-label={`Edit activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
                                   onClick={() => {
-                                    setCodes3SelectedEngagementId(activity.engagementId)
+                                    setCodesSelectedEngagementId(activity.engagementId)
                                     onEditActivity(activity)
-                                    setCodes3DetailMode('edit-activity')
+                                    setCodesDetailMode('edit-activity')
                                   }}
                                 >
                                   <img src={editIcon} alt="" aria-hidden="true" />
@@ -10728,7 +10728,7 @@ function App() {
                                   className="icon-action-button is-danger"
                                   aria-label={`Delete activity ${formatEntityDisplayLabel(activity.name, activity.code)}`}
                                   onClick={() => {
-                                    setCodes3DetailMode('activities')
+                                    setCodesDetailMode('activities')
                                     onDeleteActivity(activity.id)
                                   }}
                                 >
@@ -10744,12 +10744,12 @@ function App() {
                 ) : (
                   <p className="code-list-empty">No engagement selected.</p>
                 )}
-                {selectedCodes3Engagement && !codes3IsEditing ? (
+                {selectedCodesEngagement && !codesIsEditing ? (
                   <button
                     type="button"
-                    className="ghost codes3-pane-create-button codes3-floating-add-button"
-                    onClick={openCodes3CreateActivityModal}
-                    disabled={isBusy || !selectedCodes3Engagement}
+                    className="ghost codes-pane-create-button codes-floating-add-button"
+                    onClick={openCodesCreateActivityFromPane}
+                    disabled={isBusy || !selectedCodesEngagement}
                   >
                     <span className="control-icon plus-icon" aria-hidden="true" />
                     Add Activity
@@ -11462,7 +11462,7 @@ function App() {
           </div>
         </main>
       </div>
-      {codes4CreateModal}
+      {codesCreateModal}
       {quickAddSettingsModal}
       {calendarBulkModal}
       {timelineContextMenu ? createPortal(
