@@ -99,6 +99,7 @@ import type {
   TimelineWeekView,
   TimelineWeeklySummary,
   TimelineWeeklySummaryNote,
+  TimelineWeeklySummaryRow,
   TranscriptionModelId,
   WarningType,
 } from './lib/types'
@@ -1062,7 +1063,7 @@ function App() {
 
   const [captureMessage, setCaptureMessage] = useState('')
   const [captureDraftMetadata, setCaptureDraftMetadata] = useState<VoiceDraftMetadata | null>(null)
-  const [isLlmEntryCollapsed, setIsLlmEntryCollapsed] = useState(false)
+  const [isLlmEntryCollapsed, setIsLlmEntryCollapsed] = useState(true)
   const [voiceCaptureState, setVoiceCaptureState] = useState<VoiceCaptureState>('idle')
   const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
@@ -7520,6 +7521,7 @@ function App() {
                 <div className="codes-create-form-header">
                   <h4>Add Engagement</h4>
                   <button type="submit" className="button-soft-primary" disabled={isBusy}>
+                    <span className="control-icon plus-icon" aria-hidden="true" />
                     Add Engagement
                   </button>
                 </div>
@@ -7688,6 +7690,7 @@ function App() {
                     className="button-soft-primary"
                     disabled={isBusy || engagements.length === 0}
                   >
+                    <span className="control-icon plus-icon" aria-hidden="true" />
                     Add Activity
                   </button>
                 </div>
@@ -10983,7 +10986,7 @@ function App() {
                 </div>
                 <div className="settings-preference-row settings-toggle-row">
                   <label htmlFor="settings-timeline-exclude-uncategorized">
-                    Exclude uncategorized time from daily, weekly, and summary view totals
+                    Exclude uncategorized time from daily, weekly, and reporting totals
                   </label>
                   <div className="settings-toggle-group">
                     <input
@@ -11005,7 +11008,7 @@ function App() {
                 </div>
                 <div className="settings-preference-row settings-toggle-row">
                   <label htmlFor="settings-timeline-show-uncategorized">
-                    Display uncategorized time alongside categorized time in daily, weekly, and summary view totals.
+                    Display uncategorized time alongside categorized time in daily, weekly, and reporting totals.
                   </label>
                   <div className="settings-toggle-group">
                     <input
@@ -11083,7 +11086,7 @@ function App() {
                 </div>
                 <div className="settings-preference-row settings-toggle-row">
                   <label htmlFor="settings-timeline-separate-types">
-                    Separate out External and Internal type codes in the daily, weekly, and summary view totals.
+                    Separate out External and Internal type codes in the daily, weekly, and reporting totals.
                   </label>
                   <div className="settings-toggle-group">
                     <input
@@ -11391,6 +11394,8 @@ function App() {
                         weeklySummary.rows.map((row, rowIndex) => {
                           const rowKey = getSummaryRowKey(row, rowIndex)
                           const rowMeta = formatReportingRowMeta(row, previewReportingDisplayPreset)
+                          const isExcludedFromReportingTotal =
+                            isReportingRowExcludedFromPrimaryTotal(row, timelineTotalPreferences)
 
                           return (
                             <div
@@ -11440,7 +11445,9 @@ function App() {
                                 )
                               })}
                               <strong className="reporting-total-cell" role="cell">
-                                {formatMinutesAsHours(row.rowTotalMinutes)}
+                                {isExcludedFromReportingTotal
+                                  ? 'Excluded'
+                                  : formatMinutesAsHours(row.rowTotalMinutes)}
                               </strong>
                             </div>
                           )
@@ -13298,6 +13305,25 @@ function finalizeTimelineTotalBreakdown(
     ...breakdown,
     primaryMinutes,
   }
+}
+
+function isReportingRowExcludedFromPrimaryTotal(
+  row: TimelineWeeklySummaryRow,
+  preferences: TimelineTotalPreferences,
+): boolean {
+  if (row.isUncategorized) {
+    return preferences.excludeUncategorizedFromTotals
+  }
+
+  if (row.engagementType === 'internal') {
+    return !preferences.includeInternalInTotals
+  }
+
+  if (row.engagementType === 'external') {
+    return !preferences.includeExternalInTotals
+  }
+
+  return false
 }
 
 function addEntryToTimelineTotalBreakdown(
