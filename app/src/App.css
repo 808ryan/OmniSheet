@@ -2055,6 +2055,10 @@ button.danger:hover:not(:disabled) {
   --timeline-block-accent: #6f7b89;
   --timeline-block-selection-ring: rgba(111, 123, 137, 0.3);
   --timeline-block-accent-width: 4px;
+  --timeline-block-accent-gap: 0.22rem;
+  --timeline-block-padding-x: 0.5rem;
+  --timeline-block-padding-y: 0.28rem;
+  --timeline-block-leading-indent: calc(var(--timeline-block-accent-width) + var(--timeline-block-accent-gap));
   position: absolute;
   left: 0;
   border-radius: 10px;
@@ -2064,7 +2068,8 @@ button.danger:hover:not(:disabled) {
     var(--timeline-block-fill);
   color: #0f172a;
   text-align: left;
-  padding: 0.28rem 0.5rem 0.28rem calc(0.5rem + var(--timeline-block-accent-width) + 0.22rem);
+  padding: var(--timeline-block-padding-y) var(--timeline-block-padding-x) var(--timeline-block-padding-y)
+    calc(var(--timeline-block-padding-x) + var(--timeline-block-leading-indent));
   display: flex;
   align-items: center;
   overflow: hidden;
@@ -2094,15 +2099,14 @@ button.danger:hover:not(:disabled) {
   pointer-events: none;
 }
 
-.timeline-block.needs-review:not(.selected):not(.drag-preview)::after {
-  content: '';
-  position: absolute;
-  inset: 2px;
+.timeline-block.needs-review:not(.selected):not(.drag-preview) {
+  --timeline-block-leading-indent: 0px;
   border: 2px dashed var(--timeline-block-accent);
-  border-radius: 8px;
-  box-sizing: border-box;
-  pointer-events: none;
-  z-index: 0;
+  background-clip: padding-box;
+}
+
+.timeline-block.needs-review:not(.selected):not(.drag-preview)::before {
+  display: none;
 }
 
 .timeline-block:hover {
@@ -2133,6 +2137,7 @@ button.danger:hover:not(:disabled) {
 
 .timeline-block.drag-preview {
   border: 2px dashed var(--timeline-block-accent);
+  background-clip: padding-box;
   color: #0f172a;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.48),
@@ -2165,7 +2170,9 @@ button.danger:hover:not(:disabled) {
 }
 
 .timeline-block.tier-3 {
-  padding: 0.2rem 0.4rem 0.2rem calc(0.4rem + var(--timeline-block-accent-width) + 0.16rem);
+  --timeline-block-accent-gap: 0.16rem;
+  --timeline-block-padding-x: 0.4rem;
+  --timeline-block-padding-y: 0.2rem;
 }
 
 .timeline-block.tier-3 .timeline-block-label {
