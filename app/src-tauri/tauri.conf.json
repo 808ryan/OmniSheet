@@ -14,6 +14,7 @@
       {
         "title": "OmniSheet",
         "width": 1320,
+        "minWidth": 1180,
         "height": 860,
         "resizable": true,
         "fullscreen": false

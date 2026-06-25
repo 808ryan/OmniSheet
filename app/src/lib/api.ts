@@ -23,8 +23,10 @@ import type {
   OpenAiModelId,
   QuickAddSuggestionInput,
   QuickAddSuggestionResult,
+  ReportingState,
   SettingsStatus,
   SettingsCalendarBulkPreferencesInput,
+  SettingsQuickAddPreferencesInput,
   SettingsTimelinePreferencesInput,
   SummaryExportResult,
   SummaryExportWeeklyExcelInput,
@@ -219,12 +221,26 @@ export function settingsSetCalendarBulkPreferences(
   return invokeCommand<void>('settings_set_calendar_bulk_preferences', { input })
 }
 
+export function settingsSetQuickAddPreferences(
+  input: SettingsQuickAddPreferencesInput,
+): Promise<void> {
+  return invokeCommand<void>('settings_set_quick_add_preferences', { input })
+}
+
 export function summaryLayoutStateGet(): Promise<SummaryLayoutState> {
   return invokeCommand<SummaryLayoutState>('summary_layout_state_get')
 }
 
 export function summaryLayoutStateSet(input: SummaryLayoutState): Promise<SummaryLayoutState> {
   return invokeCommand<SummaryLayoutState>('summary_layout_state_set', { input })
+}
+
+export function reportingStateGet(): Promise<ReportingState> {
+  return invokeCommand<ReportingState>('reporting_state_get')
+}
+
+export function reportingStateSet(input: ReportingState): Promise<ReportingState> {
+  return invokeCommand<ReportingState>('reporting_state_set', { input })
 }
 
 export function engagementList(): Promise<Engagement[]> {

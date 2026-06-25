@@ -43,7 +43,7 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
             }
             TRAY_MENU_SHOW_QUICK_ADD_ID => {
                 if let Err(error) = show_quick_add_window(app) {
-                    log::error!("failed to show quick add window from tray menu: {error}");
+                    log::error!("failed to show quick entry window from tray menu: {error}");
                 }
             }
             TRAY_MENU_EXIT_ID => app.exit(0),
@@ -58,7 +58,7 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
             } = event
             {
                 if let Err(error) = toggle_quick_add_window(tray.app_handle(), rect) {
-                    log::error!("failed to toggle quick add window: {error}");
+                    log::error!("failed to toggle quick entry window: {error}");
                 }
             }
         })
@@ -143,7 +143,7 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         QUICK_ADD_LABEL,
         WebviewUrl::App("index.html?window=quick-add".into()),
     )
-    .title("Quick Add")
+    .title("Quick Entry")
     .inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
     .min_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
     .max_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
