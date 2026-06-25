@@ -128,6 +128,7 @@ type CodeEditorSurface =
 type CodesCreateStep = 'engagement' | 'activity'
 type CodesDetailMode = 'activities' | 'edit-engagement' | 'edit-activity'
 type TimelineSurface = 'day' | 'week' | 'calendar-review'
+type TimelineDragMode = 'pending' | 'move' | 'resize-duration'
 
 type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
 type HistoryMode = 'all' | 'queue' | 'submissions' | 'entries'
@@ -430,6 +431,7 @@ interface TimelineDragState {
   surface: TimelineSurface
   entryId: string
   pointerId: number
+  dragMode: TimelineDragMode
   initialClientX: number
   initialClientY: number
   lockedLaneIndex: number
@@ -582,6 +584,10 @@ const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
+const TIMELINE_DURATION_RESIZE_ACTIVATION_PX = 12
+const TIMELINE_DURATION_RESIZE_DOMINANCE_RATIO = 1.5
+const TIMELINE_DURATION_RESIZE_STEP_PX = 28
+const TIMELINE_DURATION_RESIZE_STEP_MINUTES = 30
 const QUICK_BLOCK_DURATION_STEP_MINUTES = 30
 const QUICK_BLOCK_MAX_DURATION_MINUTES = 8 * HOUR_IN_MINUTES
 const QUICK_BLOCK_DRAG_STEP_PX = 22
@@ -2155,7 +2161,7 @@ function App() {
     ],
   )
   const draggedEntryOriginPosition = useMemo(() => {
-    if (!timelineDragState?.isDragging) {
+    if (!timelineDragState?.isDragging || timelineDragState.dragMode !== 'move') {
       return null
     }
 
@@ -2251,7 +2257,7 @@ function App() {
     ],
   )
   const draggedWeekEntryOriginPosition = useMemo(() => {
-    if (!timelineDragState?.isDragging) {
+    if (!timelineDragState?.isDragging || timelineDragState.dragMode !== 'move') {
       return null
     }
 
@@ -4443,10 +4449,60 @@ function App() {
         return
       }
 
-      if (
-        !current.isDragging
-        && Math.abs(event.clientY - current.initialClientY) < TIMELINE_DRAG_ACTIVATION_PX
-      ) {
+      const deltaX = event.clientX - current.initialClientX
+      const deltaY = event.clientY - current.initialClientY
+      let dragMode = current.dragMode
+
+      if (dragMode === 'pending') {
+        const absoluteDeltaX = Math.abs(deltaX)
+        const absoluteDeltaY = Math.abs(deltaY)
+        const shouldResizeDuration =
+          current.surface !== 'calendar-review'
+          && absoluteDeltaX >= TIMELINE_DURATION_RESIZE_ACTIVATION_PX
+          && absoluteDeltaX >= absoluteDeltaY * TIMELINE_DURATION_RESIZE_DOMINANCE_RATIO
+
+        if (shouldResizeDuration) {
+          dragMode = 'resize-duration'
+        } else if (absoluteDeltaY >= TIMELINE_DRAG_ACTIVATION_PX) {
+          dragMode = 'move'
+        } else {
+          return
+        }
+      }
+
+      if (dragMode === 'resize-duration') {
+        const nextDurationMinutes = timelineDurationFromHorizontalDrag(
+          current.durationMinutes,
+          deltaX,
+          current.originalStartMinute,
+          timelineWindow,
+        )
+        const nextEndMinute = current.originalStartMinute + nextDurationMinutes
+
+        setTimelineDragStateWithRef((previous) => {
+          if (!previous || previous.pointerId !== event.pointerId) {
+            return previous
+          }
+
+          if (
+            previous.isDragging
+            && previous.dragMode === dragMode
+            && previous.previewDate === current.originalDate
+            && previous.previewStartMinute === current.originalStartMinute
+            && previous.previewEndMinute === nextEndMinute
+          ) {
+            return previous
+          }
+
+          return {
+            ...previous,
+            dragMode,
+            isDragging: true,
+            previewDate: current.originalDate,
+            previewStartMinute: current.originalStartMinute,
+            previewEndMinute: nextEndMinute,
+          }
+        })
         return
       }
 
@@ -4480,6 +4536,7 @@ function App() {
 
         if (
           previous.isDragging
+          && previous.dragMode === dragMode
           && previous.previewDate === pointerSlot.date
           && previous.previewStartMinute === clampedStartMinute
           && previous.previewEndMinute === nextEndMinute
@@ -4489,6 +4546,7 @@ function App() {
 
         return {
           ...previous,
+          dragMode,
           isDragging: true,
           previewDate: pointerSlot.date,
           previewStartMinute: clampedStartMinute,
@@ -5678,6 +5736,7 @@ function App() {
       surface,
       entryId: entry.id,
       pointerId: event.pointerId,
+      dragMode: 'pending',
       initialClientX: event.clientX,
       initialClientY: event.clientY,
       lockedLaneIndex,
@@ -5728,6 +5787,7 @@ function App() {
       surface: 'calendar-review',
       entryId: entry.id,
       pointerId: event.pointerId,
+      dragMode: 'pending',
       initialClientX: event.clientX,
       initialClientY: event.clientY,
       lockedLaneIndex,
@@ -9525,14 +9585,22 @@ function App() {
                       const needsReview = reviewLabel !== null
                       const isDragPreview =
                         timelineDragState?.isDragging
+                        && timelineDragState.surface === 'day'
                         && timelineDragState.entryId === entry.id
+                      const shouldShowDurationBadge =
+                        timelineDragState?.surface === 'day'
+                        && timelineDragState.entryId === entry.id
+                        && (
+                          timelineDragState.dragMode === 'pending'
+                          || timelineDragState.dragMode === 'resize-duration'
+                        )
                       const blockPalette = buildTimelineBlockPalette(blockColor)
 
                       if (isDragPreview) {
                         return (
                           <div
                             key={entry.id}
-                            className={`timeline-block drag-preview tier-${blockLabel.tier}`}
+                            className={`timeline-block drag-preview tier-${blockLabel.tier} ${shouldShowDurationBadge ? 'duration-active' : ''}`}
                             style={{
                               top: positionedEntry.top,
                               height: positionedEntry.height,
@@ -9542,7 +9610,14 @@ function App() {
                             } as CSSProperties}
                             aria-hidden="true"
                           >
-                            <TimelineBlockContent label={blockLabel.label} />
+                            <TimelineBlockContent
+                              label={blockLabel.label}
+                              durationLabel={
+                                shouldShowDurationBadge
+                                  ? formatQuickBlockDuration(entry.durationMinutes)
+                                  : null
+                              }
+                            />
                           </div>
                         )
                       }
@@ -9552,6 +9627,7 @@ function App() {
                         `tier-${blockLabel.tier}`,
                         selectedEntryId === entry.id || highlightedEntryId === entry.id ? 'selected' : '',
                         needsReview ? 'needs-review' : '',
+                        shouldShowDurationBadge ? 'duration-active' : '',
                       ]
                         .filter((className) => className.length > 0)
                         .join(' ')
@@ -9590,7 +9666,14 @@ function App() {
                           )}
                           aria-haspopup="menu"
                         >
-                          <TimelineBlockContent label={blockLabel.label} />
+                          <TimelineBlockContent
+                            label={blockLabel.label}
+                            durationLabel={
+                              shouldShowDurationBadge
+                                ? formatQuickBlockDuration(entry.durationMinutes)
+                                : null
+                            }
+                          />
                         </button>
                       )
                     })}
@@ -9870,14 +9953,22 @@ function App() {
                         const needsReview = reviewLabel !== null
                         const isDragPreview =
                           timelineDragState?.isDragging
+                          && timelineDragState.surface === 'week'
                           && timelineDragState.entryId === entry.id
+                        const shouldShowDurationBadge =
+                          timelineDragState?.surface === 'week'
+                          && timelineDragState.entryId === entry.id
+                          && (
+                            timelineDragState.dragMode === 'pending'
+                            || timelineDragState.dragMode === 'resize-duration'
+                          )
                         const blockPalette = buildTimelineBlockPalette(blockColor)
 
                         if (isDragPreview) {
                           return (
                             <div
                               key={entry.id}
-                              className={`timeline-block drag-preview tier-${blockLabel.tier}`}
+                              className={`timeline-block drag-preview tier-${blockLabel.tier} ${shouldShowDurationBadge ? 'duration-active' : ''}`}
                               style={{
                                 top: positionedEntry.top,
                                 height: positionedEntry.height,
@@ -9887,7 +9978,14 @@ function App() {
                               } as CSSProperties}
                               aria-hidden="true"
                             >
-                              <TimelineBlockContent label={blockLabel.label} />
+                              <TimelineBlockContent
+                                label={blockLabel.label}
+                                durationLabel={
+                                  shouldShowDurationBadge
+                                    ? formatQuickBlockDuration(entry.durationMinutes)
+                                    : null
+                                }
+                              />
                             </div>
                           )
                         }
@@ -9897,6 +9995,7 @@ function App() {
                           `tier-${blockLabel.tier}`,
                           selectedEntryId === entry.id || highlightedEntryId === entry.id ? 'selected' : '',
                           needsReview ? 'needs-review' : '',
+                          shouldShowDurationBadge ? 'duration-active' : '',
                         ]
                           .filter((className) => className.length > 0)
                           .join(' ')
@@ -9935,7 +10034,14 @@ function App() {
                             )}
                             aria-haspopup="menu"
                           >
-                            <TimelineBlockContent label={blockLabel.label} />
+                            <TimelineBlockContent
+                              label={blockLabel.label}
+                              durationLabel={
+                                shouldShowDurationBadge
+                                  ? formatQuickBlockDuration(entry.durationMinutes)
+                                  : null
+                              }
+                            />
                           </button>
                         )
                       })}
@@ -12273,12 +12379,17 @@ function WarningBadge({ type }: { type: WarningType }) {
 
 function TimelineBlockContent({
   label,
+  durationLabel = null,
 }: {
   label: string
+  durationLabel?: string | null
 }) {
   return (
     <span className="timeline-block-content">
       <span className="timeline-block-label">{label}</span>
+      {durationLabel ? (
+        <span className="timeline-block-duration-badge">{durationLabel}</span>
+      ) : null}
     </span>
   )
 }
@@ -13434,6 +13545,33 @@ function quickBlockDurationFromDrag(originClientX: number, currentClientX: numbe
   return clampQuickBlockDuration(
     TIMELINE_MANUAL_CREATE_DURATION_MINUTES
     + durationSteps * QUICK_BLOCK_DURATION_STEP_MINUTES,
+  )
+}
+
+function dragStepFromDelta(deltaPixels: number, stepPixels: number): number {
+  if (stepPixels <= 0 || deltaPixels === 0) {
+    return 0
+  }
+
+  return Math.sign(deltaPixels) * Math.round(Math.abs(deltaPixels) / stepPixels)
+}
+
+function timelineDurationFromHorizontalDrag(
+  originalDurationMinutes: number,
+  deltaPixels: number,
+  startMinute: number,
+  timelineWindow: TimelineWindow,
+): number {
+  const durationSteps = dragStepFromDelta(deltaPixels, TIMELINE_DURATION_RESIZE_STEP_PX)
+  const requestedDuration =
+    originalDurationMinutes
+    + durationSteps * TIMELINE_DURATION_RESIZE_STEP_MINUTES
+  const maxDuration = Math.max(1, timelineWindow.endMinute - startMinute)
+  const minDuration = Math.min(TIMELINE_MANUAL_CREATE_DURATION_MINUTES, maxDuration)
+
+  return Math.min(
+    maxDuration,
+    Math.max(minDuration, requestedDuration),
   )
 }
 

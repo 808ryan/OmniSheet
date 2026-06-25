@@ -2158,6 +2158,11 @@ button.danger:hover:not(:disabled) {
   text-overflow: ellipsis;
 }
 
+.timeline-block.duration-active .timeline-block-label {
+  display: block;
+  padding-right: 2.9rem;
+}
+
 .timeline-block-content {
   width: 100%;
   min-width: 0;
@@ -2165,7 +2170,31 @@ button.danger:hover:not(:disabled) {
   z-index: 1;
 }
 
+.timeline-block-duration-badge {
+  position: absolute;
+  top: 50%;
+  right: 0.36rem;
+  z-index: 2;
+  min-width: 2.15rem;
+  border-radius: 999px;
+  padding: 0.14rem 0.32rem;
+  background: rgba(255, 255, 255, 0.78);
+  color: #0f172a;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+  transform: translateY(-50%);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.12);
+  pointer-events: none;
+}
+
 .timeline-block.tier-2 .timeline-block-label {
+  font-size: 0.74rem;
+}
+
+.timeline-block.tier-2 .timeline-block-duration-badge {
   font-size: 0.74rem;
 }
 
@@ -2176,6 +2205,17 @@ button.danger:hover:not(:disabled) {
 }
 
 .timeline-block.tier-3 .timeline-block-label {
+  font-size: 0.7rem;
+}
+
+.timeline-block.tier-3.duration-active .timeline-block-label {
+  padding-right: 2.45rem;
+}
+
+.timeline-block.tier-3 .timeline-block-duration-badge {
+  right: 0.28rem;
+  min-width: 1.9rem;
+  padding: 0.12rem 0.26rem;
   font-size: 0.7rem;
 }
 
