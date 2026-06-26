@@ -10,11 +10,11 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
-    DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput, HistorySubmission,
-    NormalizedEntry, OpenAiModelId, QuickAddSuggestion, TimelineDaySummary, TimelineEntry,
-    TimelineTotalBreakdown, TimelineWeeklySummary, TimelineWeeklySummaryCell,
-    TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
-    TranscriptionModelId, Warning, WarningType,
+    DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput, NormalizedEntry,
+    OpenAiModelId, QuickAddSuggestion, TimelineDaySummary, TimelineEntry, TimelineTotalBreakdown,
+    TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
+    TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, TranscriptionModelId, Warning,
+    WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
@@ -1223,69 +1223,6 @@ pub fn list_timeline_entries_for_date_range(
     )
 }
 
-pub fn list_history_submissions(
-    conn: &Connection,
-    start_date: &str,
-    end_date_exclusive: &str,
-) -> AppResult<Vec<HistorySubmission>> {
-    let mut statement = conn.prepare(
-        r#"
-      SELECT
-        id,
-        raw_text,
-        capture_source,
-        status,
-        message_timestamp,
-        created_at,
-        interpreted_entry_count,
-        unique_entry_count,
-        saved_entry_count,
-        truncated_entry_count,
-        contains_multiple_events,
-        confidence,
-        open_ai_model,
-        transcription_model
-      FROM raw_messages
-      WHERE date(message_timestamp, 'unixepoch', 'localtime') >= ?1
-        AND date(message_timestamp, 'unixepoch', 'localtime') < ?2
-      ORDER BY message_timestamp DESC, created_at DESC, id
-    "#,
-    )?;
-
-    let submissions = statement
-        .query_map(params![start_date, end_date_exclusive], |row| {
-            let model_used = row
-                .get::<_, Option<String>>(12)?
-                .and_then(|value| OpenAiModelId::from_api_name(&value));
-            let transcription_model_used = row
-                .get::<_, Option<String>>(13)?
-                .and_then(|value| TranscriptionModelId::from_api_name(&value));
-
-            Ok(HistorySubmission {
-                id: row.get(0)?,
-                raw_text: row.get(1)?,
-                capture_source: row.get(2)?,
-                status: row.get(3)?,
-                message_timestamp: row.get(4)?,
-                created_at: row.get(5)?,
-                interpreted_entry_count: row.get(6)?,
-                unique_entry_count: row.get(7)?,
-                saved_entry_count: row.get(8)?,
-                truncated_entry_count: row.get(9)?,
-                contains_multiple_events: row.get::<_, i64>(10)? == 1,
-                confidence: row.get(11)?,
-                model_used,
-                model_used_label: model_used.map(|model| model.display_label().to_string()),
-                transcription_model_used,
-                transcription_model_used_label: transcription_model_used
-                    .map(|model| model.display_label().to_string()),
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(submissions)
-}
-
 pub fn list_timeline_day_summaries_for_month(
     conn: &Connection,
     start_date: &str,
@@ -1849,6 +1786,7 @@ pub fn list_diagnostics_events(
             'settings_set_openai_key',
             'settings_set_openai_model',
             'settings_set_timeline_preferences',
+            'settings_set_interface_preferences',
             'settings_set_transcription_model'
           ) OR event_type = 'key_save_verify'
           ORDER BY timestamp DESC
@@ -2006,10 +1944,9 @@ mod tests {
 
     use super::{
         current_unix_timestamp, get_app_setting, insert_manual_timeline_entry, insert_raw_message,
-        insert_timesheet_entry, list_engagements, list_history_submissions,
-        list_quick_add_suggestions, list_timeline_entries, list_timeline_entries_for_date_range,
-        list_timeline_weekly_summary, run_migrations, upsert_activity, upsert_app_setting,
-        upsert_engagement,
+        insert_timesheet_entry, list_engagements, list_quick_add_suggestions,
+        list_timeline_entries, list_timeline_entries_for_date_range, list_timeline_weekly_summary,
+        run_migrations, upsert_activity, upsert_app_setting, upsert_engagement,
     };
     use crate::models::{
         ActivityUpsertInput, EngagementType, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
@@ -2447,7 +2384,8 @@ mod tests {
     #[test]
     fn quick_add_suggestions_sort_by_usage_count_then_recent_use() {
         let connection = test_connection();
-        let engagement_id = create_test_engagement(&connection, "QA-SORT", "Quick Entry Sort", true);
+        let engagement_id =
+            create_test_engagement(&connection, "QA-SORT", "Quick Entry Sort", true);
         let high_count_activity_id =
             create_test_activity(&connection, &engagement_id, "HIGH", "High Count", true);
         let recent_activity_id =
@@ -2534,7 +2472,8 @@ mod tests {
     #[test]
     fn quick_add_suggestions_include_zero_usage_active_activity_fallbacks() {
         let connection = test_connection();
-        let engagement_id = create_test_engagement(&connection, "QA-FILL", "Quick Entry Fill", true);
+        let engagement_id =
+            create_test_engagement(&connection, "QA-FILL", "Quick Entry Fill", true);
         let used_activity_id =
             create_test_activity(&connection, &engagement_id, "USED", "Used Activity", true);
         let unused_activity_id = create_test_activity(
@@ -2975,76 +2914,6 @@ mod tests {
                 ("2026-03-30", "Monday task"),
                 ("2026-04-01", "Wednesday task"),
             ]
-        );
-    }
-
-    #[test]
-    fn history_submissions_include_raw_messages_for_date_range() {
-        let connection = test_connection();
-        let in_range_timestamp = chrono::NaiveDate::from_ymd_opt(2026, 3, 30)
-            .expect("date")
-            .and_hms_opt(12, 0, 0)
-            .expect("time")
-            .and_utc()
-            .timestamp();
-        let outside_range_timestamp = chrono::NaiveDate::from_ymd_opt(2026, 4, 6)
-            .expect("date")
-            .and_hms_opt(12, 0, 0)
-            .expect("time")
-            .and_utc()
-            .timestamp();
-
-        insert_raw_message(
-            &connection,
-            "raw-in-range",
-            "voice note",
-            "{}",
-            OpenAiModelId::Gpt5Nano.api_name(),
-            "voice",
-            Some(TranscriptionModelId::Whisper1.api_name()),
-            Some(1200),
-            0.88,
-            in_range_timestamp,
-            1,
-            1,
-            1,
-            0,
-            false,
-        )
-        .expect("raw message saves");
-        insert_raw_message(
-            &connection,
-            "raw-outside-range",
-            "outside note",
-            "{}",
-            OpenAiModelId::Gpt5Nano.api_name(),
-            "text",
-            None,
-            None,
-            0.9,
-            outside_range_timestamp,
-            1,
-            1,
-            1,
-            0,
-            false,
-        )
-        .expect("outside raw message saves");
-
-        let submissions = list_history_submissions(&connection, "2026-03-29", "2026-04-05")
-            .expect("history submissions load");
-
-        assert_eq!(submissions.len(), 1);
-        assert_eq!(submissions[0].id, "raw-in-range");
-        assert_eq!(submissions[0].capture_source, "voice");
-        assert_eq!(submissions[0].model_used, Some(OpenAiModelId::Gpt5Nano));
-        assert_eq!(
-            submissions[0].transcription_model_used,
-            Some(TranscriptionModelId::Whisper1)
-        );
-        assert_eq!(
-            submissions[0].transcription_model_used_label.as_deref(),
-            Some("Whisper")
         );
     }
 

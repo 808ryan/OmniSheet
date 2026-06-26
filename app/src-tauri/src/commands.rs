@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, Weekday};
 use keyring::{Entry, Error as KeyringError};
 use rusqlite::Connection;
 use rust_xlsxwriter::{Format, Workbook, XlsxError};
@@ -16,24 +16,26 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::macos_permissions;
 use crate::models::{
-    Activity, ActivityUpsertInput, ApiKeyInput, CalendarExtractCandidate, CalendarExtractInput,
-    CalendarExtractResult, CalendarImportEntryInput, CalendarImportInput, CalendarImportResult,
-    CalendarVisionEvent, CaptureSourceId, CodeContext, ContextActivity, ContextEngagement,
-    DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput,
-    Engagement, EngagementType, EngagementUpsertInput, HistoryListResult, IdInput, IdResult,
-    InterpretResult, InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry,
-    MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
-    QuickAddPreferences, QuickAddSuggestionInput, QuickAddSuggestionResult,
-    ReportingDisplayDensity, ReportingDisplayPreset, ReportingRowLabelMode, ReportingState,
-    ReportingViewMode, SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
-    SettingsSetOpenAiModelInput, SettingsSetQuickAddPreferencesInput,
-    SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
-    StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
-    SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
-    TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
-    TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
-    TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput,
-    TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
+    default_reporting_display_columns, Activity, ActivityUpsertInput, ApiKeyInput,
+    CalendarExtractCandidate, CalendarExtractInput, CalendarExtractResult,
+    CalendarImportEntryInput, CalendarImportInput, CalendarImportResult, CalendarVisionEvent,
+    CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, DateInput, DiagnosticsBundle,
+    DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement, EngagementType,
+    EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
+    LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult, MicrophonePermissionStatus,
+    NormalizedEntry, OpenAiModelId, QuickAddPreferences, QuickAddSuggestionInput,
+    QuickAddSuggestionResult, ReportingDisplayColumn, ReportingDisplayDensity,
+    ReportingDisplayPreset, ReportingRowLabelMode, ReportingState, ReportingViewMode,
+    SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
+    SettingsSetInterfacePreferencesInput, SettingsSetOpenAiModelInput,
+    SettingsSetQuickAddPreferencesInput, SettingsSetTimelinePreferencesInput,
+    SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
+    SummaryExportResult, SummaryExportWeeklyExcelInput, SummaryLayoutColumn, SummaryLayoutFieldKey,
+    SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput, TimelineDaySummary,
+    TimelineEntry, TimelineMonthSummaryInput, TimelineTotalBreakdown, TimelineUpdateInput,
+    TimelineUpdateMode, TimelineWeekStartDay, TimelineWeekView, TimelineWeekViewDay,
+    TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult,
+    TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -58,9 +60,11 @@ const APP_SETTING_TIMELINE_INCLUDE_EXTERNAL_IN_TOTALS: &str = "timeline_include_
 const APP_SETTING_TIMELINE_INCLUDE_INTERNAL_IN_TOTALS: &str = "timeline_include_internal_in_totals";
 const APP_SETTING_TIMELINE_SEPARATE_ENGAGEMENT_TYPE_TOTALS: &str =
     "timeline_separate_engagement_type_totals";
+const APP_SETTING_TIMELINE_WEEK_START_DAY: &str = "timeline_week_start_day";
 const APP_SETTING_CALENDAR_BULK_IGNORED_KEYWORDS: &str = "calendar_bulk_ignored_keywords";
 const APP_SETTING_CALENDAR_BULK_IGNORE_ALL_DAY_EVENTS: &str = "calendar_bulk_ignore_all_day_events";
 const APP_SETTING_QUICK_ADD_PREFERENCES: &str = "quick_add_preferences";
+const APP_SETTING_SHOW_DIAGNOSTICS_TAB: &str = "show_diagnostics_tab";
 const APP_SETTING_SUMMARY_LAYOUT_STATE: &str = "summary_layout_state";
 const APP_SETTING_REPORTING_STATE: &str = "reporting_state";
 const SUMMARY_LAYOUT_STATE_VERSION: i64 = 3;
@@ -70,16 +74,6 @@ const DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID: &str = "row-total";
 const REPORTING_STATE_VERSION: i64 = 1;
 const REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH: usize = 40;
 const DEFAULT_REPORTING_DISPLAY_PRESET_ID: &str = "reporting-display-compact-review";
-const SUMMARY_DAY_NAMES: [&str; 7] = [
-    "Saturday",
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-];
-
 fn state_lock_error() -> String {
     "application state lock poisoned".to_string()
 }
@@ -220,6 +214,7 @@ struct TimelinePreferenceValues {
     include_external_in_totals: bool,
     include_internal_in_totals: bool,
     separate_engagement_type_totals: bool,
+    week_start_day: TimelineWeekStartDay,
 }
 
 fn resolve_saved_bool_setting_value(saved_value: Option<String>, default_value: bool) -> bool {
@@ -228,6 +223,13 @@ fn resolve_saved_bool_setting_value(saved_value: Option<String>, default_value: 
         Some("false") | Some("0") => false,
         _ => default_value,
     }
+}
+
+fn resolve_saved_timeline_week_start_day(saved_value: Option<String>) -> TimelineWeekStartDay {
+    saved_value
+        .as_deref()
+        .and_then(TimelineWeekStartDay::from_setting_value)
+        .unwrap_or_default()
 }
 
 fn normalize_timeline_preference_values(
@@ -281,6 +283,10 @@ fn read_saved_timeline_preferences(connection: &Connection) -> AppResult<Timelin
         )?,
         true,
     );
+    let week_start_day = resolve_saved_timeline_week_start_day(db::get_app_setting(
+        connection,
+        APP_SETTING_TIMELINE_WEEK_START_DAY,
+    )?);
 
     Ok(normalize_timeline_preference_values(
         TimelinePreferenceValues {
@@ -289,6 +295,7 @@ fn read_saved_timeline_preferences(connection: &Connection) -> AppResult<Timelin
             include_external_in_totals,
             include_internal_in_totals,
             separate_engagement_type_totals,
+            week_start_day,
         },
     ))
 }
@@ -416,6 +423,13 @@ fn read_saved_quick_add_preferences(connection: &Connection) -> AppResult<QuickA
         .unwrap_or_else(default_quick_add_preferences);
 
     Ok(normalize_quick_add_preferences(parsed_preferences))
+}
+
+fn read_saved_show_diagnostics_tab(connection: &Connection) -> AppResult<bool> {
+    Ok(resolve_saved_bool_setting_value(
+        db::get_app_setting(connection, APP_SETTING_SHOW_DIAGNOSTICS_TAB)?,
+        true,
+    ))
 }
 
 fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
@@ -704,6 +718,7 @@ fn default_reporting_display_preset() -> ReportingDisplayPreset {
         show_client: false,
         show_engagement_type: false,
         show_empty_days: true,
+        columns: default_reporting_display_columns(),
     }
 }
 
@@ -758,6 +773,8 @@ fn normalize_reporting_state(mut state: ReportingState) -> Result<ReportingState
         if !preset_names.insert(preset.name.to_lowercase()) {
             return Err("Reporting display preset names must be unique.".to_string());
         }
+
+        normalize_reporting_display_columns(preset)?;
     }
 
     if state.selected_display_preset_id.is_empty() {
@@ -769,6 +786,94 @@ fn normalize_reporting_state(mut state: ReportingState) -> Result<ReportingState
     }
 
     Ok(state)
+}
+
+fn normalize_reporting_display_columns(preset: &mut ReportingDisplayPreset) -> Result<(), String> {
+    if preset.columns.is_empty() {
+        preset.columns = default_reporting_display_columns();
+    }
+
+    let mut has_day_group = false;
+    let mut has_row_total = false;
+    for column in &preset.columns {
+        match column {
+            ReportingDisplayColumn::DayGroup { .. } => has_day_group = true,
+            ReportingDisplayColumn::RowTotal { .. } => has_row_total = true,
+            ReportingDisplayColumn::Field { .. } => {}
+        }
+    }
+
+    if !has_day_group {
+        preset.columns.push(ReportingDisplayColumn::DayGroup {
+            id: "reporting-days".to_string(),
+        });
+    }
+
+    if !has_row_total {
+        preset.columns.push(ReportingDisplayColumn::RowTotal {
+            id: "reporting-row-total".to_string(),
+        });
+    }
+
+    let mut column_ids = HashSet::new();
+    let mut field_keys = HashSet::new();
+    let mut field_count = 0;
+    let mut day_group_count = 0;
+    let mut row_total_count = 0;
+
+    for column in &mut preset.columns {
+        match column {
+            ReportingDisplayColumn::Field { id, field_key } => {
+                *id = id.trim().to_string();
+                field_count += 1;
+
+                if !field_keys.insert(*field_key) {
+                    return Err(
+                        "A reporting display preset cannot include the same field twice."
+                            .to_string(),
+                    );
+                }
+            }
+            ReportingDisplayColumn::DayGroup { id } => {
+                *id = id.trim().to_string();
+                day_group_count += 1;
+            }
+            ReportingDisplayColumn::RowTotal { id } => {
+                *id = id.trim().to_string();
+                row_total_count += 1;
+            }
+        }
+
+        let column_id = match column {
+            ReportingDisplayColumn::Field { id, .. }
+            | ReportingDisplayColumn::DayGroup { id }
+            | ReportingDisplayColumn::RowTotal { id } => id,
+        };
+
+        if column_id.is_empty() {
+            return Err("Reporting display preset column IDs cannot be empty.".to_string());
+        }
+
+        if !column_ids.insert(column_id.clone()) {
+            return Err("Reporting display preset column IDs must be unique.".to_string());
+        }
+    }
+
+    if field_count == 0 {
+        return Err(
+            "Each reporting display preset must include at least one field column.".to_string(),
+        );
+    }
+
+    if day_group_count != 1 {
+        return Err("Each reporting display preset must include one day group.".to_string());
+    }
+
+    if row_total_count != 1 {
+        return Err("Each reporting display preset must include one row total.".to_string());
+    }
+
+    Ok(())
 }
 
 fn read_reporting_state(connection: &Connection) -> AppResult<ReportingState> {
@@ -923,11 +1028,16 @@ fn timeline_month_bounds(month: &str) -> Result<(String, String), String> {
     ))
 }
 
-fn timeline_week_bounds(date: &str) -> Result<(String, String), String> {
+fn timeline_week_bounds(
+    date: &str,
+    week_start_day: TimelineWeekStartDay,
+) -> Result<(String, String), String> {
     let selected_date = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
         .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
-    let days_since_saturday = (selected_date.weekday().num_days_from_sunday() + 1) % 7;
-    let week_start = selected_date - Duration::days(days_since_saturday as i64);
+    let selected_offset = selected_date.weekday().num_days_from_sunday();
+    let week_start_offset = timeline_week_start_offset_from_sunday(week_start_day);
+    let days_since_week_start = (selected_offset + 7 - week_start_offset) % 7;
+    let week_start = selected_date - Duration::days(days_since_week_start as i64);
     let week_end_exclusive = week_start + Duration::days(7);
 
     Ok((
@@ -936,17 +1046,19 @@ fn timeline_week_bounds(date: &str) -> Result<(String, String), String> {
     ))
 }
 
-fn timeline_week_view_bounds(date: &str) -> Result<(String, String), String> {
-    let selected_date = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
-        .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
-    let days_since_sunday = selected_date.weekday().num_days_from_sunday() as i64;
-    let week_start = selected_date - Duration::days(days_since_sunday);
-    let week_end_exclusive = week_start + Duration::days(7);
+fn timeline_week_start_offset_from_sunday(week_start_day: TimelineWeekStartDay) -> u32 {
+    match week_start_day {
+        TimelineWeekStartDay::Sunday => 0,
+        TimelineWeekStartDay::Monday => 1,
+        TimelineWeekStartDay::Saturday => 6,
+    }
+}
 
-    Ok((
-        week_start.format("%Y-%m-%d").to_string(),
-        week_end_exclusive.format("%Y-%m-%d").to_string(),
-    ))
+fn timeline_week_view_bounds(
+    date: &str,
+    week_start_day: TimelineWeekStartDay,
+) -> Result<(String, String), String> {
+    timeline_week_bounds(date, week_start_day)
 }
 
 fn month_key_from_iso_date(value: &str) -> Option<String> {
@@ -963,11 +1075,26 @@ fn month_key_from_iso_date(value: &str) -> Option<String> {
     }
 }
 
+fn weekday_display_name(weekday: Weekday) -> &'static str {
+    match weekday {
+        Weekday::Mon => "Monday",
+        Weekday::Tue => "Tuesday",
+        Weekday::Wed => "Wednesday",
+        Weekday::Thu => "Thursday",
+        Weekday::Fri => "Friday",
+        Weekday::Sat => "Saturday",
+        Weekday::Sun => "Sunday",
+    }
+}
+
 fn summary_day_header(day_index: usize, iso_date: &str) -> String {
-    let day_name = SUMMARY_DAY_NAMES.get(day_index).copied().unwrap_or("Day");
     match NaiveDate::parse_from_str(iso_date.trim(), "%Y-%m-%d") {
-        Ok(value) => format!("{day_name} ({})", value.format("%m/%d")),
-        Err(_) => format!("{day_name} ({iso_date})"),
+        Ok(value) => format!(
+            "{} ({})",
+            weekday_display_name(value.weekday()),
+            value.format("%m/%d")
+        ),
+        Err(_) => format!("Day {} ({iso_date})", day_index + 1),
     }
 }
 
@@ -2462,6 +2589,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         calendar_bulk_ignored_keywords,
         calendar_bulk_ignore_all_day_events,
         quick_add_preferences,
+        show_diagnostics_tab,
     ) = {
         let connection = state.connection.lock().map_err(|_| {
             let message = state_lock_error();
@@ -2617,6 +2745,25 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             }
         };
 
+        let show_diagnostics_tab = match read_saved_show_diagnostics_tab(&connection) {
+            Ok(value) => value,
+            Err(error) => {
+                let message = error.to_string();
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    None,
+                    json!({ "stage": "read_interface_preferences_setting", "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
+
         (
             open_ai_key_configured_marker,
             selected_open_ai_model,
@@ -2629,6 +2776,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
             calendar_bulk_ignored_keywords,
             calendar_bulk_ignore_all_day_events,
             quick_add_preferences,
+            show_diagnostics_tab,
         )
     };
 
@@ -2694,9 +2842,11 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         timeline_include_internal_in_totals: timeline_preferences.include_internal_in_totals,
         timeline_separate_engagement_type_totals: timeline_preferences
             .separate_engagement_type_totals,
+        timeline_week_start_day: timeline_preferences.week_start_day,
         calendar_bulk_ignored_keywords,
         calendar_bulk_ignore_all_day_events,
         quick_add_preferences,
+        show_diagnostics_tab,
     };
 
     record_backend_event_with_state(
@@ -2728,10 +2878,12 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "timelineIncludeExternalInTotals": status.timeline_include_external_in_totals,
           "timelineIncludeInternalInTotals": status.timeline_include_internal_in_totals,
           "timelineSeparateEngagementTypeTotals": status.timeline_separate_engagement_type_totals,
+          "timelineWeekStartDay": status.timeline_week_start_day.setting_value(),
           "calendarBulkIgnoredKeywords": status.calendar_bulk_ignored_keywords,
           "calendarBulkIgnoreAllDayEvents": status.calendar_bulk_ignore_all_day_events,
           "quickAddHiddenEngagementCount": status.quick_add_preferences.hidden_engagement_ids.len(),
           "quickAddHiddenActivityCount": status.quick_add_preferences.hidden_activity_ids.len(),
+          "showDiagnosticsTab": status.show_diagnostics_tab,
         }),
     );
 
@@ -3137,6 +3289,7 @@ pub fn settings_set_timeline_preferences(
         include_external_in_totals: input.timeline_include_external_in_totals,
         include_internal_in_totals: input.timeline_include_internal_in_totals,
         separate_engagement_type_totals: input.timeline_separate_engagement_type_totals,
+        week_start_day: input.timeline_week_start_day,
     };
 
     if let Err(message) = validate_timeline_preferences(preferences) {
@@ -3190,6 +3343,12 @@ pub fn settings_set_timeline_preferences(
             bool_app_setting_value(preferences.separate_engagement_type_totals),
         )
         .map_err(|error| error.to_string())?;
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_TIMELINE_WEEK_START_DAY,
+            preferences.week_start_day.setting_value(),
+        )
+        .map_err(|error| error.to_string())?;
 
         let verified =
             read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
@@ -3217,6 +3376,7 @@ pub fn settings_set_timeline_preferences(
                   "timelineIncludeExternalInTotals": preferences.include_external_in_totals,
                   "timelineIncludeInternalInTotals": preferences.include_internal_in_totals,
                   "timelineSeparateEngagementTypeTotals": preferences.separate_engagement_type_totals,
+                  "timelineWeekStartDay": preferences.week_start_day.setting_value(),
                   "verified": true,
                 }),
             );
@@ -3240,6 +3400,7 @@ pub fn settings_set_timeline_preferences(
                   "timelineIncludeExternalInTotals": preferences.include_external_in_totals,
                   "timelineIncludeInternalInTotals": preferences.include_internal_in_totals,
                   "timelineSeparateEngagementTypeTotals": preferences.separate_engagement_type_totals,
+                  "timelineWeekStartDay": preferences.week_start_day.setting_value(),
                 }),
             );
             Err(format_command_error(&correlation_id, message))
@@ -3421,6 +3582,87 @@ pub fn settings_set_quick_add_preferences(
                   "hiddenEngagementCount": preferences.hidden_engagement_ids.len(),
                   "activityOrderGroupCount": preferences.activity_order.len(),
                   "hiddenActivityCount": preferences.hidden_activity_ids.len(),
+                }),
+            );
+            Err(format_command_error(&correlation_id, message))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn settings_set_interface_preferences(
+    state: State<'_, AppState>,
+    input: SettingsSetInterfacePreferencesInput,
+) -> Result<(), String> {
+    let command = "settings_set_interface_preferences";
+    let correlation_id = Uuid::new_v4().to_string();
+    let started_at = Instant::now();
+
+    let connection = state.connection.lock().map_err(|_| {
+        let message = state_lock_error();
+        record_backend_event_with_state(
+            &state,
+            &correlation_id,
+            "command_error",
+            command,
+            "error",
+            Some(duration_ms(started_at)),
+            None,
+            json!({ "stage": "open_connection", "message": message }),
+        );
+        format_command_error(&correlation_id, message)
+    })?;
+
+    let show_diagnostics_tab = input.show_diagnostics_tab;
+    let save_result: Result<(), String> = (|| {
+        db::upsert_app_setting(
+            &connection,
+            APP_SETTING_SHOW_DIAGNOSTICS_TAB,
+            bool_app_setting_value(show_diagnostics_tab),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified =
+            read_saved_show_diagnostics_tab(&connection).map_err(|error| error.to_string())?;
+        if verified != show_diagnostics_tab {
+            return Err("Interface preferences verification failed".to_string());
+        }
+
+        Ok(())
+    })();
+
+    match save_result {
+        Ok(()) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_success",
+                command,
+                "ok",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "showDiagnosticsTab": show_diagnostics_tab,
+                  "verified": true,
+                }),
+            );
+            Ok(())
+        }
+        Err(message) => {
+            record_backend_event(
+                &connection,
+                state.inner(),
+                &correlation_id,
+                "command_error",
+                command,
+                "error",
+                Some(duration_ms(started_at)),
+                None,
+                json!({
+                  "stage": "save_interface_preferences_setting",
+                  "message": message,
+                  "showDiagnosticsTab": show_diagnostics_tab,
                 }),
             );
             Err(format_command_error(&correlation_id, message))
@@ -3782,9 +4024,10 @@ pub fn timeline_weekly_summary(
     input: DateInput,
 ) -> Result<TimelineWeeklySummary, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-    let (start_date, end_date_exclusive) = timeline_week_bounds(&input.date)?;
     let preferences =
         read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
+    let (start_date, end_date_exclusive) =
+        timeline_week_bounds(&input.date, preferences.week_start_day)?;
 
     let mut summary =
         db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
@@ -3800,7 +4043,10 @@ pub fn timeline_list_for_week_view(
     input: DateInput,
 ) -> Result<TimelineWeekView, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-    let (start_date, end_date_exclusive) = timeline_week_view_bounds(&input.date)?;
+    let preferences =
+        read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
+    let (start_date, end_date_exclusive) =
+        timeline_week_view_bounds(&input.date, preferences.week_start_day)?;
     let week_start = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
         .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
     let entries =
@@ -3827,15 +4073,6 @@ pub fn timeline_list_for_week_view(
 }
 
 #[tauri::command]
-pub fn history_list(
-    state: State<'_, AppState>,
-    input: DateInput,
-) -> Result<HistoryListResult, String> {
-    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-    list_history_for_date(&connection, &input.date)
-}
-
-#[tauri::command]
 pub fn quick_add_suggestions(
     state: State<'_, AppState>,
     input: QuickAddSuggestionInput,
@@ -3848,27 +4085,6 @@ pub fn quick_add_suggestions(
     Ok(QuickAddSuggestionResult { suggestions })
 }
 
-fn list_history_for_date(connection: &Connection, date: &str) -> Result<HistoryListResult, String> {
-    let (start_date, end_date_exclusive) = timeline_week_bounds(date)?;
-    let week_start = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
-        .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
-    let week_end_date = (week_start + Duration::days(6))
-        .format("%Y-%m-%d")
-        .to_string();
-    let submissions = db::list_history_submissions(connection, &start_date, &end_date_exclusive)
-        .map_err(|error| error.to_string())?;
-    let entries =
-        db::list_timeline_entries_for_date_range(connection, &start_date, &end_date_exclusive)
-            .map_err(|error| error.to_string())?;
-
-    Ok(HistoryListResult {
-        week_start_date: start_date,
-        week_end_date,
-        submissions,
-        entries,
-    })
-}
-
 #[tauri::command]
 pub fn summary_export_weekly_excel(
     app: tauri::AppHandle,
@@ -3876,14 +4092,15 @@ pub fn summary_export_weekly_excel(
     input: SummaryExportWeeklyExcelInput,
 ) -> Result<SummaryExportResult, String> {
     let layout_preset = normalize_summary_layout_preset_for_export(input.layout_preset)?;
-    let (start_date, end_date_exclusive) = timeline_week_bounds(&input.date)?;
     let (summary, engagements) = {
         let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+        let preferences =
+            read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
+        let (start_date, end_date_exclusive) =
+            timeline_week_bounds(&input.date, preferences.week_start_day)?;
         let mut summary =
             db::list_timeline_weekly_summary(&connection, &start_date, &end_date_exclusive)
                 .map_err(|error| error.to_string())?;
-        let preferences =
-            read_saved_timeline_preferences(&connection).map_err(|error| error.to_string())?;
         apply_timeline_preferences_to_weekly_summary(&mut summary, preferences);
         let engagements = db::list_engagements(&connection).map_err(|error| error.to_string())?;
         (summary, engagements)
@@ -7441,9 +7658,9 @@ mod tests {
         CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, Engagement,
         EngagementType, EngagementUpsertInput, KeySource, LlmEntry, NormalizedEntry, OpenAiModelId,
         StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset,
-        SummaryLayoutState, TimelineCreateInput, TimelineTotalBreakdown, TimelineWeeklySummary,
-        TimelineWeeklySummaryCell, TimelineWeeklySummaryDay, TimelineWeeklySummaryNote,
-        TimelineWeeklySummaryRow, TranscriptionModelId, WarningType,
+        SummaryLayoutState, TimelineCreateInput, TimelineTotalBreakdown, TimelineWeekStartDay,
+        TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
+        TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, TranscriptionModelId, WarningType,
     };
     use crate::openai::LlmAttemptTelemetry;
 
@@ -7453,15 +7670,14 @@ mod tests {
         build_export_metadata_maps, build_summary_export_hours_and_notes_sheet_columns,
         build_summary_export_hours_sheet_columns, capture_source_label,
         create_manual_timeline_entry, dedupe_prepared_entries, default_summary_layout_state,
-        derive_key_status_level, list_history_for_date, llm_attempt_event_status,
-        message_has_contextual_day_or_date_cue, message_has_explicit_clock_time_cue,
-        message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
-        normalize_calendar_bulk_ignored_keywords, normalize_confidence, normalize_llm_entry,
-        normalize_snapped_update_window, normalize_summary_layout_preset_for_export,
-        normalize_summary_layout_state, read_saved_openai_key_configured,
-        read_saved_openai_key_configured_marker, reconcile_context_refs,
-        resolve_calendar_candidate_ignored_state, resolve_calendar_event_date,
-        resolve_calendar_event_time, resolve_requested_openai_model,
+        derive_key_status_level, llm_attempt_event_status, message_has_contextual_day_or_date_cue,
+        message_has_explicit_clock_time_cue, message_has_implicit_recent_duration_cue,
+        message_has_relative_duration_cue, normalize_calendar_bulk_ignored_keywords,
+        normalize_confidence, normalize_llm_entry, normalize_snapped_update_window,
+        normalize_summary_layout_preset_for_export, normalize_summary_layout_state,
+        read_saved_openai_key_configured, read_saved_openai_key_configured_marker,
+        reconcile_context_refs, resolve_calendar_candidate_ignored_state,
+        resolve_calendar_event_date, resolve_calendar_event_time, resolve_requested_openai_model,
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
         resolve_summary_export_free_text_value, round_to_nearest_15, summary_day_notes_header,
@@ -7801,61 +8017,6 @@ mod tests {
     }
 
     #[test]
-    fn history_list_returns_current_week_submissions_and_manual_entries() {
-        let connection = test_connection();
-        let message_timestamp = chrono::NaiveDate::from_ymd_opt(2026, 3, 30)
-            .expect("valid date")
-            .and_hms_opt(12, 0, 0)
-            .expect("valid time")
-            .and_utc()
-            .timestamp();
-
-        db::insert_raw_message(
-            &connection,
-            "raw-history-test",
-            "Voice submission",
-            "[]",
-            OpenAiModelId::default().api_name(),
-            "voice",
-            Some(TranscriptionModelId::default().api_name()),
-            Some(900),
-            0.91,
-            message_timestamp,
-            1,
-            1,
-            1,
-            0,
-            false,
-        )
-        .expect("raw message saves");
-
-        create_manual_timeline_entry(
-            &connection,
-            TimelineCreateInput {
-                date: "2026-03-31".to_string(),
-                start_minute: 11 * 60,
-                end_minute: 11 * 60 + 30,
-                engagement_id: None,
-                activity_id: None,
-                description: Some("Manual admin".to_string()),
-            },
-        )
-        .expect("manual entry saves");
-
-        let result = list_history_for_date(&connection, "2026-04-01").expect("history loads");
-
-        assert_eq!(result.week_start_date, "2026-03-28");
-        assert_eq!(result.week_end_date, "2026-04-03");
-        assert_eq!(result.submissions.len(), 1);
-        assert_eq!(result.submissions[0].id, "raw-history-test");
-        assert_eq!(result.submissions[0].capture_source, "voice");
-        assert!(result
-            .entries
-            .iter()
-            .any(|entry| { entry.source == "manual" && entry.description == "Manual admin" }));
-    }
-
-    #[test]
     fn calendar_import_entry_validation_trims_values_and_rejects_empty_descriptions() {
         let entry = CalendarImportEntryInput {
             date: "2026-05-12".to_string(),
@@ -7890,16 +8051,54 @@ mod tests {
 
     #[test]
     fn timeline_week_bounds_uses_saturday_start_and_friday_end() {
-        let (start, end_exclusive) = timeline_week_bounds("2026-03-04").expect("valid bounds");
+        let (start, end_exclusive) =
+            timeline_week_bounds("2026-03-04", TimelineWeekStartDay::Saturday)
+                .expect("valid bounds");
         assert_eq!(start, "2026-02-28");
         assert_eq!(end_exclusive, "2026-03-07");
     }
 
     #[test]
+    fn timeline_week_bounds_can_use_sunday_start() {
+        let (start, end_exclusive) =
+            timeline_week_bounds("2026-03-04", TimelineWeekStartDay::Sunday).expect("valid bounds");
+        assert_eq!(start, "2026-03-01");
+        assert_eq!(end_exclusive, "2026-03-08");
+    }
+
+    #[test]
+    fn timeline_week_bounds_can_use_monday_start() {
+        let (start, end_exclusive) =
+            timeline_week_bounds("2026-03-04", TimelineWeekStartDay::Monday).expect("valid bounds");
+        assert_eq!(start, "2026-03-02");
+        assert_eq!(end_exclusive, "2026-03-09");
+    }
+
+    #[test]
     fn timeline_week_view_bounds_uses_sunday_start_and_saturday_end() {
-        let (start, end_exclusive) = timeline_week_view_bounds("2026-04-01").expect("valid bounds");
+        let (start, end_exclusive) =
+            timeline_week_view_bounds("2026-04-01", TimelineWeekStartDay::Sunday)
+                .expect("valid bounds");
         assert_eq!(start, "2026-03-29");
         assert_eq!(end_exclusive, "2026-04-05");
+    }
+
+    #[test]
+    fn timeline_week_view_bounds_can_use_saturday_start() {
+        let (start, end_exclusive) =
+            timeline_week_view_bounds("2026-04-01", TimelineWeekStartDay::Saturday)
+                .expect("valid bounds");
+        assert_eq!(start, "2026-03-28");
+        assert_eq!(end_exclusive, "2026-04-04");
+    }
+
+    #[test]
+    fn timeline_week_view_bounds_can_use_monday_start() {
+        let (start, end_exclusive) =
+            timeline_week_view_bounds("2026-04-01", TimelineWeekStartDay::Monday)
+                .expect("valid bounds");
+        assert_eq!(start, "2026-03-30");
+        assert_eq!(end_exclusive, "2026-04-06");
     }
 
     #[test]
@@ -8432,6 +8631,7 @@ mod tests {
                 include_external_in_totals: true,
                 include_internal_in_totals: false,
                 separate_engagement_type_totals: true,
+                week_start_day: TimelineWeekStartDay::Sunday,
             },
         );
 
@@ -8450,6 +8650,7 @@ mod tests {
                 include_external_in_totals: true,
                 include_internal_in_totals: true,
                 separate_engagement_type_totals: true,
+                week_start_day: TimelineWeekStartDay::Sunday,
             },
         );
 
@@ -8465,6 +8666,7 @@ mod tests {
             include_external_in_totals: false,
             include_internal_in_totals: false,
             separate_engagement_type_totals: true,
+            week_start_day: TimelineWeekStartDay::Sunday,
         })
         .expect_err("both included categories cannot be disabled");
 

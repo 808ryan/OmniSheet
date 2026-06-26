@@ -2,6 +2,7 @@ export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
 export type OpenAiModelId = 'gpt-5.4' | 'gpt-5.4-mini' | 'gpt-5-nano' | 'gpt-4.1-nano'
 export type TranscriptionModelId = 'gpt-4o-mini-transcribe' | 'whisper-1'
 export type CaptureSourceId = 'text' | 'voice' | 'calendar'
+export type TimelineWeekStartDay = 'saturday' | 'sunday' | 'monday'
 
 export interface OpenAiModelOption {
   id: OpenAiModelId
@@ -302,6 +303,33 @@ export interface SummaryLayoutState {
 export type ReportingViewMode = 'table' | 'activityDetail'
 export type ReportingDisplayDensity = 'compact' | 'comfortable'
 export type ReportingRowLabelMode = 'combined' | 'separate' | 'activityOnly'
+export type ReportingDisplayFieldKey =
+  | 'details'
+  | 'engagement'
+  | 'activity'
+  | 'client'
+  | 'engagementType'
+  | 'engagementCode'
+  | 'activityCode'
+  | 'engagementTags'
+  | 'activityTags'
+  | 'engagementUsage'
+  | 'activityUsage'
+
+export type ReportingDisplayColumn =
+  | {
+    kind: 'field'
+    id: string
+    fieldKey: ReportingDisplayFieldKey
+  }
+  | {
+    kind: 'dayGroup'
+    id: string
+  }
+  | {
+    kind: 'rowTotal'
+    id: string
+  }
 
 export interface ReportingDisplayPreset {
   id: string
@@ -312,6 +340,7 @@ export interface ReportingDisplayPreset {
   showClient: boolean
   showEngagementType: boolean
   showEmptyDays: boolean
+  columns: ReportingDisplayColumn[]
 }
 
 export interface ReportingState {
@@ -364,32 +393,6 @@ export interface QuickAddPreferences {
   hiddenActivityIds: string[]
 }
 
-export interface HistoryListResult {
-  weekStartDate: string
-  weekEndDate: string
-  submissions: HistorySubmission[]
-  entries: TimelineEntry[]
-}
-
-export interface HistorySubmission {
-  id: string
-  rawText: string
-  captureSource: string
-  status: string
-  messageTimestamp: number
-  createdAt: number
-  interpretedEntryCount: number
-  uniqueEntryCount: number
-  savedEntryCount: number
-  truncatedEntryCount: number
-  containsMultipleEvents: boolean
-  confidence: number
-  modelUsed: OpenAiModelId | null
-  modelUsedLabel: string | null
-  transcriptionModelUsed: TranscriptionModelId | null
-  transcriptionModelUsedLabel: string | null
-}
-
 export interface SettingsStatus {
   hasOpenAiKey: boolean
   storageHealth: 'ok' | 'unavailable' | 'read_error'
@@ -406,9 +409,11 @@ export interface SettingsStatus {
   timelineIncludeExternalInTotals: boolean
   timelineIncludeInternalInTotals: boolean
   timelineSeparateEngagementTypeTotals: boolean
+  timelineWeekStartDay: TimelineWeekStartDay
   calendarBulkIgnoredKeywords: string[]
   calendarBulkIgnoreAllDayEvents: boolean
   quickAddPreferences: QuickAddPreferences
+  showDiagnosticsTab: boolean
 }
 
 export interface SettingsTimelinePreferencesInput {
@@ -417,6 +422,7 @@ export interface SettingsTimelinePreferencesInput {
   timelineIncludeExternalInTotals: boolean
   timelineIncludeInternalInTotals: boolean
   timelineSeparateEngagementTypeTotals: boolean
+  timelineWeekStartDay: TimelineWeekStartDay
 }
 
 export interface SettingsCalendarBulkPreferencesInput {
@@ -426,6 +432,10 @@ export interface SettingsCalendarBulkPreferencesInput {
 
 export interface SettingsQuickAddPreferencesInput {
   quickAddPreferences: QuickAddPreferences
+}
+
+export interface SettingsInterfacePreferencesInput {
+  showDiagnosticsTab: boolean
 }
 
 export interface CalendarExtractInput {

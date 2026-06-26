@@ -15,7 +15,6 @@ import type {
   DiagnosticsRecordInput,
   Engagement,
   EngagementUpsertInput,
-  HistoryListResult,
   IdResult,
   InterpretResult,
   InterpretTextInput,
@@ -26,6 +25,7 @@ import type {
   ReportingState,
   SettingsStatus,
   SettingsCalendarBulkPreferencesInput,
+  SettingsInterfacePreferencesInput,
   SettingsQuickAddPreferencesInput,
   SettingsTimelinePreferencesInput,
   SummaryExportResult,
@@ -227,6 +227,12 @@ export function settingsSetQuickAddPreferences(
   return invokeCommand<void>('settings_set_quick_add_preferences', { input })
 }
 
+export function settingsSetInterfacePreferences(
+  input: SettingsInterfacePreferencesInput,
+): Promise<void> {
+  return invokeCommand<void>('settings_set_interface_preferences', { input })
+}
+
 export function summaryLayoutStateGet(): Promise<SummaryLayoutState> {
   return invokeCommand<SummaryLayoutState>('summary_layout_state_get')
 }
@@ -317,10 +323,6 @@ export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {
 
 export function timelineCreateEntry(input: TimelineCreateInput): Promise<IdResult> {
   return invokeCommand<IdResult>('timeline_create_entry', { input })
-}
-
-export function historyList(input: DateInput): Promise<HistoryListResult> {
-  return invokeCommand<HistoryListResult>('history_list', { input })
 }
 
 export function quickAddSuggestions(
