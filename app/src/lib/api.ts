@@ -25,6 +25,7 @@ import type {
   ReportingState,
   SettingsStatus,
   SettingsCalendarBulkPreferencesInput,
+  SettingsInterfacePreferencesInput,
   SettingsQuickAddPreferencesInput,
   SettingsTimelinePreferencesInput,
   SummaryExportResult,
@@ -224,6 +225,12 @@ export function settingsSetQuickAddPreferences(
   input: SettingsQuickAddPreferencesInput,
 ): Promise<void> {
   return invokeCommand<void>('settings_set_quick_add_preferences', { input })
+}
+
+export function settingsSetInterfacePreferences(
+  input: SettingsInterfacePreferencesInput,
+): Promise<void> {
+  return invokeCommand<void>('settings_set_interface_preferences', { input })
 }
 
 export function summaryLayoutStateGet(): Promise<SummaryLayoutState> {

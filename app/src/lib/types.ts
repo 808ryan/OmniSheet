@@ -2,6 +2,7 @@ export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
 export type OpenAiModelId = 'gpt-5.4' | 'gpt-5.4-mini' | 'gpt-5-nano' | 'gpt-4.1-nano'
 export type TranscriptionModelId = 'gpt-4o-mini-transcribe' | 'whisper-1'
 export type CaptureSourceId = 'text' | 'voice' | 'calendar'
+export type TimelineWeekStartDay = 'saturday' | 'sunday' | 'monday'
 
 export interface OpenAiModelOption {
   id: OpenAiModelId
@@ -408,9 +409,11 @@ export interface SettingsStatus {
   timelineIncludeExternalInTotals: boolean
   timelineIncludeInternalInTotals: boolean
   timelineSeparateEngagementTypeTotals: boolean
+  timelineWeekStartDay: TimelineWeekStartDay
   calendarBulkIgnoredKeywords: string[]
   calendarBulkIgnoreAllDayEvents: boolean
   quickAddPreferences: QuickAddPreferences
+  showDiagnosticsTab: boolean
 }
 
 export interface SettingsTimelinePreferencesInput {
@@ -419,6 +422,7 @@ export interface SettingsTimelinePreferencesInput {
   timelineIncludeExternalInTotals: boolean
   timelineIncludeInternalInTotals: boolean
   timelineSeparateEngagementTypeTotals: boolean
+  timelineWeekStartDay: TimelineWeekStartDay
 }
 
 export interface SettingsCalendarBulkPreferencesInput {
@@ -428,6 +432,10 @@ export interface SettingsCalendarBulkPreferencesInput {
 
 export interface SettingsQuickAddPreferencesInput {
   quickAddPreferences: QuickAddPreferences
+}
+
+export interface SettingsInterfacePreferencesInput {
+  showDiagnosticsTab: boolean
 }
 
 export interface CalendarExtractInput {

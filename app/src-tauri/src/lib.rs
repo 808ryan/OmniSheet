@@ -58,6 +58,7 @@ pub fn run() {
             commands::settings_set_timeline_preferences,
             commands::settings_set_calendar_bulk_preferences,
             commands::settings_set_quick_add_preferences,
+            commands::settings_set_interface_preferences,
             commands::settings_set_transcription_model,
             commands::summary_layout_state_get,
             commands::summary_layout_state_set,
