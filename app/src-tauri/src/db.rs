@@ -1786,6 +1786,7 @@ pub fn list_diagnostics_events(
             'settings_set_openai_key',
             'settings_set_openai_model',
             'settings_set_timeline_preferences',
+            'settings_set_interface_preferences',
             'settings_set_transcription_model'
           ) OR event_type = 'key_save_verify'
           ORDER BY timestamp DESC
@@ -2383,7 +2384,8 @@ mod tests {
     #[test]
     fn quick_add_suggestions_sort_by_usage_count_then_recent_use() {
         let connection = test_connection();
-        let engagement_id = create_test_engagement(&connection, "QA-SORT", "Quick Entry Sort", true);
+        let engagement_id =
+            create_test_engagement(&connection, "QA-SORT", "Quick Entry Sort", true);
         let high_count_activity_id =
             create_test_activity(&connection, &engagement_id, "HIGH", "High Count", true);
         let recent_activity_id =
@@ -2470,7 +2472,8 @@ mod tests {
     #[test]
     fn quick_add_suggestions_include_zero_usage_active_activity_fallbacks() {
         let connection = test_connection();
-        let engagement_id = create_test_engagement(&connection, "QA-FILL", "Quick Entry Fill", true);
+        let engagement_id =
+            create_test_engagement(&connection, "QA-FILL", "Quick Entry Fill", true);
         let used_activity_id =
             create_test_activity(&connection, &engagement_id, "USED", "Used Activity", true);
         let unused_activity_id = create_test_activity(

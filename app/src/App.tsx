@@ -28,6 +28,7 @@ import {
   settingsGetStatus,
   settingsSetCalendarBulkModel,
   settingsSetCalendarBulkPreferences,
+  settingsSetInterfacePreferences,
   settingsSetOpenAiKey,
   settingsSetOpenAiModel,
   settingsSetQuickAddPreferences,
@@ -93,6 +94,7 @@ import type {
   ReportingDisplayPreset,
   ReportingState,
   SettingsStatus,
+  SettingsTimelinePreferencesInput,
   SummaryLayoutColumn,
   SummaryLayoutFieldKey,
   SummaryLayoutPreset,
@@ -101,6 +103,7 @@ import type {
   TimelineEntry,
   TimelineTotalBreakdown,
   TimelineWeekView,
+  TimelineWeekStartDay,
   TimelineWeeklySummary,
   TimelineWeeklySummaryNote,
   TimelineWeeklySummaryRow,
@@ -836,16 +839,12 @@ const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'settings', label: 'Settings' },
   { id: 'diagnostics', label: 'Diagnostics' },
 ]
-const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const
-const SUMMARY_DAY_NAMES = [
-  'Saturday',
-  'Sunday',
-  'Monday',
-  'Tuesday',
-  'Wednesday',
-  'Thursday',
-  'Friday',
-] as const
+const TIMELINE_WEEK_START_OPTIONS: Array<{ id: TimelineWeekStartDay; label: string }> = [
+  { id: 'saturday', label: 'Saturday' },
+  { id: 'sunday', label: 'Sunday' },
+  { id: 'monday', label: 'Monday' },
+]
+const WEEKDAY_LABELS_BY_SUNDAY = ['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const
 const REPORTING_DISPLAY_FIELD_GROUPS: Array<{
   label: string
   keys: ReportingDisplayFieldKey[]
@@ -1041,6 +1040,30 @@ function App() {
     useState<OpenAiModelId>(DEFAULT_CALENDAR_BULK_MODEL)
   const [selectedTranscriptionModelDraft, setSelectedTranscriptionModelDraft] =
     useState<TranscriptionModelId>(DEFAULT_TRANSCRIPTION_MODEL)
+  const timelineExcludeUncategorizedFromDailyTotals =
+    settingsStatus?.timelineExcludeUncategorizedFromDailyTotals ?? true
+  const timelineShowUncategorizedDailyTotal =
+    settingsStatus?.timelineShowUncategorizedDailyTotal ?? true
+  const timelineIncludeExternalInTotals =
+    settingsStatus?.timelineIncludeExternalInTotals ?? true
+  const timelineIncludeInternalInTotals =
+    settingsStatus?.timelineIncludeInternalInTotals ?? false
+  const timelineSeparateEngagementTypeTotals =
+    settingsStatus?.timelineSeparateEngagementTypeTotals ?? true
+  const timelineWeekStartDay: TimelineWeekStartDay = settingsStatus?.timelineWeekStartDay ?? 'sunday'
+  const currentTimelinePreferences: SettingsTimelinePreferencesInput = {
+    timelineExcludeUncategorizedFromDailyTotals,
+    timelineShowUncategorizedDailyTotal,
+    timelineIncludeExternalInTotals,
+    timelineIncludeInternalInTotals,
+    timelineSeparateEngagementTypeTotals,
+    timelineWeekStartDay,
+  }
+  const showDiagnosticsTab = settingsStatus?.showDiagnosticsTab ?? true
+  const mainViewTabs = useMemo(
+    () => SEGMENTED_VIEWS.filter((view) => showDiagnosticsTab || view.id !== 'diagnostics'),
+    [showDiagnosticsTab],
+  )
 
   const [engagements, setEngagements] = useState<Engagement[]>([])
   const [codeEditorSurface, setCodeEditorSurface] = useState<CodeEditorSurface | null>(null)
@@ -1405,23 +1428,37 @@ function App() {
   )
   const visibleMonthSummaryError = monthSummaryCache[visibleMonth] ? null : monthSummaryError
   const hasVisibleMonthSummary = monthSummaryCache[visibleMonth] !== undefined
+  const selectedWeekHighlightedDates = useMemo(
+    () => buildWeekDateSet(selectedDate, timelineWeekStartDay),
+    [selectedDate, timelineWeekStartDay],
+  )
   const summaryWeekHighlightedDates = useMemo(() => {
     if (!isSummaryLikeView(activeView) || !weeklySummary) {
-      return new Set<string>()
+      return selectedWeekHighlightedDates
     }
 
     return new Set(weeklySummary.days.map((day) => day.date))
-  }, [activeView, weeklySummary])
+  }, [activeView, selectedWeekHighlightedDates, weeklySummary])
   const weekViewHighlightedDates = useMemo(() => {
     if (activeView !== 'week' || !weekTimeline) {
-      return new Set<string>()
+      return selectedWeekHighlightedDates
     }
 
     return new Set(weekTimeline.days.map((day) => day.date))
-  }, [activeView, weekTimeline])
+  }, [activeView, selectedWeekHighlightedDates, weekTimeline])
   const miniCalendarHighlightedDates = useMemo(
-    () => (activeView === 'week' ? weekViewHighlightedDates : summaryWeekHighlightedDates),
-    [activeView, summaryWeekHighlightedDates, weekViewHighlightedDates],
+    () => {
+      if (activeView === 'week') {
+        return weekViewHighlightedDates
+      }
+
+      if (isSummaryLikeView(activeView)) {
+        return summaryWeekHighlightedDates
+      }
+
+      return selectedWeekHighlightedDates
+    },
+    [activeView, selectedWeekHighlightedDates, summaryWeekHighlightedDates, weekViewHighlightedDates],
   )
   const selectedSummaryNotesContext = useMemo(() => {
     if (!weeklySummary || !summaryNotesModal) {
@@ -2051,16 +2088,6 @@ function App() {
     setSubmissionQueue((previous) => [...previous, queueItem])
   }, [settingsStatus])
 
-  const timelineExcludeUncategorizedFromDailyTotals =
-    settingsStatus?.timelineExcludeUncategorizedFromDailyTotals ?? true
-  const timelineShowUncategorizedDailyTotal =
-    settingsStatus?.timelineShowUncategorizedDailyTotal ?? true
-  const timelineIncludeExternalInTotals =
-    settingsStatus?.timelineIncludeExternalInTotals ?? true
-  const timelineIncludeInternalInTotals =
-    settingsStatus?.timelineIncludeInternalInTotals ?? false
-  const timelineSeparateEngagementTypeTotals =
-    settingsStatus?.timelineSeparateEngagementTypeTotals ?? true
   // When uncategorized time contributes to the primary total, keep it visible so
   // the displayed breakdown reconciles back to that total.
   const shouldShowTimelineUncategorizedDailyTotal =
@@ -2164,8 +2191,8 @@ function App() {
     ) ?? null
   }, [baselinePositionedTimelineEntries, timelineDragState])
   const weekTimelineDays = useMemo(
-    () => weekTimeline?.days ?? buildWeekViewDays(selectedDate),
-    [selectedDate, weekTimeline],
+    () => weekTimeline?.days ?? buildWeekViewDays(selectedDate, timelineWeekStartDay),
+    [selectedDate, timelineWeekStartDay, weekTimeline],
   )
   const weekTimelineEntries = useMemo(
     () => weekTimeline?.entries ?? [],
@@ -3066,6 +3093,14 @@ function App() {
 
     void loadDiagnostics(diagnosticsFilter)
   }, [activeView, appRuntime, diagnosticsFilter, loadDiagnostics])
+
+  useEffect(() => {
+    if (!settingsStatus || showDiagnosticsTab || activeView !== 'diagnostics') {
+      return
+    }
+
+    setActiveView('settings')
+  }, [activeView, settingsStatus, showDiagnosticsTab])
 
   useEffect(() => {
     if (!appRuntime || !hasInitializedRef.current || activeView !== 'week') {
@@ -6433,41 +6468,31 @@ function App() {
     })
   }
 
-  const onSaveTimelinePreferences = (
-    timelineExcludeUncategorizedFromDailyTotals: boolean,
-    timelineShowUncategorizedDailyTotal: boolean,
-    timelineIncludeExternalInTotals: boolean,
-    timelineIncludeInternalInTotals: boolean,
-    timelineSeparateEngagementTypeTotals: boolean,
-  ) => {
+  const onSaveTimelinePreferences = (preferences: SettingsTimelinePreferencesInput) => {
     const previousStatus = settingsStatus
     if (!previousStatus) {
       return
     }
 
-    if (!timelineIncludeExternalInTotals && !timelineIncludeInternalInTotals) {
+    if (!preferences.timelineIncludeExternalInTotals && !preferences.timelineIncludeInternalInTotals) {
       setErrorMessage('At least one of External or Internal type codes must be included in totals.')
       return
     }
 
     setSettingsStatus({
       ...previousStatus,
-      timelineExcludeUncategorizedFromDailyTotals,
-      timelineShowUncategorizedDailyTotal,
-      timelineIncludeExternalInTotals,
-      timelineIncludeInternalInTotals,
-      timelineSeparateEngagementTypeTotals,
+      ...preferences,
     })
 
     void runAction(async () => {
       try {
-        await settingsSetTimelinePreferences({
-          timelineExcludeUncategorizedFromDailyTotals,
-          timelineShowUncategorizedDailyTotal,
-          timelineIncludeExternalInTotals,
-          timelineIncludeInternalInTotals,
-          timelineSeparateEngagementTypeTotals,
-        })
+        await settingsSetTimelinePreferences(preferences)
+        if (preferences.timelineWeekStartDay !== previousStatus.timelineWeekStartDay) {
+          await Promise.all([
+            loadWeekTimeline(selectedDate),
+            loadWeeklySummary(selectedDate),
+          ])
+        }
         const status = await settingsGetStatus()
         setSettingsStatus(status)
         setSelectedOpenAiModelDraft(status.selectedOpenAiModel)
@@ -6522,6 +6547,31 @@ function App() {
         setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
         setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
         setSuccessMessage('Calendar bulk add preferences saved.')
+      } catch (error) {
+        setSettingsStatus(previousStatus)
+        throw error
+      }
+    })
+  }
+
+  const onSaveInterfacePreferences = (showDiagnosticsTab: boolean) => {
+    const previousStatus = settingsStatus
+    if (!previousStatus) {
+      return
+    }
+
+    setSettingsStatus({
+      ...previousStatus,
+      showDiagnosticsTab,
+    })
+
+    void runAction(async () => {
+      try {
+        await settingsSetInterfacePreferences({ showDiagnosticsTab })
+        const status = await settingsGetStatus()
+        setSettingsStatus(status)
+        setSelectedCalendarBulkModelDraft(status.selectedCalendarBulkModel)
+        setSuccessMessage('Interface preferences saved.')
       } catch (error) {
         setSettingsStatus(previousStatus)
         throw error
@@ -7427,6 +7477,10 @@ function App() {
   }, [selectedDate, weekTimelineDays])
 
   const onSelectView = (view: View) => {
+    if (view === 'diagnostics' && !showDiagnosticsTab) {
+      return
+    }
+
     if (view === 'week' && activeView !== 'week') {
       clearTimelineSelection()
     }
@@ -9488,7 +9542,7 @@ function App() {
 
         <main className="app-main">
           <div className="segmented-control main-view-tabs" role="tablist" aria-label="Main views">
-            {SEGMENTED_VIEWS.map((view) => (
+            {mainViewTabs.map((view) => (
               <button
                 key={view.id}
                 type="button"
@@ -10854,6 +10908,35 @@ function App() {
                 <div className="settings-card-header">
                   <h3>Timeline</h3>
                 </div>
+                <div className="settings-preference-row settings-radio-row">
+                  <span id="settings-timeline-week-start-label" className="settings-preference-label">
+                    Seven-day week starts on
+                  </span>
+                  <div
+                    className="settings-radio-group"
+                    role="radiogroup"
+                    aria-labelledby="settings-timeline-week-start-label"
+                  >
+                    {TIMELINE_WEEK_START_OPTIONS.map((option) => (
+                      <label key={option.id} className="settings-radio-option">
+                        <input
+                          type="radio"
+                          name="settings-timeline-week-start"
+                          value={option.id}
+                          checked={timelineWeekStartDay === option.id}
+                          onChange={() =>
+                            onSaveTimelinePreferences({
+                              ...currentTimelinePreferences,
+                              timelineWeekStartDay: option.id,
+                            })
+                          }
+                          disabled={isBusy || settingsStatus === null}
+                        />
+                        <span>{option.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
                 <div className="settings-preference-row settings-toggle-row">
                   <label htmlFor="settings-timeline-exclude-uncategorized">
                     Exclude uncategorized time from daily, weekly, and reporting totals
@@ -10864,13 +10947,10 @@ function App() {
                       type="checkbox"
                       checked={timelineExcludeUncategorizedFromDailyTotals}
                       onChange={(event) =>
-                        onSaveTimelinePreferences(
-                          event.target.checked,
-                          timelineShowUncategorizedDailyTotal,
-                          timelineIncludeExternalInTotals,
-                          timelineIncludeInternalInTotals,
-                          timelineSeparateEngagementTypeTotals,
-                        )
+                        onSaveTimelinePreferences({
+                          ...currentTimelinePreferences,
+                          timelineExcludeUncategorizedFromDailyTotals: event.target.checked,
+                        })
                       }
                       disabled={isBusy || settingsStatus === null}
                     />
@@ -10886,13 +10966,10 @@ function App() {
                       type="checkbox"
                       checked={timelineShowUncategorizedDailyTotal}
                       onChange={(event) =>
-                        onSaveTimelinePreferences(
-                          timelineExcludeUncategorizedFromDailyTotals,
-                          event.target.checked,
-                          timelineIncludeExternalInTotals,
-                          timelineIncludeInternalInTotals,
-                          timelineSeparateEngagementTypeTotals,
-                        )
+                        onSaveTimelinePreferences({
+                          ...currentTimelinePreferences,
+                          timelineShowUncategorizedDailyTotal: event.target.checked,
+                        })
                       }
                       disabled={
                         isBusy ||
@@ -10912,13 +10989,10 @@ function App() {
                       type="checkbox"
                       checked={timelineIncludeExternalInTotals}
                       onChange={(event) =>
-                        onSaveTimelinePreferences(
-                          timelineExcludeUncategorizedFromDailyTotals,
-                          timelineShowUncategorizedDailyTotal,
-                          event.target.checked,
-                          timelineIncludeInternalInTotals,
-                          timelineSeparateEngagementTypeTotals,
-                        )
+                        onSaveTimelinePreferences({
+                          ...currentTimelinePreferences,
+                          timelineIncludeExternalInTotals: event.target.checked,
+                        })
                       }
                       disabled={
                         isBusy
@@ -10938,13 +11012,10 @@ function App() {
                       type="checkbox"
                       checked={timelineIncludeInternalInTotals}
                       onChange={(event) =>
-                        onSaveTimelinePreferences(
-                          timelineExcludeUncategorizedFromDailyTotals,
-                          timelineShowUncategorizedDailyTotal,
-                          timelineIncludeExternalInTotals,
-                          event.target.checked,
-                          timelineSeparateEngagementTypeTotals,
-                        )
+                        onSaveTimelinePreferences({
+                          ...currentTimelinePreferences,
+                          timelineIncludeInternalInTotals: event.target.checked,
+                        })
                       }
                       disabled={
                         isBusy
@@ -10964,13 +11035,10 @@ function App() {
                       type="checkbox"
                       checked={timelineSeparateEngagementTypeTotals}
                       onChange={(event) =>
-                        onSaveTimelinePreferences(
-                          timelineExcludeUncategorizedFromDailyTotals,
-                          timelineShowUncategorizedDailyTotal,
-                          timelineIncludeExternalInTotals,
-                          timelineIncludeInternalInTotals,
-                          event.target.checked,
-                        )
+                        onSaveTimelinePreferences({
+                          ...currentTimelinePreferences,
+                          timelineSeparateEngagementTypeTotals: event.target.checked,
+                        })
                       }
                       disabled={isBusy || settingsStatus === null}
                     />
@@ -11018,6 +11086,28 @@ function App() {
                       checked={settingsStatus?.calendarBulkIgnoreAllDayEvents ?? true}
                       onChange={(event) =>
                         onSaveCalendarIgnoreAllDayPreference(event.target.checked)
+                      }
+                      disabled={isBusy || settingsStatus === null}
+                    />
+                  </div>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-header">
+                  <h3>Interface</h3>
+                </div>
+                <div className="settings-preference-row settings-toggle-row">
+                  <label htmlFor="settings-show-diagnostics-tab">
+                    Show Diagnostics tab
+                  </label>
+                  <div className="settings-toggle-group">
+                    <input
+                      id="settings-show-diagnostics-tab"
+                      type="checkbox"
+                      checked={showDiagnosticsTab}
+                      onChange={(event) =>
+                        onSaveInterfacePreferences(event.target.checked)
                       }
                       disabled={isBusy || settingsStatus === null}
                     />
@@ -11877,7 +11967,7 @@ function App() {
                     <span className="summary-layout-insert-line" aria-hidden="true" />
                   </button>
                   {summaryLayoutDraft.columns.map((column, columnIndex) => {
-                    const previewColumn = buildSummaryViewColumn(column)
+                    const previewColumn = buildSummaryViewColumn(column, weeklySummary)
                     const shouldWrapPreviewColumn = true
                     const isDragging = summaryLayoutDragState?.columnId === column.id
                     const isCommitReset = summaryLayoutDropCommitColumnIds.includes(column.id)
@@ -11934,7 +12024,7 @@ function App() {
                               />
                             ) : (
                               previewColumn.kind === 'day' && previewColumn.dayIndex !== undefined && weeklySummary
-                                ? `${SUMMARY_DAY_NAMES[previewColumn.dayIndex]} (${formatMonthDay(weeklySummary.days[previewColumn.dayIndex]?.date ?? weeklySummary.weekStartDate)})`
+                                ? formatSummaryDayLabel(weeklySummary, previewColumn.dayIndex)
                                 : previewColumn.header
                             )}
                           </div>
@@ -12027,7 +12117,7 @@ function App() {
                       <span role="columnheader">Column</span>
                       <span role="columnheader">Description</span>
                     </div>
-                    {buildSummaryLayoutInsertOptions(summaryLayoutDraft).map((option) => (
+                    {buildSummaryLayoutInsertOptions(summaryLayoutDraft, weeklySummary).map((option) => (
                       <button
                         key={option.key}
                         type="button"
@@ -12110,7 +12200,7 @@ function App() {
                 selectedSummaryNotesContext.row.activityName,
                 selectedSummaryNotesContext.row.activityCode,
               )}
-              {' '}on {SUMMARY_DAY_NAMES[selectedSummaryNotesContext.dayIndex]} ({formatMonthDay(selectedSummaryNotesContext.day.date)})
+              {' '}on {formatWeekdayName(selectedSummaryNotesContext.day.date)} ({formatMonthDay(selectedSummaryNotesContext.day.date)})
             </p>
             <div className="summary-notes-list">
               {selectedSummaryNotesContext.notes.map((note, index) => (
@@ -12173,7 +12263,7 @@ function MiniCalendar({
       </div>
 
       <div className="mini-calendar-weekdays" aria-hidden="true">
-        {WEEKDAY_LABELS.map((label, index) => (
+        {WEEKDAY_LABELS_BY_SUNDAY.map((label, index) => (
           <span key={`${visibleMonth}-${label}-${index}`}>{label}</span>
         ))}
       </div>
@@ -12879,10 +12969,72 @@ function formatMonthDay(date: string): string {
   }).format(value)
 }
 
-function buildWeekViewDays(anchorDate: string): TimelineWeekView['days'] {
+function formatWeekdayName(date: string, format: 'long' | 'short' = 'long'): string {
+  const value = new Date(`${date}T00:00:00`)
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: format,
+  }).format(value)
+}
+
+function getSummaryDayDate(
+  weeklySummary: TimelineWeeklySummary | null | undefined,
+  dayIndex: number,
+): string | null {
+  return weeklySummary?.days[dayIndex]?.date ?? weeklySummary?.weekStartDate ?? null
+}
+
+function getSummaryDayName(
+  weeklySummary: TimelineWeeklySummary | null | undefined,
+  dayIndex: number,
+): string {
+  const date = getSummaryDayDate(weeklySummary, dayIndex)
+  return date ? formatWeekdayName(date) : `Day ${dayIndex + 1}`
+}
+
+function getSummaryDayShortName(
+  weeklySummary: TimelineWeeklySummary | null | undefined,
+  dayIndex: number,
+): string {
+  const date = getSummaryDayDate(weeklySummary, dayIndex)
+  return date ? formatWeekdayName(date, 'short') : `D${dayIndex + 1}`
+}
+
+function formatSummaryDayLabel(
+  weeklySummary: TimelineWeeklySummary | null | undefined,
+  dayIndex: number,
+): string {
+  const dayName = getSummaryDayName(weeklySummary, dayIndex)
+  const date = getSummaryDayDate(weeklySummary, dayIndex)
+
+  return date ? `${dayName} (${formatMonthDay(date)})` : dayName
+}
+
+function weekStartOffsetFromSunday(weekStartDay: TimelineWeekStartDay): number {
+  if (weekStartDay === 'monday') {
+    return 1
+  }
+
+  if (weekStartDay === 'saturday') {
+    return 6
+  }
+
+  return 0
+}
+
+function getWeekStartDate(anchorDate: string, weekStartDay: TimelineWeekStartDay): Date {
   const anchor = new Date(`${anchorDate}T00:00:00`)
   const weekStart = new Date(anchor)
-  weekStart.setDate(anchor.getDate() - anchor.getDay())
+  const daysSinceWeekStart = (anchor.getDay() + 7 - weekStartOffsetFromSunday(weekStartDay)) % 7
+  weekStart.setDate(anchor.getDate() - daysSinceWeekStart)
+
+  return weekStart
+}
+
+function buildWeekViewDays(
+  anchorDate: string,
+  weekStartDay: TimelineWeekStartDay,
+): TimelineWeekView['days'] {
+  const weekStart = getWeekStartDate(anchorDate, weekStartDay)
 
   return Array.from({ length: 7 }, (_, dayIndex) => {
     const value = new Date(weekStart)
@@ -12891,6 +13043,10 @@ function buildWeekViewDays(anchorDate: string): TimelineWeekView['days'] {
       date: formatDate(value),
     }
   })
+}
+
+function buildWeekDateSet(anchorDate: string, weekStartDay: TimelineWeekStartDay): Set<string> {
+  return new Set(buildWeekViewDays(anchorDate, weekStartDay).map((day) => day.date))
 }
 
 function formatTimelineWeekRangeLabel(startDate: string, endDate: string): TimelineWeekRangeLabel {
@@ -13938,7 +14094,10 @@ function clampTimelineContextMenuPosition(
   }
 }
 
-function buildSummaryViewColumn(column: SummaryLayoutColumn): SummaryLayoutViewColumn {
+function buildSummaryViewColumn(
+  column: SummaryLayoutColumn,
+  weeklySummary?: TimelineWeeklySummary | null,
+): SummaryLayoutViewColumn {
   if (column.kind === 'field') {
     const option = getSummaryLayoutFieldOption(column.fieldKey)
     return {
@@ -13955,7 +14114,7 @@ function buildSummaryViewColumn(column: SummaryLayoutColumn): SummaryLayoutViewC
     return {
       kind: 'day',
       id: column.id,
-      header: SUMMARY_DAY_NAMES[column.dayIndex] ?? 'Day',
+      header: getSummaryDayName(weeklySummary, column.dayIndex),
       width: SUMMARY_LAYOUT_DAY_COLUMN_WIDTH,
       wraps: false,
       dayIndex: column.dayIndex,
@@ -13985,10 +14144,7 @@ function formatReportingExportDayHeader(
   weeklySummary: TimelineWeeklySummary | null,
   dayIndex: number,
 ): string {
-  const dayName = SUMMARY_DAY_NAMES[dayIndex] ?? 'Day'
-  const date = weeklySummary?.days[dayIndex]?.date ?? weeklySummary?.weekStartDate
-
-  return date ? `${dayName} (${formatMonthDay(date)})` : dayName
+  return formatSummaryDayLabel(weeklySummary, dayIndex)
 }
 
 function buildReportingExportPreviewColumns(
@@ -14269,7 +14425,10 @@ function renderSummaryPreviewSimpleFooter(
   return ''
 }
 
-function buildSummaryLayoutInsertOptions(preset: SummaryLayoutPreset): Array<{
+function buildSummaryLayoutInsertOptions(
+  preset: SummaryLayoutPreset,
+  weeklySummary: TimelineWeeklySummary | null,
+): Array<{
   key: string
   label: string
   description: string
@@ -14299,8 +14458,10 @@ function buildSummaryLayoutInsertOptions(preset: SummaryLayoutPreset): Array<{
       }),
     }))
 
-  const dayOptions = SUMMARY_DAY_NAMES
-    .map((dayName, dayIndex) => ({ dayName, dayIndex }))
+  const dayOptions = Array.from({ length: 7 }, (_, dayIndex) => ({
+    dayName: getSummaryDayName(weeklySummary, dayIndex),
+    dayIndex,
+  }))
     .filter(({ dayIndex }) => !usedDays.has(dayIndex))
     .map(({ dayName, dayIndex }) => ({
       key: `day-${dayIndex}`,
@@ -14709,7 +14870,7 @@ function ReportingTableView({
 
               if (column.kind === 'dayGroup') {
                 return dayIndexes.map((dayIndex) => {
-                  const headerLabel = SUMMARY_DAY_NAMES[dayIndex]?.slice(0, 3) ?? 'Day'
+                  const headerLabel = getSummaryDayShortName(summary, dayIndex)
                   return (
                     <span
                       key={`${column.id}-${dayIndex}`}
@@ -14720,7 +14881,7 @@ function ReportingTableView({
                     >
                       {renderDragHandle(column, 'days')}
                       <span>{headerLabel}</span>
-                      <small>{formatMonthDay(summary.days[dayIndex]?.date ?? summary.weekStartDate)}</small>
+                      <small>{formatMonthDay(getSummaryDayDate(summary, dayIndex) ?? summary.weekStartDate)}</small>
                     </span>
                   )
                 })
@@ -14764,7 +14925,7 @@ function ReportingTableView({
                         return dayIndexes.map((dayIndex) => {
                           const cell = row.cells[dayIndex]
                           const hasHours = Boolean(cell && cell.totalMinutes > 0)
-                          const noteLabel = `Open notes for ${formatEntityDisplayLabel(row.activityName, row.activityCode)} on ${SUMMARY_DAY_NAMES[dayIndex]}`
+                          const noteLabel = `Open notes for ${formatEntityDisplayLabel(row.activityName, row.activityCode)} on ${getSummaryDayName(summary, dayIndex)}`
                           const columnStateClass = getColumnStateClass(column.id)
 
                           return (

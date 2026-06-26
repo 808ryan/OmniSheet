@@ -144,6 +144,39 @@ impl TranscriptionModelId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineWeekStartDay {
+    Saturday,
+    Sunday,
+    Monday,
+}
+
+impl Default for TimelineWeekStartDay {
+    fn default() -> Self {
+        Self::Sunday
+    }
+}
+
+impl TimelineWeekStartDay {
+    pub fn setting_value(self) -> &'static str {
+        match self {
+            Self::Saturday => "saturday",
+            Self::Sunday => "sunday",
+            Self::Monday => "monday",
+        }
+    }
+
+    pub fn from_setting_value(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "saturday" => Some(Self::Saturday),
+            "sunday" => Some(Self::Sunday),
+            "monday" => Some(Self::Monday),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CaptureSourceId {
     Text,
@@ -191,6 +224,7 @@ pub struct SettingsSetTimelinePreferencesInput {
     pub timeline_include_external_in_totals: bool,
     pub timeline_include_internal_in_totals: bool,
     pub timeline_separate_engagement_type_totals: bool,
+    pub timeline_week_start_day: TimelineWeekStartDay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +251,12 @@ pub struct SettingsSetQuickAddPreferencesInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SettingsSetInterfacePreferencesInput {
+    pub show_diagnostics_tab: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsStatus {
     pub has_open_ai_key: bool,
     pub storage_health: StorageHealth,
@@ -233,9 +273,11 @@ pub struct SettingsStatus {
     pub timeline_include_external_in_totals: bool,
     pub timeline_include_internal_in_totals: bool,
     pub timeline_separate_engagement_type_totals: bool,
+    pub timeline_week_start_day: TimelineWeekStartDay,
     pub calendar_bulk_ignored_keywords: Vec<String>,
     pub calendar_bulk_ignore_all_day_events: bool,
     pub quick_add_preferences: QuickAddPreferences,
+    pub show_diagnostics_tab: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
