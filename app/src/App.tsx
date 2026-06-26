@@ -1142,6 +1142,7 @@ function App() {
     order: [] as string[],
   }))
   const [monthSummaryCache, setMonthSummaryCache] = useState<MonthSummaryCache>({})
+  const [staleMonthSummaryKeys, setStaleMonthSummaryKeys] = useState<Set<string>>(() => new Set())
   const [monthSummaryLoadingMonth, setMonthSummaryLoadingMonth] = useState<string | null>(null)
   const [monthSummaryError, setMonthSummaryError] = useState<string | null>(null)
   const timelineGridRef = useRef<HTMLDivElement | null>(null)
@@ -1161,6 +1162,7 @@ function App() {
   const entryDraftAutoSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const entryDraftLastSavedKeyRef = useRef<string | null>(null)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
+  const timelineMutationInFlightRef = useRef(false)
   const quickBlockDragStateRef = useRef<QuickBlockDragState | null>(null)
   const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
   const quickAddSettingsDraftRef = useRef<QuickAddPreferences | null>(null)
@@ -1427,8 +1429,9 @@ function App() {
     () => new Set(visibleMonthSummaries.filter((day) => day.entryCount > 0).map((day) => day.date)),
     [visibleMonthSummaries],
   )
-  const visibleMonthSummaryError = monthSummaryCache[visibleMonth] ? null : monthSummaryError
   const hasVisibleMonthSummary = monthSummaryCache[visibleMonth] !== undefined
+  const isVisibleMonthSummaryStale = staleMonthSummaryKeys.has(visibleMonth)
+  const visibleMonthSummaryError = monthSummaryCache[visibleMonth] ? null : monthSummaryError
   const selectedWeekHighlightedDates = useMemo(
     () => buildWeekDateSet(selectedDate, timelineWeekStartDay),
     [selectedDate, timelineWeekStartDay],
@@ -2787,6 +2790,15 @@ function App() {
       ...previous,
       [month]: rows,
     }))
+    setStaleMonthSummaryKeys((previous) => {
+      if (!previous.has(month)) {
+        return previous
+      }
+
+      const next = new Set(previous)
+      next.delete(month)
+      return next
+    })
     return rows
   }, [])
 
@@ -2831,13 +2843,18 @@ function App() {
   }, [])
 
   const invalidateMonthSummaries = useCallback((monthKeys: string[]) => {
-    setMonthSummaryCache((previous) => {
-      let changed = false
-      const next = { ...previous }
+    const uniqueMonthKeys = uniqueIds(monthKeys)
+    if (uniqueMonthKeys.length === 0) {
+      return
+    }
 
-      for (const monthKey of monthKeys) {
-        if (next[monthKey]) {
-          delete next[monthKey]
+    setStaleMonthSummaryKeys((previous) => {
+      let changed = false
+      const next = new Set(previous)
+
+      for (const monthKey of uniqueMonthKeys) {
+        if (!next.has(monthKey)) {
+          next.add(monthKey)
           changed = true
         }
       }
@@ -3025,7 +3042,7 @@ function App() {
       return
     }
 
-    if (hasVisibleMonthSummary) {
+    if (hasVisibleMonthSummary && !isVisibleMonthSummaryStale) {
       return
     }
 
@@ -3055,7 +3072,13 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [appRuntime, hasVisibleMonthSummary, loadTimelineMonthSummary, visibleMonth])
+  }, [
+    appRuntime,
+    hasVisibleMonthSummary,
+    isVisibleMonthSummaryStale,
+    loadTimelineMonthSummary,
+    visibleMonth,
+  ])
 
   useEffect(() => {
     if (selectedEntryId && loadedTimelineEntries.every((entry) => entry.id !== selectedEntryId)) {
@@ -3714,6 +3737,31 @@ function App() {
     [],
   )
 
+  const runTimelineMutation = useCallback(
+    async (action: () => Promise<void>, options?: RunActionOptions) => {
+      if (timelineMutationInFlightRef.current) {
+        return
+      }
+
+      try {
+        timelineMutationInFlightRef.current = true
+        setErrorMessage(null)
+        setSuccessMessage(null)
+        await action()
+      } catch (error) {
+        if (options?.formatError) {
+          setErrorMessage(options.formatError(error))
+          return
+        }
+
+        setErrorMessage(formatActionErrorMessage(error))
+      } finally {
+        timelineMutationInFlightRef.current = false
+      }
+    },
+    [],
+  )
+
   const setTimelineDragStateWithRef = useCallback(
     (updater: (previous: TimelineDragState | null) => TimelineDragState | null) => {
       setTimelineDragState((previous) => {
@@ -3868,7 +3916,12 @@ function App() {
           }
         : null
 
-      setIsBusy(true)
+      if (timelineMutationInFlightRef.current) {
+        setTimelineDragStateWithRef(() => null)
+        return
+      }
+
+      timelineMutationInFlightRef.current = true
       setErrorMessage(null)
       setSuccessMessage(null)
       setTimelineLanePreferences((previous) => {
@@ -3933,7 +3986,7 @@ function App() {
           entryDraftLastSavedKeyRef.current = previousEntryDraft ? serializeEntryDraft(previousEntryDraft) : null
           setEntryDraft(previousEntryDraft)
           setErrorMessage(formatActionErrorMessage(error))
-          setIsBusy(false)
+          timelineMutationInFlightRef.current = false
           return
         }
 
@@ -3944,12 +3997,11 @@ function App() {
             loadTimeline(refreshDate),
             loadWeekTimeline(refreshDate),
             loadWeeklySummary(refreshDate),
-            loadQuickAddSuggestions(),
           ])
         } catch (error) {
           setErrorMessage(formatActionErrorMessage(error))
         } finally {
-          setIsBusy(false)
+          timelineMutationInFlightRef.current = false
         }
       })()
     },
@@ -3959,7 +4011,6 @@ function App() {
       invalidateMonthSummaries,
       loadTimeline,
       loadWeekTimeline,
-      loadQuickAddSuggestions,
       loadWeeklySummary,
       setTimelineLanePreferences,
       setTimelineDragStateWithRef,
@@ -5722,6 +5773,7 @@ function App() {
     if (
       event.button !== 0
       || isBusy
+      || timelineMutationInFlightRef.current
       || isTimelineDeleteBusy
       || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
     ) {
@@ -5841,6 +5893,7 @@ function App() {
 
     if (
       isBusy
+      || timelineMutationInFlightRef.current
       || isTimelineDeleteBusy
       || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
     ) {
@@ -5945,7 +5998,7 @@ function App() {
 
   const createQuickBlockEntry = useCallback(
     (engagement: Engagement, activity: Activity, durationMinutes: number) => {
-      if (isBusy) {
+      if (timelineMutationInFlightRef.current) {
         return
       }
 
@@ -5953,7 +6006,7 @@ function App() {
       const date = formatDate(new Date())
       const monthKey = monthKeyFromDate(date)
 
-      void runAction(async () => {
+      void runTimelineMutation(async () => {
         const result = await timelineCreateEntry({
           date,
           startMinute,
@@ -5986,12 +6039,11 @@ function App() {
     },
     [
       invalidateMonthSummaries,
-      isBusy,
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
       onSelectEntry,
-      runAction,
+      runTimelineMutation,
       scrollDayTimelineToEntry,
       updateSelectedDate,
     ],
@@ -6002,7 +6054,7 @@ function App() {
     engagement: Engagement,
     activity: Activity,
   ) => {
-    if (event.button !== 0 || isBusy || activity.isActive === false) {
+    if (event.button !== 0 || timelineMutationInFlightRef.current || activity.isActive === false) {
       return
     }
 
@@ -6083,7 +6135,7 @@ function App() {
     (date: string, anchorMinute: number) => {
       const { startMinute, endMinute } = resolveManualTimelineCreateWindow(anchorMinute, timelineWindow)
 
-      void runAction(async () => {
+      void runTimelineMutation(async () => {
         const result = await timelineCreateEntry({
           date,
           startMinute,
@@ -6094,7 +6146,6 @@ function App() {
           loadTimeline(date),
           loadWeekTimeline(date),
           loadWeeklySummary(date),
-          loadQuickAddSuggestions(),
         ])
         invalidateMonthSummaries([monthKeyFromDate(date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
@@ -6111,11 +6162,10 @@ function App() {
     },
     [
       invalidateMonthSummaries,
-      loadQuickAddSuggestions,
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
-      runAction,
+      runTimelineMutation,
       timelineWindow,
       updateSelectedDate,
     ],
@@ -6159,6 +6209,7 @@ function App() {
 
     if (
       isBusy
+      || timelineMutationInFlightRef.current
       || isTimelineDeleteBusy
       || timelineDragState?.isDragging
       || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
@@ -6237,6 +6288,7 @@ function App() {
   ) => {
     if (
       isBusy
+      || timelineMutationInFlightRef.current
       || isTimelineDeleteBusy
       || timelineDragState?.isDragging
       || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
@@ -6310,6 +6362,11 @@ function App() {
       const previousMonthKey = monthKeyFromDate(previousEntryDate)
       const nextMonthKey = monthKeyFromDate(savePlan.normalizedDraft.date)
       const refreshDate = savePlan.normalizedDraft.date
+      const nextEngagementId = savePlan.normalizedDraft.engagementId || null
+      const nextActivityId = savePlan.normalizedDraft.activityId || null
+      const shouldRefreshQuickAddSuggestions =
+        currentEntry?.engagementId !== nextEngagementId
+        || currentEntry?.activityId !== nextActivityId
 
       setEntryAutoSaveStatus('saving')
       setSuccessMessage(null)
@@ -6318,8 +6375,8 @@ function App() {
       try {
         await timelineUpdateEntry({
           id: savePlan.normalizedDraft.id,
-          engagementId: savePlan.normalizedDraft.engagementId || null,
-          activityId: savePlan.normalizedDraft.activityId || null,
+          engagementId: nextEngagementId,
+          activityId: nextActivityId,
           mode: 'manual',
           date: savePlan.normalizedDraft.date,
           startMinute: savePlan.startMinute,
@@ -6329,12 +6386,17 @@ function App() {
 
         invalidateMonthSummaries([previousMonthKey, nextMonthKey])
         updateSelectedDate(refreshDate, { clearSelection: false })
-        await Promise.all([
+        const refreshTasks: Promise<unknown>[] = [
           loadTimeline(refreshDate),
           loadWeekTimeline(refreshDate),
           loadWeeklySummary(refreshDate),
-          loadQuickAddSuggestions(),
-        ])
+        ]
+
+        if (shouldRefreshQuickAddSuggestions) {
+          refreshTasks.push(loadQuickAddSuggestions())
+        }
+
+        await Promise.all(refreshTasks)
 
         if (selectedEntryIdRef.current !== draft.id) {
           return
@@ -6423,6 +6485,11 @@ function App() {
         setErrorMessage(null)
         setSuccessMessage(null)
         setTimelineContextMenu(null)
+        if (entryDraftAutoSaveTimeoutRef.current !== null) {
+          window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
+          entryDraftAutoSaveTimeoutRef.current = null
+        }
+        await entryDraftAutoSaveChainRef.current.catch(() => undefined)
         await timelineDeleteEntry(id)
         await Promise.all([
           loadTimeline(selectedDateRef.current),
@@ -7563,7 +7630,7 @@ function App() {
             aria-label="Close edit entry"
             title="Close edit entry"
             onClick={clearTimelineSelection}
-            disabled={isBusy || isTimelineDeleteBusy}
+            disabled={isTimelineDeleteBusy}
           >
             <span className="control-icon close-icon" aria-hidden="true" />
           </button>
@@ -7707,7 +7774,7 @@ function App() {
               type="button"
               className="button-soft-danger"
               onClick={() => onDeleteTimelineEntry(entryDraft.id)}
-              disabled={isBusy || isTimelineDeleteBusy || entryAutoSaveStatus === 'saving'}
+              disabled={isTimelineDeleteBusy}
             >
               <span className="control-icon trash-icon" aria-hidden="true" />
               Delete
@@ -9528,7 +9595,6 @@ function App() {
                                         )
                                       }
                                     }}
-                                    disabled={isBusy}
                                     aria-label={`Add ${fullActivityLabel} for ${formatQuickBlockDuration(durationMinutes)}`}
                                     title={fullActivityLabel}
                                     style={{
@@ -9666,7 +9732,7 @@ function App() {
                   aria-label="Previous day"
                   title="Previous day"
                   onClick={() => onSetDate(shiftDate(selectedDate, -1))}
-                  disabled={isBusy || isTimelineLoading}
+                  disabled={isTimelineLoading}
                 >
                   <span className="control-icon chevron-left" aria-hidden="true" />
                 </button>
@@ -9674,7 +9740,7 @@ function App() {
                   type="button"
                   className="stepper-button stepper-center"
                   onClick={onJumpToToday}
-                  disabled={isBusy || isTimelineLoading}
+                  disabled={isTimelineLoading}
                 >
                   Today
                 </button>
@@ -9684,7 +9750,7 @@ function App() {
                   aria-label="Next day"
                   title="Next day"
                   onClick={() => onSetDate(shiftDate(selectedDate, 1))}
-                  disabled={isBusy || isTimelineLoading}
+                  disabled={isTimelineLoading}
                 >
                   <span className="control-icon chevron-right" aria-hidden="true" />
                 </button>
@@ -9928,7 +9994,7 @@ function App() {
                   aria-label="Previous week"
                   title="Previous week"
                   onClick={() => onSetDate(shiftDate(selectedDate, -7))}
-                  disabled={isBusy || isWeekTimelineLoading}
+                  disabled={isWeekTimelineLoading}
                 >
                   <span className="control-icon chevron-left" aria-hidden="true" />
                 </button>
@@ -9936,7 +10002,7 @@ function App() {
                   type="button"
                   className="stepper-button stepper-center"
                   onClick={onJumpToThisWeek}
-                  disabled={isBusy || isWeekTimelineLoading}
+                  disabled={isWeekTimelineLoading}
                 >
                   This Week
                 </button>
@@ -9946,7 +10012,7 @@ function App() {
                   aria-label="Next week"
                   title="Next week"
                   onClick={() => onSetDate(shiftDate(selectedDate, 7))}
-                  disabled={isBusy || isWeekTimelineLoading}
+                  disabled={isWeekTimelineLoading}
                 >
                   <span className="control-icon chevron-right" aria-hidden="true" />
                 </button>
