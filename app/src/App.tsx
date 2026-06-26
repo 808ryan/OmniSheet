@@ -598,6 +598,7 @@ const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
 }
 const END_OF_DAY_INPUT_SENTINEL = '23:59'
 const MAX_CONCURRENT_SUBMISSIONS = 5
+const SYSTEM_NOTICE_AUTO_DISMISS_MS = 4000
 const LLM_SUBMISSION_STATUS_DISMISS_MS = 5000
 const CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD = 0.75
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5-nano'
@@ -3601,12 +3602,26 @@ function App() {
 
     const timeoutId = window.setTimeout(() => {
       setSuccessMessage(null)
-    }, 5000)
+    }, SYSTEM_NOTICE_AUTO_DISMISS_MS)
 
     return () => {
       window.clearTimeout(timeoutId)
     }
   }, [successMessage])
+
+  useEffect(() => {
+    if (!errorMessage) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setErrorMessage(null)
+    }, SYSTEM_NOTICE_AUTO_DISMISS_MS)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [errorMessage])
 
   const trimSubmissionQueue = useCallback((items: SubmissionQueueItem[]) => {
     const now = Date.now()
@@ -3652,7 +3667,7 @@ function App() {
 
     const timeoutId = window.setTimeout(() => {
       setCodesCreateNotice(null)
-    }, 5000)
+    }, SYSTEM_NOTICE_AUTO_DISMISS_MS)
 
     return () => {
       window.clearTimeout(timeoutId)
@@ -6084,8 +6099,11 @@ function App() {
         invalidateMonthSummaries([monthKeyFromDate(date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
         if (createdEntry) {
+          const nextDraft = buildEntryDraft(createdEntry)
           setSelectedEntryId(createdEntry.id)
-          setEntryDraft(buildEntryDraft(createdEntry))
+          entryDraftLastSavedKeyRef.current = serializeEntryDraft(nextDraft)
+          setEntryAutoSaveStatus('saved')
+          setEntryDraft(nextDraft)
         }
         setTimelineContextMenu(null)
         setSuccessMessage('Timeline entry created.')

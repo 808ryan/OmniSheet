@@ -588,6 +588,7 @@
 
 .app-notices {
   display: grid;
+  justify-items: center;
   gap: 0.5rem;
   min-height: 0;
   position: fixed;
@@ -1247,10 +1248,14 @@ button.danger:hover:not(:disabled) {
   border-radius: 10px;
   padding: 0.6rem 0.75rem;
   margin: 0;
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
   font-size: 0.9rem;
+  line-height: 1.35;
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 0.6rem;
   pointer-events: auto;
   box-shadow: 0 14px 28px rgba(16, 24, 40, 0.2);
@@ -1259,10 +1264,13 @@ button.danger:hover:not(:disabled) {
 }
 
 .alert-message {
+  flex: 1 1 auto;
   min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .alert-close {
+  flex: 0 0 auto;
   align-self: center;
   background: transparent;
   border: 1px solid transparent;
