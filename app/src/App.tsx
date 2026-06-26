@@ -1456,9 +1456,9 @@ function App() {
         return summaryWeekHighlightedDates
       }
 
-      return selectedWeekHighlightedDates
+      return new Set<string>()
     },
-    [activeView, selectedWeekHighlightedDates, summaryWeekHighlightedDates, weekViewHighlightedDates],
+    [activeView, summaryWeekHighlightedDates, weekViewHighlightedDates],
   )
   const selectedSummaryNotesContext = useMemo(() => {
     if (!weeklySummary || !summaryNotesModal) {
