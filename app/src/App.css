@@ -4262,33 +4262,6 @@ button.danger:hover:not(:disabled) {
   font-weight: 650;
 }
 
-.reporting-table-layout-controls {
-  min-width: 0;
-  flex: 1 1 34rem;
-  display: grid;
-  grid-template-columns: minmax(8.5rem, 1fr) auto auto;
-  align-items: end;
-  gap: 0.42rem;
-  padding: 0 0 0 0.82rem;
-  border-left: 1px solid rgba(170, 188, 218, 0.42);
-}
-
-.reporting-table-layout-controls .reporting-toolbar-button {
-  font-size: var(--reporting-command-font-size);
-  min-height: 2.1rem;
-}
-
-.reporting-table-layout-controls .reporting-table-preset-actions {
-  align-self: end;
-}
-
-.reporting-table-preset-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.42rem;
-}
-
-.reporting-table-preset-actions button,
 .reporting-config-actions button {
   display: inline-flex;
   align-items: center;
@@ -4300,12 +4273,6 @@ button.danger:hover:not(:disabled) {
   height: 0.9rem;
   flex: 0 0 auto;
   opacity: 0.84;
-}
-
-.reporting-table-layout-controls .reporting-table-preset-actions button,
-.reporting-table-layout-controls .reporting-toolbar-button {
-  padding-top: 0.42rem;
-  padding-bottom: 0.42rem;
 }
 
 .reporting-table-preset-select {
@@ -4332,20 +4299,6 @@ button.danger:hover:not(:disabled) {
   font-size: 0.82rem;
 }
 
-.reporting-table-preset-actions {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 0.38rem;
-  flex-wrap: wrap;
-}
-
-.reporting-table-preset-actions button {
-  min-height: 2.1rem;
-  padding: 0.42rem 0.55rem;
-  white-space: nowrap;
-}
-
 @container (max-width: 56rem) {
   .reporting-week-total-strip {
     flex-basis: auto;
@@ -4354,161 +4307,29 @@ button.danger:hover:not(:disabled) {
   .reporting-week-total-values {
     flex-wrap: nowrap;
   }
+}
 
-  .reporting-total-separator.secondary,
-  .reporting-total-segment.secondary {
+@container (max-width: 56rem) {
+  .reporting-v2-command-row {
+    gap: 0.62rem;
+  }
+
+  .reporting-v2-command-row .reporting-week-total-values {
+    gap: 0.22rem 0.3rem;
+  }
+
+  .reporting-v2-command-row .reporting-total-separator.secondary {
+    display: inline;
+  }
+
+  .reporting-v2-command-row .reporting-total-segment.secondary {
+    display: inline-flex;
+  }
+
+  .reporting-v2-command-row .reporting-total-separator.is-uncategorized,
+  .reporting-v2-command-row .reporting-total-segment.is-uncategorized {
     display: none;
   }
-}
-
-.reporting-table-wrap {
-  min-height: 0;
-  overflow: auto;
-  border: 1px solid var(--outline);
-  border-radius: 13px;
-  background: rgba(251, 253, 255, 0.92);
-}
-
-.reporting-table {
-  --reporting-day-count: 7;
-  min-width: 0;
-  display: grid;
-  align-content: start;
-}
-
-.reporting-row {
-  display: grid;
-  grid-template-columns:
-    minmax(15rem, 1.55fr)
-    repeat(var(--reporting-day-count), minmax(3.35rem, 0.38fr))
-    minmax(4.2rem, 0.44fr);
-  align-items: stretch;
-}
-
-.reporting-head,
-.reporting-foot {
-  position: sticky;
-  z-index: 2;
-  background: rgba(244, 248, 255, 0.96);
-  color: var(--ink-soft);
-  font-weight: 700;
-}
-
-.reporting-head {
-  top: 0;
-  border-bottom: 1px solid var(--outline);
-}
-
-.reporting-foot {
-  bottom: 0;
-  border-top: 1px solid var(--outline);
-}
-
-.reporting-row > span,
-.reporting-row > strong,
-.reporting-row-label,
-.reporting-day-cell,
-.reporting-total-cell {
-  min-width: 0;
-  border-right: 1px solid rgba(170, 188, 218, 0.32);
-  border-bottom: 1px solid rgba(170, 188, 218, 0.24);
-  padding: 0.34rem 0.42rem;
-  font-size: 0.75rem;
-}
-
-.reporting-row > :last-child {
-  border-right: 0;
-}
-
-.reporting-head span,
-.reporting-foot span,
-.reporting-foot strong {
-  display: grid;
-  place-items: center;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.reporting-head span:first-child,
-.reporting-foot strong:first-child {
-  place-items: center start;
-  text-align: left;
-}
-
-.reporting-head small {
-  color: rgba(80, 98, 125, 0.78);
-  font-size: 0.64rem;
-  font-weight: 600;
-}
-
-.reporting-table-body {
-  display: grid;
-}
-
-.reporting-table-body .reporting-row {
-  transition:
-    background-color 150ms ease,
-    box-shadow 150ms ease;
-}
-
-.reporting-table-body .reporting-row:hover {
-  background: rgba(31, 122, 255, 0.035);
-}
-
-.reporting-table-body .reporting-row.is-selected {
-  box-shadow: inset 3px 0 0 var(--accent);
-  background: rgba(31, 122, 255, 0.07);
-}
-
-.reporting-table-body .reporting-row.is-uncategorized {
-  background: rgba(255, 244, 229, 0.72);
-}
-
-.reporting-row-label {
-  display: grid;
-  gap: 0.1rem;
-  border-top: 0;
-  border-left: 0;
-  background: rgba(255, 255, 255, 0.58);
-  color: var(--ink);
-  text-align: left;
-  box-shadow: none;
-}
-
-.reporting-row-label:hover:not(:disabled),
-.reporting-row-label:focus-visible {
-  background: rgba(31, 122, 255, 0.08);
-}
-
-.reporting-row-label strong,
-.reporting-row-label span,
-.reporting-row-label small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.reporting-row-label span,
-.reporting-row-label small {
-  color: var(--ink-soft);
-  font-weight: 650;
-}
-
-.reporting-row-label span {
-  font-size: 0.7rem;
-}
-
-.reporting-row-label small {
-  font-size: 0.66rem;
-}
-
-.reporting-day-cell,
-.reporting-total-cell {
-  display: grid;
-  place-items: center;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
 }
 
 .reporting-hours-button {
@@ -4560,15 +4381,24 @@ button.danger:hover:not(:disabled) {
   align-items: stretch;
 }
 
+.reporting-v2-command-row .reporting-week-total-strip {
+  flex: 1 1 auto;
+}
+
 .reporting-v2-view-controls {
   min-width: 0;
-  flex: 1 1 32rem;
+  flex: 0 1 auto;
   display: grid;
-  grid-template-columns: minmax(10rem, 1fr) auto auto;
+  grid-template-columns: minmax(9.5rem, 14rem) auto auto;
   align-items: end;
   gap: 0.48rem;
   padding-left: 0.82rem;
   border-left: 1px solid rgba(170, 188, 218, 0.42);
+}
+
+.reporting-v2-view-controls .reporting-table-preset-select,
+.reporting-v2-view-controls .reporting-table-preset-select select {
+  min-width: 0;
 }
 
 .reporting-v2-view-controls .reporting-toolbar-button {
@@ -4713,9 +4543,10 @@ button.danger:hover:not(:disabled) {
 
 .reporting-v2-column-handle:hover:not(:disabled),
 .reporting-v2-column-handle:focus-visible {
-  border-color: rgba(170, 188, 218, 0.54);
-  background: rgba(255, 255, 255, 0.82);
+  border-color: transparent;
+  background: transparent;
   color: var(--accent);
+  filter: drop-shadow(0 0 5px rgba(31, 122, 255, 0.3));
 }
 
 .reporting-v2-column-handle:active {
@@ -6003,10 +5834,6 @@ button.danger:hover:not(:disabled) {
     overflow: visible;
   }
 
-  .reporting-table-layout-controls {
-    flex-basis: min(100%, 31rem);
-  }
-
   .code-item-actions {
     align-self: flex-end;
   }
@@ -6024,19 +5851,26 @@ button.danger:hover:not(:disabled) {
     border-bottom: 1px solid rgba(170, 188, 218, 0.32);
   }
 
-  .reporting-table-layout-controls {
+  .reporting-v2-view-controls {
     width: 100%;
-    flex-basis: auto;
-    grid-template-columns: minmax(8.5rem, 1fr) auto;
+    grid-template-columns: minmax(9.5rem, 1fr) auto auto;
     padding-left: 0;
     border-left: 0;
   }
 
-  .reporting-table-layout-controls .reporting-toolbar-button {
-    grid-column: 1 / -1;
-    justify-self: end;
-    width: auto;
+  .reporting-v2-command-row .reporting-total-separator.secondary {
+    display: inline;
   }
+
+  .reporting-v2-command-row .reporting-total-segment.secondary {
+    display: inline-flex;
+  }
+
+  .reporting-v2-command-row .reporting-total-separator.is-uncategorized,
+  .reporting-v2-command-row .reporting-total-segment.is-uncategorized {
+    display: none;
+  }
+
 }
 
 @media (max-width: 720px) {

@@ -123,7 +123,6 @@ type View =
   | 'settings'
   | 'diagnostics'
   | 'reporting'
-  | 'reportingV2'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 type CodeEditorSurface =
@@ -816,7 +815,7 @@ function activityCodeSearchText(activity: Activity): string {
 }
 
 function isSummaryLikeView(view: View): boolean {
-  return view === 'reporting' || view === 'reportingV2'
+  return view === 'reporting'
 }
 
 function getSummaryRowKey(row: TimelineWeeklySummary['rows'][number], rowIndex: number): string {
@@ -834,7 +833,6 @@ const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'week', label: 'Week' },
   { id: 'codes', label: 'Codes' },
   { id: 'reporting', label: 'Reporting' },
-  { id: 'reportingV2', label: 'Reporting V2' },
   { id: 'settings', label: 'Settings' },
   { id: 'diagnostics', label: 'Diagnostics' },
 ]
@@ -1472,21 +1470,6 @@ function App() {
     ),
     [resolvedReportingState],
   )
-  const previewReportingDisplayPreset = useMemo(() => {
-    if (
-      reportingDisplayPresetModal?.mode === 'edit'
-      && reportingDisplayPresetDraft
-      && reportingDisplayPresetDraft.id === selectedReportingDisplayPreset?.id
-    ) {
-      return reportingDisplayPresetDraft
-    }
-
-    return selectedReportingDisplayPreset
-  }, [
-    reportingDisplayPresetDraft,
-    reportingDisplayPresetModal,
-    selectedReportingDisplayPreset,
-  ])
   const selectedReportingExportPreset = useMemo(
     () => (
       resolvedSummaryLayoutState.presets.find(
@@ -1497,9 +1480,6 @@ function App() {
     ),
     [resolvedReportingState.selectedExportPresetId, resolvedSummaryLayoutState, selectedSummaryLayoutPreset],
   )
-  const activeSummaryExportPreset = activeView === 'reporting'
-    ? selectedReportingExportPreset
-    : selectedSummaryLayoutPreset
   const engagementById = useMemo(() => {
     const values = new Map<string, Engagement>()
     for (const engagement of engagements) {
@@ -1848,15 +1828,12 @@ function App() {
       window.removeEventListener('resize', scheduleUpdate)
     }
   }, [quickAddActivityGroups, updateQuickAddScrollMetrics])
-  const reportingDayIndexes = useMemo(() => {
-    return buildReportingDisplayDayIndexes(weeklySummary, previewReportingDisplayPreset)
-  }, [previewReportingDisplayPreset, weeklySummary])
-  const reportingV2DayIndexes = useMemo(() => (
-    buildReportingDisplayDayIndexes(weeklySummary, selectedReportingDisplayPreset)
-  ), [selectedReportingDisplayPreset, weeklySummary])
+  const reportingDayIndexes = useMemo(() => (
+    buildReportingDisplayAllDayIndexes(weeklySummary)
+  ), [weeklySummary])
   const reportingDisplayEditorDayIndexes = useMemo(() => (
-    buildReportingDisplayDayIndexes(weeklySummary, reportingDisplayPresetDraft)
-  ), [reportingDisplayPresetDraft, weeklySummary])
+    buildReportingDisplayAllDayIndexes(weeklySummary)
+  ), [weeklySummary])
   const reportingDisplayDraftColumns = useMemo(
     () => resolveReportingDisplayColumns(reportingDisplayPresetDraft),
     [reportingDisplayPresetDraft],
@@ -3184,7 +3161,7 @@ function App() {
   }, [activeView, resetSummaryLayoutEditor, summaryLayoutModal])
 
   useEffect(() => {
-    if (activeView !== 'reporting' && activeView !== 'reportingV2' && reportingDisplayPresetModal) {
+    if (activeView !== 'reporting' && reportingDisplayPresetModal) {
       resetReportingDisplayPresetEditor()
     }
   }, [activeView, reportingDisplayPresetModal, resetReportingDisplayPresetEditor])
@@ -6583,7 +6560,7 @@ function App() {
       return
     }
 
-    if (!activeSummaryExportPreset) {
+    if (!selectedReportingExportPreset) {
       setErrorMessage('No export preset is selected.')
       return
     }
@@ -6593,7 +6570,7 @@ function App() {
       try {
         const result = await summaryExportWeeklyExcel({
           date: selectedDate,
-          layoutPreset: activeSummaryExportPreset,
+          layoutPreset: selectedReportingExportPreset,
         })
         if (!result.autoOpenAttempted || result.autoOpenSucceeded) {
           setSuccessMessage(`Weekly summary exported and opened: ${result.filePath}`)
@@ -11115,7 +11092,7 @@ function App() {
         ) : null}
 
         {activeView === 'reporting' ? (
-          <section className="panel reporting-panel">
+          <section className="panel reporting-panel reporting-v2-panel">
             <header className="reporting-toolbar">
               <div className="reporting-title-block">
                 <h2>Reporting</h2>
@@ -11134,266 +11111,6 @@ function App() {
                     aria-label="Previous week"
                     title="Previous week"
                     onClick={() => onShiftSummaryWeek(-1)}
-                    disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
-                  >
-                    <span className="control-icon chevron-left" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className="stepper-button stepper-center"
-                    onClick={onJumpToThisWeek}
-                    disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
-                  >
-                    This Week
-                  </button>
-                  <button
-                    type="button"
-                    className="timeline-arrow-button stepper-button stepper-next"
-                    aria-label="Next week"
-                    title="Next week"
-                    onClick={() => onShiftSummaryWeek(1)}
-                    disabled={isBusy || isWeeklySummaryLoading || isSummaryExporting}
-                  >
-                    <span className="control-icon chevron-right" aria-hidden="true" />
-                  </button>
-                </div>
-              </div>
-            </header>
-
-            <section className="reporting-command-row" aria-label="Reporting controls and weekly totals">
-              <div className="reporting-week-total-strip" aria-label="Weekly total breakdown">
-                <span className="reporting-command-label">Weekly Total Hours</span>
-                <div className="reporting-week-total-values">
-                  {reportingWeeklyTotalSegments.length > 0 ? (
-                    reportingWeeklyTotalSegments.map((segment, segmentIndex) => {
-                      const segmentLabel = splitTimelineTotalSegmentLabel(segment.label)
-
-                      return (
-                        <Fragment key={segment.key}>
-                          {segmentIndex > 0 ? (
-                            <span
-                              className={`reporting-total-separator ${
-                                segment.key === 'total' ? 'primary' : 'secondary'
-                              }`}
-                              aria-hidden="true"
-                            >
-                              &bull;
-                            </span>
-                          ) : null}
-                          <span
-                            className={`reporting-total-segment ${
-                              segment.key === 'total' ? 'primary' : 'secondary'
-                            }`}
-                          >
-                            <strong>{segmentLabel.amount}</strong>
-                            <span>{segmentLabel.label}</span>
-                          </span>
-                        </Fragment>
-                      )
-                    })
-                  ) : (
-                    <span className="reporting-total-empty">No weekly total</span>
-                  )}
-                </div>
-              </div>
-              <div className="reporting-table-layout-controls" aria-label="Table layout controls">
-                <label className="reporting-table-preset-select">
-                  <span>Table Layout Preset</span>
-                  <select
-                    value={selectedReportingDisplayPreset?.id ?? ''}
-                    onChange={(event) => onSelectReportingDisplayPreset(event.target.value)}
-                    disabled={isBusy || isReportingStateSaving}
-                  >
-                    {resolvedReportingState.displayPresets.map((preset) => (
-                      <option key={preset.id} value={preset.id}>
-                        {preset.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="reporting-table-preset-actions">
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => openReportingDisplayPresetEditor('edit')}
-                    disabled={isBusy || isReportingStateSaving || !selectedReportingDisplayPreset}
-                  >
-                    <img className="reporting-preset-button-icon" src={editIcon} alt="" aria-hidden="true" />
-                    Edit Preset
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => openReportingDisplayPresetEditor('create')}
-                    disabled={isBusy || isReportingStateSaving || !selectedReportingDisplayPreset}
-                  >
-                    <span className="control-icon plus-icon" aria-hidden="true" />
-                    New Preset
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  className="button-soft-primary reporting-toolbar-button"
-                  onClick={() => {
-                    setReportingExportPreviewSheet('weeklyHours')
-                    setIsReportingExportModalOpen(true)
-                  }}
-                  disabled={
-                    isBusy
-                    || isWeeklySummaryLoading
-                    || isSummaryExporting
-                    || isSummaryLayoutSaving
-                    || !weeklySummary
-                  }
-                >
-                  <span className="control-icon download-icon" aria-hidden="true" />
-                  {isSummaryExporting ? 'Exporting...' : 'Export'}
-                </button>
-              </div>
-            </section>
-
-            {weeklySummaryError ? (
-              <p className="mini-calendar-error">{weeklySummaryError}</p>
-            ) : null}
-
-            <div
-              className="reporting-table-wrap"
-              aria-busy={isWeeklySummaryLoading}
-            >
-                {isWeeklySummaryLoading ? (
-                  <p className="reporting-empty-state">Loading weekly summary...</p>
-                ) : weeklySummary ? (
-                  <div
-                    className="reporting-table"
-                    role="table"
-                    aria-label="Reporting weekly summary"
-                    style={{ '--reporting-day-count': reportingDayIndexes.length } as CSSProperties}
-                  >
-                    <div className="reporting-row reporting-head" role="row">
-                      <span role="columnheader">Activity</span>
-                      {reportingDayIndexes.map((dayIndex) => (
-                        <span key={weeklySummary.days[dayIndex]?.date ?? dayIndex} role="columnheader">
-                          {SUMMARY_DAY_NAMES[dayIndex]?.slice(0, 3) ?? 'Day'}
-                          <small>{formatMonthDay(weeklySummary.days[dayIndex]?.date ?? weeklySummary.weekStartDate)}</small>
-                        </span>
-                      ))}
-                      <span role="columnheader">Total</span>
-                    </div>
-
-                    <div className="reporting-table-body">
-                      {weeklySummary.rows.length === 0 ? (
-                        <p className="reporting-empty-state">No time entries for this week.</p>
-                      ) : (
-                        weeklySummary.rows.map((row, rowIndex) => {
-                          const rowKey = getSummaryRowKey(row, rowIndex)
-                          const rowMeta = formatReportingRowMeta(row, previewReportingDisplayPreset)
-                          const isExcludedFromReportingTotal =
-                            isReportingRowExcludedFromPrimaryTotal(row, timelineTotalPreferences)
-
-                          return (
-                            <div
-                              key={rowKey}
-                              className={`reporting-row ${row.isUncategorized ? 'is-uncategorized' : ''}`}
-                              role="row"
-                            >
-                              <div
-                                className="reporting-row-label"
-                                role="cell"
-                              >
-                                <strong>
-                                  {formatReportingRowPrimary(row, previewReportingDisplayPreset)}
-                                </strong>
-                                <span>
-                                  {formatReportingRowSecondary(row, previewReportingDisplayPreset)}
-                                </span>
-                                {rowMeta.length > 0 ? (
-                                  <small>{rowMeta.join(' | ')}</small>
-                                ) : null}
-                              </div>
-                              {reportingDayIndexes.map((dayIndex) => {
-                                const cell = row.cells[dayIndex]
-                                const hasHours = Boolean(cell && cell.totalMinutes > 0)
-                                return (
-                                  <span
-                                    key={`${rowKey}-${dayIndex}`}
-                                    className="reporting-day-cell"
-                                    role="cell"
-                                  >
-                                    {hasHours && cell ? (
-                                      <button
-                                        type="button"
-                                        className={`reporting-hours-button ${cell.notes.length > 0 ? 'has-notes' : ''}`}
-                                        onClick={() => onOpenSummaryNotes(rowIndex, dayIndex)}
-                                        aria-label={`Open notes for ${formatEntityDisplayLabel(row.activityName, row.activityCode)} on ${SUMMARY_DAY_NAMES[dayIndex]}`}
-                                      >
-                                        {formatMinutesAsHours(cell.totalMinutes)}
-                                        {cell.notes.length > 0 ? (
-                                          <span className="reporting-note-mark" aria-hidden="true" />
-                                        ) : null}
-                                      </button>
-                                    ) : (
-                                      <span className="reporting-zero">-</span>
-                                    )}
-                                  </span>
-                                )
-                              })}
-                              <strong className="reporting-total-cell" role="cell">
-                                {isExcludedFromReportingTotal
-                                  ? 'Excluded'
-                                  : formatMinutesAsHours(row.rowTotalMinutes)}
-                              </strong>
-                            </div>
-                          )
-                        })
-                      )}
-                    </div>
-
-                    <div className="reporting-row reporting-foot" role="row">
-                      <strong role="cell">Day Totals</strong>
-                      {reportingDayIndexes.map((dayIndex) => (
-                        <span key={`reporting-total-${dayIndex}`} role="cell">
-                          {formatMinutesAsHours(
-                            finalizeTimelineTotalBreakdown(
-                              weeklySummary.dayTotalBreakdowns[dayIndex],
-                              timelineTotalPreferences,
-                            ).primaryMinutes,
-                          )}
-                        </span>
-                      ))}
-                      <strong role="cell">
-                        {displayedSummaryWeekTotalBreakdown
-                          ? formatMinutesAsHours(displayedSummaryWeekTotalBreakdown.primaryMinutes)
-                          : formatMinutesAsHours(weeklySummary.weekTotalMinutes)}
-                      </strong>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="reporting-empty-state">No summary data available.</p>
-                )}
-              </div>
-          </section>
-        ) : null}
-
-        {activeView === 'reportingV2' ? (
-          <section className="panel reporting-panel reporting-v2-panel">
-            <header className="reporting-toolbar">
-              <div className="reporting-title-block">
-                <h2>Reporting V2</h2>
-                <p>
-                  {weeklySummary
-                    ? `${weeklySummary.weekStartDate} - ${weeklySummary.weekEndDate}`
-                    : selectedDate}
-                </p>
-              </div>
-
-              <div className="reporting-toolbar-main">
-                <div className="timeline-controls timeline-stepper reporting-week-stepper" aria-label="Reporting V2 week navigation">
-                  <button
-                    type="button"
-                    className="timeline-arrow-button stepper-button stepper-prev"
-                    aria-label="Previous week"
-                    title="Previous week"
-                    onClick={() => onShiftSummaryWeek(-1)}
                     disabled={isBusy || isWeeklySummaryLoading}
                   >
                     <span className="control-icon chevron-left" aria-hidden="true" />
@@ -11420,7 +11137,7 @@ function App() {
               </div>
             </header>
 
-            <section className="reporting-command-row reporting-v2-command-row" aria-label="Reporting V2 controls and weekly totals">
+            <section className="reporting-command-row reporting-v2-command-row" aria-label="Reporting controls and weekly totals">
               <div className="reporting-week-total-strip" aria-label="Weekly total breakdown">
                 <span className="reporting-command-label">Weekly Total Hours</span>
                 <div className="reporting-week-total-values">
@@ -11432,7 +11149,7 @@ function App() {
                         <Fragment key={segment.key}>
                           {segmentIndex > 0 ? (
                             <span
-                              className={`reporting-total-separator ${
+                              className={`reporting-total-separator is-${segment.key} ${
                                 segment.key === 'total' ? 'primary' : 'secondary'
                               }`}
                               aria-hidden="true"
@@ -11441,7 +11158,7 @@ function App() {
                             </span>
                           ) : null}
                           <span
-                            className={`reporting-total-segment ${
+                            className={`reporting-total-segment is-${segment.key} ${
                               segment.key === 'total' ? 'primary' : 'secondary'
                             }`}
                           >
@@ -11459,7 +11176,7 @@ function App() {
 
               <div className="reporting-v2-view-controls">
                 <label className="reporting-table-preset-select">
-                  <span>Table View</span>
+                  <span>View Preset</span>
                   <select
                     value={selectedReportingDisplayPreset?.id ?? ''}
                     onChange={(event) => onSelectReportingDisplayPreset(event.target.value)}
@@ -11509,7 +11226,7 @@ function App() {
             <ReportingTableView
               summary={weeklySummary}
               preset={selectedReportingDisplayPreset}
-              dayIndexes={reportingV2DayIndexes}
+              dayIndexes={reportingDayIndexes}
               engagementById={engagementById}
               activityById={activityById}
               timelineTotalPreferences={timelineTotalPreferences}
@@ -11759,22 +11476,22 @@ function App() {
             }
           }}
         >
-          {activeView === 'reportingV2' ? (
+          {activeView === 'reporting' ? (
             <div
               className="reporting-display-preset-modal reporting-v2-preset-modal"
               role="dialog"
               aria-modal="true"
-              aria-label="Customize reporting table view"
+              aria-label="Customize reporting preset"
             >
               <header className="reporting-display-preset-header">
                 <div>
-                  <h3>Customize View</h3>
+                  <h3>Customize Preset</h3>
                 </div>
                 <button
                   type="button"
                   className="timeline-editor-close"
                   onClick={resetReportingDisplayPresetEditor}
-                  aria-label="Close table view editor"
+                  aria-label="Close preset editor"
                   title="Close"
                 >
                   <span className="control-icon close-icon" aria-hidden="true" />
@@ -11782,9 +11499,9 @@ function App() {
               </header>
 
               <div className="reporting-v2-preset-editor">
-                <section className="reporting-v2-settings-panel" aria-label="View settings">
+                <section className="reporting-v2-settings-panel" aria-label="Preset settings">
                   <label className="reporting-v2-field">
-                    <span>View</span>
+                    <span>Preset</span>
                     <select
                       value={reportingDisplayPresetModal.presetId ?? reportingDisplayPresetDraft.id}
                       onChange={(event) => onSelectReportingDisplayEditorPreset(event.target.value)}
@@ -11798,7 +11515,7 @@ function App() {
                   </label>
 
                   <label className="reporting-v2-field">
-                    <span>View Name</span>
+                    <span>Preset Name</span>
                     <input
                       type="text"
                       value={reportingDisplayPresetDraftName}
@@ -11807,55 +11524,12 @@ function App() {
                         setReportingDisplayPresetDraftError(null)
                       }}
                       maxLength={REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH}
-                      placeholder="View name"
+                      placeholder="Preset name"
                     />
                   </label>
-
-                  <label className="reporting-v2-field">
-                    <span>Details Format</span>
-                    <select
-                      value={reportingDisplayPresetDraft.rowLabelMode}
-                      onChange={(event) =>
-                        setReportingDisplayPresetDraft((previous) => (
-                          previous
-                            ? {
-                              ...previous,
-                              rowLabelMode: event.target.value as ReportingDisplayPreset['rowLabelMode'],
-                            }
-                            : previous
-                        ))
-                      }
-                    >
-                      <option value="combined">Engagement / Activity</option>
-                      <option value="separate">Engagement over Activity</option>
-                      <option value="activityOnly">Activity focused</option>
-                    </select>
-                  </label>
-
-                  <div className="reporting-display-options reporting-v2-option-grid" role="group" aria-label="View options">
-                    {([
-                      ['showCodes', 'Show codes'],
-                      ['showClient', 'Show client'],
-                      ['showEngagementType', 'Show type'],
-                      ['showEmptyDays', 'Show empty days'],
-                    ] as const).map(([key, label]) => (
-                      <label key={key} className="reporting-display-option">
-                        <input
-                          type="checkbox"
-                          checked={reportingDisplayPresetDraft[key]}
-                          onChange={(event) =>
-                            setReportingDisplayPresetDraft((previous) => (
-                              previous ? { ...previous, [key]: event.target.checked } : previous
-                            ))
-                          }
-                        />
-                        <span>{label}</span>
-                      </label>
-                    ))}
-                  </div>
                 </section>
 
-                <section className="reporting-v2-column-panel" aria-label="View columns">
+                <section className="reporting-v2-column-panel" aria-label="Preset columns">
                   <div className="reporting-v2-column-panel-header">
                     <h4>Columns</h4>
                     <button
@@ -11942,7 +11616,7 @@ function App() {
                   ) : null}
                 </section>
 
-                <section className="reporting-v2-preview-panel" aria-label="Table view preview">
+                <section className="reporting-v2-preview-panel" aria-label="Preset preview">
                   <div className="reporting-v2-preview-header">
                     <h4>Preview</h4>
                   </div>
@@ -14448,17 +14122,6 @@ function resolveSummaryFieldValue(
   }
 }
 
-function formatReportingEntityLabel(
-  name: string | null | undefined,
-  code: string | null | undefined,
-  showCodes: boolean,
-  fallback = 'Uncategorized',
-): string {
-  return showCodes
-    ? formatEntityDisplayLabel(name, code, fallback)
-    : formatEntityPrimaryLabel(name, code, fallback)
-}
-
 function formatSummaryRowLabel(row: TimelineWeeklySummary['rows'][number]): string {
   if (row.isUncategorized) {
     return row.engagementId
@@ -14494,80 +14157,6 @@ function resolveSummaryFreeTextValue(
 
 function formatEngagementTypeLabel(value: EngagementType): string {
   return value === 'external' ? 'External' : 'Internal'
-}
-
-function formatReportingRowPrimary(
-  row: TimelineWeeklySummary['rows'][number],
-  preset: ReportingDisplayPreset | undefined,
-): string {
-  const showCodes = preset?.showCodes ?? true
-  const rowLabelMode = preset?.rowLabelMode ?? 'combined'
-  const engagementLabel = formatReportingEntityLabel(
-    row.engagementName,
-    row.engagementCode,
-    showCodes,
-    'Uncategorized',
-  )
-  const activityLabel = formatReportingEntityLabel(
-    row.activityName,
-    row.activityCode,
-    showCodes,
-    'Uncategorized',
-  )
-
-  if (rowLabelMode === 'activityOnly') {
-    return activityLabel
-  }
-
-  if (rowLabelMode === 'separate') {
-    return engagementLabel
-  }
-
-  if (engagementLabel === activityLabel) {
-    return activityLabel
-  }
-
-  return `${engagementLabel} / ${activityLabel}`
-}
-
-function formatReportingRowSecondary(
-  row: TimelineWeeklySummary['rows'][number],
-  preset: ReportingDisplayPreset | undefined,
-): string {
-  const showCodes = preset?.showCodes ?? true
-  const rowLabelMode = preset?.rowLabelMode ?? 'combined'
-
-  if (rowLabelMode === 'separate') {
-    return formatReportingEntityLabel(row.activityName, row.activityCode, showCodes, 'Uncategorized')
-  }
-
-  if (rowLabelMode === 'activityOnly') {
-    return formatReportingEntityLabel(row.engagementName, row.engagementCode, showCodes, 'Uncategorized')
-  }
-
-  return normalizeDisplayText(row.clientName) ?? (
-    row.engagementType ? formatEngagementTypeLabel(row.engagementType) : 'Weekly activity'
-  )
-}
-
-function formatReportingRowMeta(
-  row: TimelineWeeklySummary['rows'][number],
-  preset: ReportingDisplayPreset | undefined,
-): string[] {
-  const values: string[] = []
-
-  if (preset?.showClient) {
-    const client = normalizeDisplayText(row.clientName)
-    if (client) {
-      values.push(client)
-    }
-  }
-
-  if (preset?.showEngagementType && row.engagementType) {
-    values.push(formatEngagementTypeLabel(row.engagementType))
-  }
-
-  return values
 }
 
 function renderSummaryPreviewCell(
@@ -15243,7 +14832,6 @@ function ReportingTableView({
                           {renderReportingDisplayFieldCell(
                             column.fieldKey,
                             row,
-                            preset,
                             engagementById,
                             activityById,
                           )}
@@ -15323,26 +14911,10 @@ function resolveReportingDisplayColumns(
   return columns.map((column) => ({ ...column }))
 }
 
-function buildReportingDisplayDayIndexes(
+function buildReportingDisplayAllDayIndexes(
   summary: TimelineWeeklySummary | null | undefined,
-  preset: ReportingDisplayPreset | null | undefined,
 ): number[] {
-  if (!summary) {
-    return []
-  }
-
-  const allDayIndexes = summary.days.map((_, dayIndex) => dayIndex)
-  if (preset?.showEmptyDays ?? true) {
-    return allDayIndexes
-  }
-
-  const visibleDayIndexes = allDayIndexes.filter((dayIndex) => (
-    summary.dayTotalBreakdowns[dayIndex]?.primaryMinutes
-    ?? summary.dayTotalMinutes[dayIndex]
-    ?? 0
-  ) > 0)
-
-  return visibleDayIndexes.length > 0 ? visibleDayIndexes : allDayIndexes
+  return summary ? summary.days.map((_, dayIndex) => dayIndex) : []
 }
 
 function buildReportingDisplayGridColumns(
@@ -15450,29 +15022,36 @@ function moveReportingDisplayColumn(
 function renderReportingDisplayFieldCell(
   fieldKey: ReportingDisplayFieldKey,
   row: TimelineWeeklySummary['rows'][number],
-  preset: ReportingDisplayPreset | undefined,
   engagementById: Map<string, Engagement>,
   activityById: Map<string, Activity>,
 ) {
-  const showCodes = preset?.showCodes ?? true
   const engagement = row.engagementId ? engagementById.get(row.engagementId) : null
   const activity = row.activityId ? activityById.get(row.activityId) : null
 
   switch (fieldKey) {
     case 'details': {
-      const rowMeta = formatReportingRowMeta(row, preset)
+      const activityLabel = formatEntityPrimaryLabel(
+        row.activityName,
+        row.activityCode,
+        'Uncategorized',
+      )
+      const engagementLabel = formatEntityPrimaryLabel(
+        row.engagementName,
+        row.engagementCode,
+        'Uncategorized',
+      )
+
       return (
         <span className="reporting-v2-details-cell">
-          <strong>{formatReportingRowPrimary(row, preset)}</strong>
-          <span>{formatReportingRowSecondary(row, preset)}</span>
-          {rowMeta.length > 0 ? <small>{rowMeta.join(' | ')}</small> : null}
+          <strong>{activityLabel}</strong>
+          <span>{engagementLabel}</span>
         </span>
       )
     }
     case 'engagement':
-      return formatReportingEntityLabel(row.engagementName, row.engagementCode, showCodes, 'Uncategorized')
+      return formatEntityPrimaryLabel(row.engagementName, row.engagementCode, 'Uncategorized')
     case 'activity':
-      return formatReportingEntityLabel(row.activityName, row.activityCode, showCodes, 'Uncategorized')
+      return formatEntityPrimaryLabel(row.activityName, row.activityCode, 'Uncategorized')
     case 'client':
       return normalizeDisplayText(row.clientName) ?? '-'
     case 'engagementType':
