@@ -638,11 +638,11 @@
 
 .main-view-tabs {
   --main-view-tab-width: 7.2rem;
-  width: max-content;
+  display: inline-flex;
+  justify-self: start;
+  width: fit-content;
   max-width: 100%;
-  grid-template-columns: repeat(7, var(--main-view-tab-width));
-  grid-auto-flow: initial;
-  grid-auto-columns: initial;
+  flex-wrap: nowrap;
   overflow-x: auto;
   scrollbar-width: thin;
 }
@@ -5936,8 +5936,7 @@ button.danger:hover:not(:disabled) {
   }
 
   .main-view-tabs {
-    grid-template-columns: repeat(7, var(--main-view-tab-width));
-    width: max-content;
+    width: fit-content;
     max-width: 100%;
   }
 
