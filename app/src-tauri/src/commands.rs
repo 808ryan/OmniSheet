@@ -20,12 +20,13 @@ use crate::models::{
     CalendarExtractResult, CalendarImportEntryInput, CalendarImportInput, CalendarImportResult,
     CalendarVisionEvent, CaptureSourceId, CodeContext, ContextActivity, ContextEngagement,
     DateInput, DiagnosticsBundle, DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput,
-    Engagement, EngagementType, EngagementUpsertInput, HistoryListResult, IdInput, IdResult,
+    Engagement, EngagementType, EngagementUpsertInput, IdInput, IdResult,
     InterpretResult, InterpretTextInput, KeySource, LlmAlternativeActivity, LlmEntry,
     MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
     QuickAddPreferences, QuickAddSuggestionInput, QuickAddSuggestionResult,
-    ReportingDisplayDensity, ReportingDisplayPreset, ReportingRowLabelMode, ReportingState,
-    ReportingViewMode, SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
+    ReportingDisplayColumn, ReportingDisplayDensity, ReportingDisplayPreset,
+    ReportingRowLabelMode, ReportingState, ReportingViewMode, SettingsSetCalendarBulkModelInput,
+    SettingsSetCalendarBulkPreferencesInput,
     SettingsSetOpenAiModelInput, SettingsSetQuickAddPreferencesInput,
     SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
     StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
@@ -34,6 +35,7 @@ use crate::models::{
     TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekView,
     TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput,
     TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
+    default_reporting_display_columns,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -704,6 +706,7 @@ fn default_reporting_display_preset() -> ReportingDisplayPreset {
         show_client: false,
         show_engagement_type: false,
         show_empty_days: true,
+        columns: default_reporting_display_columns(),
     }
 }
 
@@ -758,6 +761,8 @@ fn normalize_reporting_state(mut state: ReportingState) -> Result<ReportingState
         if !preset_names.insert(preset.name.to_lowercase()) {
             return Err("Reporting display preset names must be unique.".to_string());
         }
+
+        normalize_reporting_display_columns(preset)?;
     }
 
     if state.selected_display_preset_id.is_empty() {
@@ -769,6 +774,92 @@ fn normalize_reporting_state(mut state: ReportingState) -> Result<ReportingState
     }
 
     Ok(state)
+}
+
+fn normalize_reporting_display_columns(preset: &mut ReportingDisplayPreset) -> Result<(), String> {
+    if preset.columns.is_empty() {
+        preset.columns = default_reporting_display_columns();
+    }
+
+    let mut has_day_group = false;
+    let mut has_row_total = false;
+    for column in &preset.columns {
+        match column {
+            ReportingDisplayColumn::DayGroup { .. } => has_day_group = true,
+            ReportingDisplayColumn::RowTotal { .. } => has_row_total = true,
+            ReportingDisplayColumn::Field { .. } => {}
+        }
+    }
+
+    if !has_day_group {
+        preset.columns.push(ReportingDisplayColumn::DayGroup {
+            id: "reporting-days".to_string(),
+        });
+    }
+
+    if !has_row_total {
+        preset.columns.push(ReportingDisplayColumn::RowTotal {
+            id: "reporting-row-total".to_string(),
+        });
+    }
+
+    let mut column_ids = HashSet::new();
+    let mut field_keys = HashSet::new();
+    let mut field_count = 0;
+    let mut day_group_count = 0;
+    let mut row_total_count = 0;
+
+    for column in &mut preset.columns {
+        match column {
+            ReportingDisplayColumn::Field { id, field_key } => {
+                *id = id.trim().to_string();
+                field_count += 1;
+
+                if !field_keys.insert(*field_key) {
+                    return Err(
+                        "A reporting display preset cannot include the same field twice."
+                            .to_string(),
+                    );
+                }
+            }
+            ReportingDisplayColumn::DayGroup { id } => {
+                *id = id.trim().to_string();
+                day_group_count += 1;
+            }
+            ReportingDisplayColumn::RowTotal { id } => {
+                *id = id.trim().to_string();
+                row_total_count += 1;
+            }
+        }
+
+        let column_id = match column {
+            ReportingDisplayColumn::Field { id, .. }
+            | ReportingDisplayColumn::DayGroup { id }
+            | ReportingDisplayColumn::RowTotal { id } => id,
+        };
+
+        if column_id.is_empty() {
+            return Err("Reporting display preset column IDs cannot be empty.".to_string());
+        }
+
+        if !column_ids.insert(column_id.clone()) {
+            return Err("Reporting display preset column IDs must be unique.".to_string());
+        }
+    }
+
+    if field_count == 0 {
+        return Err("Each reporting display preset must include at least one field column.".to_string());
+    }
+
+    if day_group_count != 1 {
+        return Err("Each reporting display preset must include one day group.".to_string());
+    }
+
+    if row_total_count != 1 {
+        return Err("Each reporting display preset must include one row total.".to_string());
+    }
+
+    Ok(())
 }
 
 fn read_reporting_state(connection: &Connection) -> AppResult<ReportingState> {
@@ -3827,15 +3918,6 @@ pub fn timeline_list_for_week_view(
 }
 
 #[tauri::command]
-pub fn history_list(
-    state: State<'_, AppState>,
-    input: DateInput,
-) -> Result<HistoryListResult, String> {
-    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
-    list_history_for_date(&connection, &input.date)
-}
-
-#[tauri::command]
 pub fn quick_add_suggestions(
     state: State<'_, AppState>,
     input: QuickAddSuggestionInput,
@@ -3846,27 +3928,6 @@ pub fn quick_add_suggestions(
         db::list_quick_add_suggestions(&connection, limit).map_err(|error| error.to_string())?;
 
     Ok(QuickAddSuggestionResult { suggestions })
-}
-
-fn list_history_for_date(connection: &Connection, date: &str) -> Result<HistoryListResult, String> {
-    let (start_date, end_date_exclusive) = timeline_week_bounds(date)?;
-    let week_start = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d")
-        .map_err(|_| "date must be in YYYY-MM-DD format".to_string())?;
-    let week_end_date = (week_start + Duration::days(6))
-        .format("%Y-%m-%d")
-        .to_string();
-    let submissions = db::list_history_submissions(connection, &start_date, &end_date_exclusive)
-        .map_err(|error| error.to_string())?;
-    let entries =
-        db::list_timeline_entries_for_date_range(connection, &start_date, &end_date_exclusive)
-            .map_err(|error| error.to_string())?;
-
-    Ok(HistoryListResult {
-        week_start_date: start_date,
-        week_end_date,
-        submissions,
-        entries,
-    })
 }
 
 #[tauri::command]
@@ -7453,7 +7514,7 @@ mod tests {
         build_export_metadata_maps, build_summary_export_hours_and_notes_sheet_columns,
         build_summary_export_hours_sheet_columns, capture_source_label,
         create_manual_timeline_entry, dedupe_prepared_entries, default_summary_layout_state,
-        derive_key_status_level, list_history_for_date, llm_attempt_event_status,
+        derive_key_status_level, llm_attempt_event_status,
         message_has_contextual_day_or_date_cue, message_has_explicit_clock_time_cue,
         message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
         normalize_calendar_bulk_ignored_keywords, normalize_confidence, normalize_llm_entry,
@@ -7798,61 +7859,6 @@ mod tests {
 
         assert_eq!(saved_entry.source, "manual");
         assert!(saved_entry.warning_flags.contains(&WarningType::Unmatched));
-    }
-
-    #[test]
-    fn history_list_returns_current_week_submissions_and_manual_entries() {
-        let connection = test_connection();
-        let message_timestamp = chrono::NaiveDate::from_ymd_opt(2026, 3, 30)
-            .expect("valid date")
-            .and_hms_opt(12, 0, 0)
-            .expect("valid time")
-            .and_utc()
-            .timestamp();
-
-        db::insert_raw_message(
-            &connection,
-            "raw-history-test",
-            "Voice submission",
-            "[]",
-            OpenAiModelId::default().api_name(),
-            "voice",
-            Some(TranscriptionModelId::default().api_name()),
-            Some(900),
-            0.91,
-            message_timestamp,
-            1,
-            1,
-            1,
-            0,
-            false,
-        )
-        .expect("raw message saves");
-
-        create_manual_timeline_entry(
-            &connection,
-            TimelineCreateInput {
-                date: "2026-03-31".to_string(),
-                start_minute: 11 * 60,
-                end_minute: 11 * 60 + 30,
-                engagement_id: None,
-                activity_id: None,
-                description: Some("Manual admin".to_string()),
-            },
-        )
-        .expect("manual entry saves");
-
-        let result = list_history_for_date(&connection, "2026-04-01").expect("history loads");
-
-        assert_eq!(result.week_start_date, "2026-03-28");
-        assert_eq!(result.week_end_date, "2026-04-03");
-        assert_eq!(result.submissions.len(), 1);
-        assert_eq!(result.submissions[0].id, "raw-history-test");
-        assert_eq!(result.submissions[0].capture_source, "voice");
-        assert!(result
-            .entries
-            .iter()
-            .any(|entry| { entry.source == "manual" && entry.description == "Manual admin" }));
     }
 
     #[test]

@@ -70,7 +70,6 @@ pub fn run() {
             commands::activity_delete,
             commands::timeline_list_for_date,
             commands::timeline_list_for_week_view,
-            commands::history_list,
             commands::quick_add_suggestions,
             commands::timeline_month_summary,
             commands::timeline_weekly_summary,
