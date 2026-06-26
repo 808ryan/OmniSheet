@@ -6,7 +6,7 @@ import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import { listen } from '@tauri-apps/api/event'
 
 import {
@@ -20,7 +20,6 @@ import {
   engagementDelete,
   engagementList,
   engagementUpsert,
-  historyList,
   interpretTextMessage,
   isAppCommandError,
   quickAddSuggestions,
@@ -59,10 +58,14 @@ import {
   SUMMARY_LAYOUT_MAX_NAME_LENGTH,
 } from './lib/summaryLayout'
 import {
+  buildDefaultReportingDisplayColumns,
   buildDefaultReportingState,
   buildNextReportingPresetName,
   cloneReportingDisplayPreset,
+  createReportingDisplayFieldColumn,
   generateReportingId,
+  getReportingDisplayFieldOption,
+  REPORTING_DISPLAY_FIELD_OPTIONS,
   REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH,
 } from './lib/reporting'
 import {
@@ -81,11 +84,12 @@ import type {
   DiagnosticsEvent,
   Engagement,
   EngagementType,
-  HistoryListResult,
   MicrophonePermissionStatus,
   OpenAiModelId,
   QuickAddPreferences,
   QuickAddSuggestion,
+  ReportingDisplayColumn,
+  ReportingDisplayFieldKey,
   ReportingDisplayPreset,
   ReportingState,
   SettingsStatus,
@@ -115,11 +119,11 @@ import './App.css'
 type View =
   | 'timeline'
   | 'week'
-  | 'history'
   | 'codes'
   | 'settings'
   | 'diagnostics'
   | 'reporting'
+  | 'reportingV2'
 type DiagnosticsFilter = 'all' | 'errors' | 'warnings' | 'capture' | 'settings'
 type MonthSummaryCache = Record<string, TimelineDaySummary[]>
 type CodeEditorSurface =
@@ -131,7 +135,12 @@ type TimelineSurface = 'day' | 'week' | 'calendar-review'
 type TimelineDragMode = 'pending' | 'move' | 'resize-duration'
 
 type SubmissionQueueItemState = 'pending' | 'running' | 'success' | 'error'
-type HistoryMode = 'all' | 'queue' | 'submissions' | 'entries'
+type LlmSubmissionStatusKind = 'processing' | 'success' | 'error'
+
+interface LlmSubmissionStatus {
+  kind: LlmSubmissionStatusKind
+  message: string
+}
 
 interface SubmissionQueueItem {
   id: string
@@ -145,37 +154,11 @@ interface SubmissionQueueItem {
   clientUtcOffsetMinutes: number
   timezone: string
   state: SubmissionQueueItemState
-  statusMessage: string
-  correlationId?: string
   createdEntryCount?: number
   completedAtMs?: number
-  completedDurationMs?: number
-  modelUsed?: OpenAiModelId
-  modelUsedLabel?: string
   transcriptionModelUsed?: TranscriptionModelId
-  transcriptionModelUsedLabel?: string
   transcriptionDurationMs?: number
 }
-
-type HistoryUnifiedItem =
-  | {
-    kind: 'queue'
-    key: string
-    timestampMs: number
-    item: SubmissionQueueItem
-  }
-  | {
-    kind: 'submission'
-    key: string
-    timestampMs: number
-    submission: HistoryListResult['submissions'][number]
-  }
-  | {
-    kind: 'entry'
-    key: string
-    timestampMs: number
-    entry: TimelineEntry
-  }
 
 interface QuickBlockDragState {
   engagementId: string
@@ -473,6 +456,15 @@ interface ReportingDisplayPresetModalState {
   presetId: string | null
 }
 
+type ReportingDisplayDragSurface = 'table' | 'list'
+
+interface ReportingDisplayDragPreview {
+  columnId: string
+  offsetX: number
+  offsetY: number
+  surface: ReportingDisplayDragSurface
+}
+
 type ReportingExportPreviewSheet = 'weeklyHours' | 'weeklyHoursNotes'
 
 interface ReportingExportPreviewColumn {
@@ -604,7 +596,7 @@ const FULL_DAY_TIMELINE_WINDOW: TimelineWindow = {
 }
 const END_OF_DAY_INPUT_SENTINEL = '23:59'
 const MAX_CONCURRENT_SUBMISSIONS = 5
-const MAX_FINISHED_QUEUE_HISTORY = 10
+const LLM_SUBMISSION_STATUS_DISMISS_MS = 5000
 const CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD = 0.75
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5-nano'
 const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-5.4'
@@ -824,7 +816,7 @@ function activityCodeSearchText(activity: Activity): string {
 }
 
 function isSummaryLikeView(view: View): boolean {
-  return view === 'reporting'
+  return view === 'reporting' || view === 'reportingV2'
 }
 
 function getSummaryRowKey(row: TimelineWeeklySummary['rows'][number], rowIndex: number): string {
@@ -842,8 +834,8 @@ const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'week', label: 'Week' },
   { id: 'codes', label: 'Codes' },
   { id: 'reporting', label: 'Reporting' },
+  { id: 'reportingV2', label: 'Reporting V2' },
   { id: 'settings', label: 'Settings' },
-  { id: 'history', label: 'History' },
   { id: 'diagnostics', label: 'Diagnostics' },
 ]
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const
@@ -856,6 +848,15 @@ const SUMMARY_DAY_NAMES = [
   'Thursday',
   'Friday',
 ] as const
+const REPORTING_DISPLAY_FIELD_GROUPS: Array<{
+  label: string
+  keys: ReportingDisplayFieldKey[]
+}> = [
+  { label: 'Core', keys: ['details', 'engagement', 'activity', 'client'] },
+  { label: 'Codes', keys: ['engagementCode', 'activityCode'] },
+  { label: 'Classification', keys: ['engagementType', 'engagementTags', 'activityTags'] },
+  { label: 'Guidance', keys: ['engagementUsage', 'activityUsage'] },
+]
 const SUMMARY_LAYOUT_DAY_COLUMN_WIDTH = '8.5rem'
 const SUMMARY_LAYOUT_ROW_TOTAL_WIDTH = '8.5rem'
 
@@ -1073,7 +1074,6 @@ function App() {
   const [voiceCaptureState, setVoiceCaptureState] = useState<VoiceCaptureState>('idle')
   const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
-  const [lastSubmissionNotice, setLastSubmissionNotice] = useState<string | null>(null)
   const [quickAddSearch, setQuickAddSearch] = useState('')
   const [quickAddSuggestionItems, setQuickAddSuggestionItems] = useState<QuickAddSuggestion[]>([])
   const [quickAddSuggestedKeys, setQuickAddSuggestedKeys] = useState<string[]>([])
@@ -1161,11 +1161,6 @@ function App() {
   const [diagnosticsFilter, setDiagnosticsFilter] = useState<DiagnosticsFilter>('all')
   const [diagnosticsEvents, setDiagnosticsEvents] = useState<DiagnosticsEvent[]>([])
   const [diagnosticsBundleText, setDiagnosticsBundleText] = useState('')
-  const [historyData, setHistoryData] = useState<HistoryListResult | null>(null)
-  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
-  const [historyError, setHistoryError] = useState<string | null>(null)
-  const [historyMode, setHistoryMode] = useState<HistoryMode>('all')
-  const [selectedHistoryItemKey, setSelectedHistoryItemKey] = useState<string | null>(null)
   const [weeklySummary, setWeeklySummary] = useState<TimelineWeeklySummary | null>(null)
   const [isWeeklySummaryLoading, setIsWeeklySummaryLoading] = useState(false)
   const [weeklySummaryError, setWeeklySummaryError] = useState<string | null>(null)
@@ -1188,6 +1183,21 @@ function App() {
   const [reportingDisplayPresetDraftName, setReportingDisplayPresetDraftName] = useState('')
   const [reportingDisplayPresetDraftError, setReportingDisplayPresetDraftError] =
     useState<string | null>(null)
+  const [isReportingDisplayColumnPickerOpen, setIsReportingDisplayColumnPickerOpen] = useState(false)
+  const [reportingDisplayDraggedColumnId, setReportingDisplayDraggedColumnId] =
+    useState<string | null>(null)
+  const [reportingDisplayDragPreview, setReportingDisplayDragPreview] =
+    useState<ReportingDisplayDragPreview | null>(null)
+  const reportingDisplayPointerDragStateRef = useRef<{
+    columnId: string
+    pointerId: number
+    startClientX: number
+    startClientY: number
+    surface: ReportingDisplayDragSurface
+    lastTargetKey: string | null
+  } | null>(null)
+  const reportingDisplayDragCleanupRef = useRef<(() => void) | null>(null)
+  const reportingDisplayAnimationRectsRef = useRef<Map<string, DOMRect> | null>(null)
   const [isReportingExportModalOpen, setIsReportingExportModalOpen] = useState(false)
   const [reportingExportPreviewSheet, setReportingExportPreviewSheet] =
     useState<ReportingExportPreviewSheet>('weeklyHours')
@@ -1360,6 +1370,12 @@ function App() {
     setReportingDisplayPresetDraft(null)
     setReportingDisplayPresetDraftName('')
     setReportingDisplayPresetDraftError(null)
+    setIsReportingDisplayColumnPickerOpen(false)
+    setReportingDisplayDraggedColumnId(null)
+    setReportingDisplayDragPreview(null)
+    reportingDisplayDragCleanupRef.current?.()
+    reportingDisplayDragCleanupRef.current = null
+    reportingDisplayPointerDragStateRef.current = null
   }, [])
   const weekTimelineLayoutMetrics = useMemo(
     () => buildWeekTimelineLayoutMetrics(isCompactWeekTimeline),
@@ -1833,23 +1849,92 @@ function App() {
     }
   }, [quickAddActivityGroups, updateQuickAddScrollMetrics])
   const reportingDayIndexes = useMemo(() => {
-    if (!weeklySummary) {
-      return []
-    }
-
-    const allDayIndexes = weeklySummary.days.map((_, dayIndex) => dayIndex)
-    if (previewReportingDisplayPreset?.showEmptyDays ?? true) {
-      return allDayIndexes
-    }
-
-    const visibleDayIndexes = allDayIndexes.filter((dayIndex) => (
-      weeklySummary.dayTotalBreakdowns[dayIndex]?.primaryMinutes
-      ?? weeklySummary.dayTotalMinutes[dayIndex]
-      ?? 0
-    ) > 0)
-
-    return visibleDayIndexes.length > 0 ? visibleDayIndexes : allDayIndexes
+    return buildReportingDisplayDayIndexes(weeklySummary, previewReportingDisplayPreset)
   }, [previewReportingDisplayPreset, weeklySummary])
+  const reportingV2DayIndexes = useMemo(() => (
+    buildReportingDisplayDayIndexes(weeklySummary, selectedReportingDisplayPreset)
+  ), [selectedReportingDisplayPreset, weeklySummary])
+  const reportingDisplayEditorDayIndexes = useMemo(() => (
+    buildReportingDisplayDayIndexes(weeklySummary, reportingDisplayPresetDraft)
+  ), [reportingDisplayPresetDraft, weeklySummary])
+  const reportingDisplayDraftColumns = useMemo(
+    () => resolveReportingDisplayColumns(reportingDisplayPresetDraft),
+    [reportingDisplayPresetDraft],
+  )
+  const reportingDisplayDraftFieldCount = useMemo(
+    () => reportingDisplayDraftColumns.filter((column) => column.kind === 'field').length,
+    [reportingDisplayDraftColumns],
+  )
+  const reportingDisplayDraftFieldKeys = useMemo(
+    () => new Set(reportingDisplayDraftColumns
+      .filter((column): column is Extract<ReportingDisplayColumn, { kind: 'field' }> => column.kind === 'field')
+      .map((column) => column.fieldKey)),
+    [reportingDisplayDraftColumns],
+  )
+  useLayoutEffect(() => {
+    const previousRects = reportingDisplayAnimationRectsRef.current
+    if (!previousRects) {
+      return
+    }
+
+    reportingDisplayAnimationRectsRef.current = null
+    const dragState = reportingDisplayPointerDragStateRef.current
+    if (dragState) {
+      const previousRect = previousRects.get(
+        `${dragState.surface}:${dragState.columnId}:0`,
+      )
+      const nextElement = getFirstReportingDisplayColumnElement(
+        dragState.columnId,
+        dragState.surface,
+      )
+      if (previousRect && nextElement) {
+        const nextRect = nextElement.getBoundingClientRect()
+        const deltaX = previousRect.left - nextRect.left
+        const deltaY = previousRect.top - nextRect.top
+        if (Math.abs(deltaX) >= 0.5 || Math.abs(deltaY) >= 0.5) {
+          dragState.startClientX -= deltaX
+          dragState.startClientY -= deltaY
+          setReportingDisplayDragPreview((previous) => (
+            previous
+              && previous.columnId === dragState.columnId
+              && previous.surface === dragState.surface
+              ? {
+                ...previous,
+                offsetX: previous.offsetX + deltaX,
+                offsetY: previous.offsetY + deltaY,
+              }
+              : previous
+          ))
+        }
+      }
+    }
+    animateReportingDisplayColumnRects(previousRects)
+  }, [reportingDisplayDraftColumns])
+  const isReportingDisplayDraftDirty = useMemo(() => {
+    if (!reportingDisplayPresetDraft || !reportingDisplayPresetModal) {
+      return false
+    }
+
+    if (reportingDisplayPresetModal.mode === 'create' || !reportingDisplayPresetModal.presetId) {
+      return true
+    }
+
+    const savedPreset = resolvedReportingState.displayPresets.find(
+      (preset) => preset.id === reportingDisplayPresetModal.presetId,
+    )
+
+    return !savedPreset || !areReportingDisplayPresetDraftsEqual(
+      savedPreset,
+      savedPreset.name,
+      reportingDisplayPresetDraft,
+      reportingDisplayPresetDraftName,
+    )
+  }, [
+    reportingDisplayPresetDraft,
+    reportingDisplayPresetDraftName,
+    reportingDisplayPresetModal,
+    resolvedReportingState.displayPresets,
+  ])
   const summaryLayoutPreviewRows = useMemo(
     () => weeklySummary?.rows.slice(0, 3) ?? [],
     [weeklySummary],
@@ -1884,98 +1969,35 @@ function App() {
     [summaryLayoutDraft, summaryLayoutDragState],
   )
   const activeSummaryLayoutDragPointerId = summaryLayoutDragState?.pointerId ?? null
-  const submissionQueueDisplayItems = useMemo(() => {
-    const processing = submissionQueue.filter((item) => item.state === 'running')
-    const pending = submissionQueue.filter((item) => item.state === 'pending')
-    const finished = submissionQueue
-      .filter((item) => item.state === 'success' || item.state === 'error')
-      .sort(
-        (left, right) =>
-          (right.completedAtMs ?? right.submittedAtMs) - (left.completedAtMs ?? left.submittedAtMs),
-      )
+  const llmSubmissionStatus = useMemo<LlmSubmissionStatus | null>(() => {
+    const activeCount = submissionQueue.filter(isActiveSubmissionQueueItem).length
+    if (activeCount > 0) {
+      return {
+        kind: 'processing',
+        message: formatLlmSubmissionStatusMessage(activeCount, 'processing'),
+      }
+    }
 
-    return [...processing, ...pending, ...finished]
+    const createdCount = submissionQueue
+      .filter((item) => item.state === 'success')
+      .reduce((total, item) => total + (item.createdEntryCount ?? 0), 0)
+    if (createdCount > 0) {
+      return {
+        kind: 'success',
+        message: formatLlmSubmissionStatusMessage(createdCount, 'created'),
+      }
+    }
+
+    const failedCount = submissionQueue.filter((item) => item.state === 'error').length
+    if (failedCount > 0) {
+      return {
+        kind: 'error',
+        message: formatLlmSubmissionStatusMessage(failedCount, 'failed'),
+      }
+    }
+
+    return null
   }, [submissionQueue])
-  const liveHistoryQueueItems = useMemo(
-    () =>
-      submissionQueueDisplayItems.filter((item) =>
-        item.state === 'pending' || item.state === 'running' || item.state === 'error',
-      ),
-    [submissionQueueDisplayItems],
-  )
-  const persistedHistoryEntries = useMemo(
-    () =>
-      [...(historyData?.entries ?? [])].sort((left, right) => {
-        if (left.createdAt !== right.createdAt) {
-          return right.createdAt - left.createdAt
-        }
-
-        if (left.date !== right.date) {
-          return right.date.localeCompare(left.date)
-        }
-
-        return right.startMinute - left.startMinute
-      }),
-    [historyData],
-  )
-  const persistedHistorySubmissions = useMemo(
-    () => historyData?.submissions ?? [],
-    [historyData],
-  )
-  const historyCounts = useMemo(() => ({
-    queue: liveHistoryQueueItems.length,
-    submissions: persistedHistorySubmissions.length,
-    entries: persistedHistoryEntries.length,
-  }), [liveHistoryQueueItems.length, persistedHistoryEntries.length, persistedHistorySubmissions.length])
-  const historyUnifiedItems = useMemo<HistoryUnifiedItem[]>(() => {
-    const items: HistoryUnifiedItem[] = [
-      ...liveHistoryQueueItems.map((item): HistoryUnifiedItem => ({
-        kind: 'queue',
-        key: `queue-${item.id}`,
-        timestampMs: item.submittedAtMs,
-        item,
-      })),
-      ...persistedHistorySubmissions.map((submission): HistoryUnifiedItem => ({
-        kind: 'submission',
-        key: `submission-${submission.id}`,
-        timestampMs: submission.messageTimestamp * 1000,
-        submission,
-      })),
-      ...persistedHistoryEntries.map((entry): HistoryUnifiedItem => ({
-        kind: 'entry',
-        key: `entry-${entry.id}`,
-        timestampMs: entry.createdAt * 1000,
-        entry,
-      })),
-    ]
-
-    return items.sort((left, right) => {
-      if (left.kind === 'queue' && right.kind !== 'queue') {
-        return -1
-      }
-      if (left.kind !== 'queue' && right.kind === 'queue') {
-        return 1
-      }
-
-      return right.timestampMs - left.timestampMs
-    })
-  }, [liveHistoryQueueItems, persistedHistoryEntries, persistedHistorySubmissions])
-  const filteredHistoryItems = useMemo(
-    () => historyUnifiedItems.filter((item) => (
-      historyMode === 'all'
-      || (historyMode === 'queue' && item.kind === 'queue')
-      || (historyMode === 'submissions' && item.kind === 'submission')
-      || (historyMode === 'entries' && item.kind === 'entry')
-    )),
-    [historyMode, historyUnifiedItems],
-  )
-  const selectedHistoryItem = useMemo(
-    () =>
-      filteredHistoryItems.find((item) => item.key === selectedHistoryItemKey)
-      ?? filteredHistoryItems[0]
-      ?? null,
-    [filteredHistoryItems, selectedHistoryItemKey],
-  )
 
   const recordVoiceDiagnostic = useCallback((
     eventType: string,
@@ -2020,7 +2042,6 @@ function App() {
     timezone,
     captureSource,
     transcriptionModelUsed,
-    transcriptionModelUsedLabel,
     transcriptionDurationMs,
   }: {
     rawText: string
@@ -2032,7 +2053,6 @@ function App() {
     timezone: string
     captureSource: CaptureSourceId
     transcriptionModelUsed?: TranscriptionModelId
-    transcriptionModelUsedLabel?: string
     transcriptionDurationMs?: number
   }) => {
     const queueItem: SubmissionQueueItem = {
@@ -2047,14 +2067,11 @@ function App() {
       clientUtcOffsetMinutes,
       timezone,
       state: 'pending',
-      statusMessage: 'Queued for processing.',
       transcriptionModelUsed,
-      transcriptionModelUsedLabel,
       transcriptionDurationMs,
     }
 
     setSubmissionQueue((previous) => [...previous, queueItem])
-    setLastSubmissionNotice('Queued. View in History.')
   }, [settingsStatus])
 
   const timelineExcludeUncategorizedFromDailyTotals =
@@ -2540,16 +2557,6 @@ function App() {
     ))
   }, [engagements])
 
-  useEffect(() => {
-    setSelectedHistoryItemKey((previous) => {
-      if (previous && filteredHistoryItems.some((item) => item.key === previous)) {
-        return previous
-      }
-
-      return filteredHistoryItems[0]?.key ?? null
-    })
-  }, [filteredHistoryItems])
-
   const closeCodeEditor = useCallback(() => {
     setEngagementForm(EMPTY_ENGAGEMENT_FORM)
     setHasManualEngagementTypeSelection(false)
@@ -2749,12 +2756,6 @@ function App() {
     const summary = await timelineWeeklySummary({ date })
     setWeeklySummary(summary)
     return summary
-  }, [])
-
-  const loadHistory = useCallback(async (date: string) => {
-    const value = await historyList({ date })
-    setHistoryData(value)
-    return value
   }, [])
 
   const loadQuickAddSuggestions = useCallback(async () => {
@@ -3090,38 +3091,6 @@ function App() {
   }, [activeView, appRuntime, diagnosticsFilter, loadDiagnostics])
 
   useEffect(() => {
-    if (!appRuntime || activeView !== 'history') {
-      return
-    }
-
-    let cancelled = false
-
-    void (async () => {
-      try {
-        setIsHistoryLoading(true)
-        setHistoryError(null)
-        await loadHistory(selectedDate)
-        if (cancelled) {
-          return
-        }
-      } catch (error) {
-        if (cancelled) {
-          return
-        }
-        setHistoryError(formatActionErrorMessage(error))
-      } finally {
-        if (!cancelled) {
-          setIsHistoryLoading(false)
-        }
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [activeView, appRuntime, loadHistory, selectedDate])
-
-  useEffect(() => {
     if (!appRuntime || !hasInitializedRef.current || activeView !== 'week') {
       return
     }
@@ -3215,7 +3184,7 @@ function App() {
   }, [activeView, resetSummaryLayoutEditor, summaryLayoutModal])
 
   useEffect(() => {
-    if (activeView !== 'reporting' && reportingDisplayPresetModal) {
+    if (activeView !== 'reporting' && activeView !== 'reportingV2' && reportingDisplayPresetModal) {
       resetReportingDisplayPresetEditor()
     }
   }, [activeView, reportingDisplayPresetModal, resetReportingDisplayPresetEditor])
@@ -3594,6 +3563,43 @@ function App() {
     }
   }, [successMessage])
 
+  const trimSubmissionQueue = useCallback((items: SubmissionQueueItem[]) => {
+    const now = Date.now()
+    return items.filter((item) => {
+      if (isActiveSubmissionQueueItem(item)) {
+        return true
+      }
+
+      if (!isFinishedSubmissionQueueItem(item)) {
+        return false
+      }
+
+      const completedAtMs = item.completedAtMs ?? item.submittedAtMs
+      return now - completedAtMs < LLM_SUBMISSION_STATUS_DISMISS_MS
+    })
+  }, [])
+
+  useEffect(() => {
+    const finishedItems = submissionQueue.filter(isFinishedSubmissionQueueItem)
+    if (finishedItems.length === 0) {
+      return
+    }
+
+    const now = Date.now()
+    const nextDismissAt = Math.min(
+      ...finishedItems.map((item) =>
+        (item.completedAtMs ?? item.submittedAtMs) + LLM_SUBMISSION_STATUS_DISMISS_MS,
+      ),
+    )
+    const timeoutId = window.setTimeout(() => {
+      setSubmissionQueue((previous) => trimSubmissionQueue(previous))
+    }, Math.max(0, nextDismissAt - now))
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [submissionQueue, trimSubmissionQueue])
+
   useEffect(() => {
     if (!codesCreateNotice) {
       return
@@ -3614,13 +3620,11 @@ function App() {
       loadTimeline(selectedDate),
       loadWeekTimeline(selectedDate),
       loadSettings(),
-      loadHistory(selectedDate),
       loadWeeklySummary(selectedDate),
       loadQuickAddSuggestions(),
     ])
   }, [
     loadEngagements,
-    loadHistory,
     loadQuickAddSuggestions,
     loadSettings,
     loadTimeline,
@@ -3905,19 +3909,6 @@ function App() {
     ],
   )
 
-  const trimSubmissionQueue = useCallback((items: SubmissionQueueItem[]) => {
-    const activeItems = items.filter((item) => item.state === 'pending' || item.state === 'running')
-    const recentFinishedItems = items
-      .filter((item) => item.state === 'success' || item.state === 'error')
-      .sort(
-        (left, right) =>
-          (right.completedAtMs ?? right.submittedAtMs) - (left.completedAtMs ?? left.submittedAtMs),
-      )
-      .slice(0, MAX_FINISHED_QUEUE_HISTORY)
-
-    return [...activeItems, ...recentFinishedItems]
-  }, [])
-
   const processSubmissionQueueItem = useCallback(
     async (item: SubmissionQueueItem) => {
       try {
@@ -3935,7 +3926,6 @@ function App() {
         })
 
         const completedAt = Date.now()
-        const completedDurationMs = completedAt - item.submittedAtMs
         setSubmissionQueue((previous) =>
           trimSubmissionQueue(
             previous.map((candidate) =>
@@ -3943,16 +3933,8 @@ function App() {
                 ? {
                     ...candidate,
                     state: 'success',
-                    statusMessage: formatSubmissionQueueSuccessMessage(
-                      result.createdEntryIds.length,
-                      new Date(completedAt),
-                    ),
-                    correlationId: result.correlationId,
                     createdEntryCount: result.createdEntryIds.length,
                     completedAtMs: completedAt,
-                    completedDurationMs,
-                    modelUsed: result.modelUsed,
-                    modelUsedLabel: result.modelUsedLabel,
                   }
                 : candidate,
             ),
@@ -3969,13 +3951,12 @@ function App() {
         await Promise.allSettled([
           loadTimeline(refreshDate),
           loadWeekTimeline(refreshDate),
-          loadHistory(refreshDate),
           loadWeeklySummary(refreshDate),
           loadQuickAddSuggestions(),
         ])
       } catch (error) {
         const completedAt = Date.now()
-        const correlationId = isAppCommandError(error) ? error.correlationId : undefined
+        setErrorMessage(extractErrorMessage(error))
         setSubmissionQueue((previous) =>
           trimSubmissionQueue(
             previous.map((candidate) =>
@@ -3983,8 +3964,6 @@ function App() {
                 ? {
                     ...candidate,
                     state: 'error',
-                    statusMessage: extractErrorMessage(error),
-                    correlationId,
                     completedAtMs: completedAt,
                   }
                 : candidate,
@@ -3999,7 +3978,6 @@ function App() {
       invalidateMonthSummaries,
       loadTimeline,
       loadWeekTimeline,
-      loadHistory,
       loadQuickAddSuggestions,
       loadWeeklySummary,
       trimSubmissionQueue,
@@ -4291,11 +4269,9 @@ function App() {
         clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         state: 'running',
-        statusMessage: 'Transcribing audio note...',
       }
       queueItemId = queueItem.id
       setSubmissionQueue((previous) => [...previous, queueItem])
-      setLastSubmissionNotice('Voice note queued. View in History.')
 
       const transcription = await transcribeRecordedVoiceBlob(recording)
       setSubmissionQueue((previous) =>
@@ -4305,9 +4281,7 @@ function App() {
               ...candidate,
               rawText: transcription.transcriptText,
               state: 'pending',
-              statusMessage: 'Queued for processing.',
               transcriptionModelUsed: transcription.transcriptionModelUsed,
-              transcriptionModelUsedLabel: transcription.transcriptionModelUsedLabel,
               transcriptionDurationMs: transcription.transcriptionDurationMs,
             }
             : candidate,
@@ -4318,7 +4292,6 @@ function App() {
       setVoiceCaptureState('idle')
       setVoiceCaptureStatusMessage(null)
     } catch (error) {
-      const correlationId = isAppCommandError(error) ? error.correlationId : undefined
       if (queueItemId) {
         const completedAt = Date.now()
         setSubmissionQueue((previous) =>
@@ -4328,8 +4301,6 @@ function App() {
                 ? {
                   ...candidate,
                   state: 'error',
-                  statusMessage: extractErrorMessage(error),
-                  correlationId,
                   completedAtMs: completedAt,
                 }
                 : candidate,
@@ -4621,7 +4592,6 @@ function App() {
           ? {
               ...item,
               state: 'running',
-              statusMessage: 'Your message is sent and is being processed.',
             }
           : item,
       ),
@@ -5401,7 +5371,6 @@ function App() {
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
       captureSource: captureDraftMetadata?.captureSource ?? 'text',
       transcriptionModelUsed: captureDraftMetadata?.transcriptionModelUsed,
-      transcriptionModelUsedLabel: captureDraftMetadata?.transcriptionModelUsedLabel,
       transcriptionDurationMs: captureDraftMetadata?.transcriptionDurationMs,
     })
     setCaptureDraftMetadata(null)
@@ -5943,7 +5912,6 @@ function App() {
         const [entries] = await Promise.all([
           loadTimeline(date),
           loadWeekTimeline(date),
-          loadHistory(date),
           loadWeeklySummary(date),
         ])
         invalidateMonthSummaries([monthKey])
@@ -5959,7 +5927,6 @@ function App() {
     [
       invalidateMonthSummaries,
       isBusy,
-      loadHistory,
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
@@ -6797,6 +6764,9 @@ function App() {
     }
 
     setReportingDisplayPresetDraftError(null)
+    setIsReportingDisplayColumnPickerOpen(false)
+    setReportingDisplayDraggedColumnId(null)
+    setReportingDisplayDragPreview(null)
   }, [resolvedReportingState.displayPresets, selectedReportingDisplayPreset])
 
   const onSaveReportingDisplayPreset = () => {
@@ -6890,6 +6860,245 @@ function App() {
           displayPresets: remainingPresets,
         }, {
           successMessage: 'Reporting table preset deleted.',
+        })
+        resetReportingDisplayPresetEditor()
+      } catch (error) {
+        setReportingDisplayPresetDraftError(extractErrorMessage(error))
+      }
+    })()
+  }
+
+  const updateReportingDisplayPresetDraftColumns = useCallback((
+    updater: (columns: ReportingDisplayColumn[]) => ReportingDisplayColumn[],
+  ) => {
+    setReportingDisplayPresetDraft((previous) => {
+      if (!previous) {
+        return previous
+      }
+
+      const currentColumns = resolveReportingDisplayColumns(previous)
+      return {
+        ...previous,
+        columns: updater(currentColumns),
+      }
+    })
+  }, [])
+
+  const onAddReportingDisplayColumn = (fieldKey: ReportingDisplayFieldKey) => {
+    updateReportingDisplayPresetDraftColumns((columns) => {
+      if (columns.some((column) => column.kind === 'field' && column.fieldKey === fieldKey)) {
+        return columns
+      }
+
+      const nextColumn = createReportingDisplayFieldColumn(fieldKey)
+      const dayGroupIndex = columns.findIndex((column) => column.kind === 'dayGroup')
+      const rowTotalIndex = columns.findIndex((column) => column.kind === 'rowTotal')
+      const insertionIndex = dayGroupIndex >= 0
+        ? dayGroupIndex
+        : rowTotalIndex >= 0
+          ? rowTotalIndex
+          : columns.length
+
+      return [
+        ...columns.slice(0, insertionIndex),
+        nextColumn,
+        ...columns.slice(insertionIndex),
+      ]
+    })
+    setReportingDisplayPresetDraftError(null)
+    setIsReportingDisplayColumnPickerOpen(false)
+  }
+
+  const onRemoveReportingDisplayColumn = (columnId: string) => {
+    updateReportingDisplayPresetDraftColumns((columns) => {
+      const column = columns.find((candidate) => candidate.id === columnId)
+      if (!column || column.kind !== 'field') {
+        return columns
+      }
+
+      const fieldCount = columns.filter((candidate) => candidate.kind === 'field').length
+      if (fieldCount <= 1) {
+        setReportingDisplayPresetDraftError('Keep at least one field column in the view.')
+        return columns
+      }
+
+      setReportingDisplayPresetDraftError(null)
+      return columns.filter((candidate) => candidate.id !== columnId)
+    })
+  }
+
+  const onMoveReportingDisplayColumn = useCallback((
+    sourceColumnId: string,
+    targetColumnId: string,
+    insertAfterTarget = false,
+  ) => {
+    if (sourceColumnId === targetColumnId) {
+      return
+    }
+
+    reportingDisplayAnimationRectsRef.current = collectReportingDisplayColumnRects()
+    updateReportingDisplayPresetDraftColumns((columns) => (
+      moveReportingDisplayColumn(columns, sourceColumnId, targetColumnId, insertAfterTarget)
+    ))
+    setReportingDisplayPresetDraftError(null)
+  }, [updateReportingDisplayPresetDraftColumns])
+
+  const onSelectReportingDisplayEditorPreset = (presetId: string) => {
+    if (presetId === reportingDisplayPresetModal?.presetId) {
+      return
+    }
+
+    if (isReportingDisplayDraftDirty) {
+      const confirmed = window.confirm('Discard unsaved changes to this view?')
+      if (!confirmed) {
+        return
+      }
+    }
+
+    const nextPreset = resolvedReportingState.displayPresets.find((preset) => preset.id === presetId)
+    if (!nextPreset) {
+      return
+    }
+
+    const nextDraft = cloneReportingDisplayPreset(nextPreset)
+    setReportingDisplayPresetDraft(nextDraft)
+    setReportingDisplayPresetDraftName(nextDraft.name)
+    setReportingDisplayPresetModal({
+      mode: 'edit',
+      presetId: nextPreset.id,
+    })
+    setReportingDisplayPresetDraftError(null)
+    setIsReportingDisplayColumnPickerOpen(false)
+    setReportingDisplayDraggedColumnId(null)
+    setReportingDisplayDragPreview(null)
+    reportingDisplayDragCleanupRef.current?.()
+    reportingDisplayDragCleanupRef.current = null
+    reportingDisplayPointerDragStateRef.current = null
+  }
+
+  const finishReportingDisplayColumnDrag = useCallback(() => {
+    reportingDisplayDragCleanupRef.current?.()
+    reportingDisplayDragCleanupRef.current = null
+    reportingDisplayPointerDragStateRef.current = null
+    setReportingDisplayDraggedColumnId(null)
+    setReportingDisplayDragPreview(null)
+  }, [])
+
+  const moveReportingDisplayColumnDrag = useCallback((event: PointerEvent) => {
+    const dragState = reportingDisplayPointerDragStateRef.current
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return
+    }
+
+    const nextDragPreview: ReportingDisplayDragPreview = {
+      columnId: dragState.columnId,
+      offsetX: event.clientX - dragState.startClientX,
+      offsetY: event.clientY - dragState.startClientY,
+      surface: dragState.surface,
+    }
+
+    const dropTarget = getReportingDisplayColumnDropTarget(event.clientX, event.clientY)
+    if (!dropTarget || dropTarget.columnId === dragState.columnId) {
+      setReportingDisplayDragPreview(nextDragPreview)
+      return
+    }
+
+    const targetKey = `${dropTarget.columnId}:${dropTarget.insertAfterTarget ? 'after' : 'before'}`
+    if (targetKey === dragState.lastTargetKey) {
+      setReportingDisplayDragPreview(nextDragPreview)
+      return
+    }
+
+    flushSync(() => {
+      setReportingDisplayDragPreview(nextDragPreview)
+    })
+    dragState.lastTargetKey = targetKey
+    onMoveReportingDisplayColumn(
+      dragState.columnId,
+      dropTarget.columnId,
+      dropTarget.insertAfterTarget,
+    )
+  }, [onMoveReportingDisplayColumn])
+
+  const onStartReportingDisplayColumnPointerDrag = (
+    event: ReactPointerEvent<HTMLElement>,
+    columnId: string,
+  ) => {
+    if (event.button !== 0) {
+      return
+    }
+
+    event.preventDefault()
+    reportingDisplayDragCleanupRef.current?.()
+    const dragSurfaceElement = event.currentTarget.closest<HTMLElement>(
+      '[data-reporting-display-column-id]',
+    )
+    const surface = dragSurfaceElement
+      ? getReportingDisplayElementSurface(dragSurfaceElement)
+      : 'table'
+    reportingDisplayPointerDragStateRef.current = {
+      columnId,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      surface,
+      lastTargetKey: null,
+    }
+    setReportingDisplayDraggedColumnId(columnId)
+    setReportingDisplayDragPreview({
+      columnId,
+      offsetX: 0,
+      offsetY: 0,
+      surface,
+    })
+
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
+      moveReportingDisplayColumnDrag(pointerEvent)
+    }
+
+    const handlePointerEnd = (pointerEvent: PointerEvent) => {
+      const dragState = reportingDisplayPointerDragStateRef.current
+      if (!dragState || dragState.pointerId !== pointerEvent.pointerId) {
+        return
+      }
+
+      moveReportingDisplayColumnDrag(pointerEvent)
+      finishReportingDisplayColumnDrag()
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerEnd)
+    window.addEventListener('pointercancel', handlePointerEnd)
+    reportingDisplayDragCleanupRef.current = () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerEnd)
+      window.removeEventListener('pointercancel', handlePointerEnd)
+    }
+  }
+
+  const onSaveReportingDisplayPresetAsNew = () => {
+    if (!reportingDisplayPresetDraft) {
+      return
+    }
+
+    const trimmedName = reportingDisplayPresetDraftName.trim()
+    const nextName = buildNextReportingPresetName(
+      trimmedName || `${reportingDisplayPresetDraft.name} Copy`,
+      resolvedReportingState.displayPresets,
+    )
+    const draftToSave = cloneReportingDisplayPreset(reportingDisplayPresetDraft, {
+      id: generateReportingId('reporting-display'),
+      name: nextName,
+    })
+
+    void (async () => {
+      try {
+        await persistReportingState({
+          ...resolvedReportingState,
+          selectedDisplayPresetId: draftToSave.id,
+          displayPresets: [...resolvedReportingState.displayPresets, draftToSave],
+        }, {
+          successMessage: 'Reporting table view created.',
         })
         resetReportingDisplayPresetEditor()
       } catch (error) {
@@ -7239,10 +7448,6 @@ function App() {
     const endDate = weekTimelineDays[6]?.date ?? selectedDate
     return formatTimelineWeekRangeLabel(startDate, endDate)
   }, [selectedDate, weekTimelineDays])
-  const historyWeekRangeLabel = useMemo(() => {
-    const days = buildWeekViewDays(selectedDate)
-    return formatTimelineWeekRange(days[0]?.date ?? selectedDate, days[6]?.date ?? selectedDate)
-  }, [selectedDate])
 
   const onSelectView = (view: View) => {
     if (view === 'week' && activeView !== 'week') {
@@ -7254,20 +7459,6 @@ function App() {
     }
 
     setActiveView(view)
-  }
-
-  const onRefreshHistory = () => {
-    void (async () => {
-      try {
-        setIsHistoryLoading(true)
-        setHistoryError(null)
-        await loadHistory(selectedDate)
-      } catch (error) {
-        setHistoryError(formatActionErrorMessage(error))
-      } finally {
-        setIsHistoryLoading(false)
-      }
-    })()
   }
 
   const entryAutoSaveStatusLabel =
@@ -9144,23 +9335,15 @@ function App() {
                     {voiceCaptureState === 'recording' ? 'Stop & Send' : 'Send'}
                   </button>
                 </div>
-              </form>
-
-              {lastSubmissionNotice ? (
-                <div className="capture-history-notice">
-                  <span>{lastSubmissionNotice}</span>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => {
-                      setActiveView('history')
-                      setLastSubmissionNotice(null)
-                    }}
+                {llmSubmissionStatus ? (
+                  <p
+                    className={`capture-llm-status ${llmSubmissionStatus.kind}`}
+                    aria-live="polite"
                   >
-                    History
-                  </button>
-                </div>
-              ) : null}
+                    {llmSubmissionStatus.message}
+                  </p>
+                ) : null}
+              </form>
             </div>
 
             <div className="quick-add-panel" aria-label="Quick Entry">
@@ -9309,72 +9492,6 @@ function App() {
               )}
             </div>
 
-            {/*
-            <div className="submission-queue">
-              <button
-                type="button"
-                className="submission-queue-toggle"
-                aria-expanded={isSubmissionQueueOpen}
-                onClick={() => setIsSubmissionQueueOpen((previous) => !previous)}
-              >
-                <span>Submission Queue</span>
-                <span
-                  className={`submission-queue-toggle-icon ${isSubmissionQueueOpen ? 'open' : ''}`}
-                  aria-hidden="true"
-                >
-                  ▾
-                </span>
-              </button>
-
-              {isSubmissionQueueOpen ? (
-                <div className="submission-queue-list" role="list" aria-label="Submission queue items">
-                  {submissionQueueDisplayItems.length === 0 ? (
-                    <p className="submission-queue-empty">Submission queue is empty</p>
-                  ) : (
-                    submissionQueueDisplayItems.map((item) => (
-                      <div key={item.id} className={`submission-queue-item ${item.state}`} role="listitem">
-                        <div className="submission-queue-item-header">
-                          <p className="submission-queue-item-text">{item.rawText}</p>
-                          <span className={`submission-queue-item-badge ${item.state}`}>
-                            {formatSubmissionQueueStateLabel(item.state)}
-                          </span>
-                        </div>
-                        <p className="submission-queue-item-meta">
-                          Submitted {formatSubmissionQueueTimestamp(item.submittedAtMs)}
-                        </p>
-                        <p className="submission-queue-item-status">{item.statusMessage}</p>
-                        {item.state === 'success' && item.createdEntryCount !== undefined ? (
-                          <p className="submission-queue-item-meta">
-                            Entries created: {item.createdEntryCount}
-                          </p>
-                        ) : null}
-                        {item.correlationId ? (
-                          <p className="submission-queue-item-meta">
-                            Correlation ID: <code>{item.correlationId}</code>
-                          </p>
-                        ) : null}
-                        {item.state === 'success' && item.completedDurationMs !== undefined ? (
-                          <p className="submission-queue-item-meta">
-                            Completed in: {formatSubmissionQueueDuration(item.completedDurationMs)}
-                          </p>
-                        ) : null}
-                        {item.state === 'success' && item.modelUsedLabel ? (
-                          <p className="submission-queue-item-meta">
-                            Model used: {item.modelUsedLabel}
-                          </p>
-                        ) : null}
-                        {item.captureSource === 'voice' && item.transcriptionModelUsedLabel ? (
-                          <p className="submission-queue-item-meta">
-                            Transcription model: {item.transcriptionModelUsedLabel}
-                          </p>
-                        ) : null}
-                      </div>
-                    ))
-                  )}
-                </div>
-              ) : null}
-            </div>
-            */}
           </section>
 
           <section className="sidebar-section sidebar-calendar">
@@ -10051,336 +10168,6 @@ function App() {
               </div>
 
               {selectedEntry ? timelineEditorPanel : null}
-            </div>
-          </section>
-        ) : null}
-
-        {activeView === 'history' ? (
-          <section className="panel history-panel">
-            <div className="history-toolbar">
-              <div className="history-title-block">
-                <h2>History</h2>
-                <p>{historyWeekRangeLabel}</p>
-              </div>
-              <div className="timeline-controls timeline-stepper" aria-label="History week navigation">
-                <button
-                  type="button"
-                  className="timeline-arrow-button stepper-button stepper-prev"
-                  aria-label="Previous week"
-                  title="Previous week"
-                  onClick={() => onSetDate(shiftDate(selectedDate, -7))}
-                  disabled={isBusy || isHistoryLoading}
-                >
-                  <span className="control-icon chevron-left" aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  className="stepper-button stepper-center"
-                  onClick={onJumpToThisWeek}
-                  disabled={isBusy || isHistoryLoading}
-                >
-                  This Week
-                </button>
-                <button
-                  type="button"
-                  className="timeline-arrow-button stepper-button stepper-next"
-                  aria-label="Next week"
-                  title="Next week"
-                  onClick={() => onSetDate(shiftDate(selectedDate, 7))}
-                  disabled={isBusy || isHistoryLoading}
-                >
-                  <span className="control-icon chevron-right" aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  className="ghost history-refresh-button"
-                  onClick={onRefreshHistory}
-                  disabled={isBusy || isHistoryLoading}
-                >
-                  Refresh
-                </button>
-              </div>
-            </div>
-
-            {historyError ? (
-              <p className="mini-calendar-error">{historyError}</p>
-            ) : null}
-
-            <div className="history-overview" aria-label="History counts">
-              <button
-                type="button"
-                className={historyMode === 'all' ? 'active' : ''}
-                onClick={() => setHistoryMode('all')}
-              >
-                <span>All</span>
-                <strong>{historyUnifiedItems.length}</strong>
-              </button>
-              <button
-                type="button"
-                className={historyMode === 'queue' ? 'active' : ''}
-                onClick={() => setHistoryMode('queue')}
-              >
-                <span>Queue</span>
-                <strong>{historyCounts.queue}</strong>
-              </button>
-              <button
-                type="button"
-                className={historyMode === 'submissions' ? 'active' : ''}
-                onClick={() => setHistoryMode('submissions')}
-              >
-                <span>Submissions</span>
-                <strong>{historyCounts.submissions}</strong>
-              </button>
-              <button
-                type="button"
-                className={historyMode === 'entries' ? 'active' : ''}
-                onClick={() => setHistoryMode('entries')}
-              >
-                <span>Entries</span>
-                <strong>{historyCounts.entries}</strong>
-              </button>
-            </div>
-
-            <div className="history-layout" aria-busy={isHistoryLoading}>
-              <section className="history-primary-section">
-                <div className="history-section-header">
-                  <h3>Activity</h3>
-                  <span>{filteredHistoryItems.length}</span>
-                </div>
-                {isHistoryLoading && !historyData && filteredHistoryItems.length === 0 ? (
-                  <p className="history-empty">Loading history...</p>
-                ) : filteredHistoryItems.length === 0 ? (
-                  <p className="history-empty">
-                    {historyMode === 'queue'
-                      ? 'No live queue items.'
-                      : historyMode === 'submissions'
-                        ? 'No persisted submissions this week.'
-                        : historyMode === 'entries'
-                          ? 'No entries created this week.'
-                          : 'No history for this week.'}
-                  </p>
-                ) : (
-                  <div className="history-list history-primary-list" role="listbox" aria-label="History activity">
-                    {filteredHistoryItems.map((historyItem) => {
-                      const isSelected = selectedHistoryItem?.key === historyItem.key
-
-                      if (historyItem.kind === 'queue') {
-                        const { item } = historyItem
-                        return (
-                          <button
-                            key={historyItem.key}
-                            type="button"
-                            className={`history-list-row queue ${item.state} ${isSelected ? 'active' : ''}`}
-                            onClick={() => setSelectedHistoryItemKey(historyItem.key)}
-                            role="option"
-                            aria-selected={isSelected}
-                          >
-                            <span className="history-row-kicker">
-                              Live Queue
-                              <span className={`submission-queue-item-badge ${item.state}`}>
-                                {formatSubmissionQueueStateLabel(item.state)}
-                              </span>
-                            </span>
-                            <strong>{formatHistorySourceLabel(item.captureSource)}</strong>
-                            <span className="history-row-text">{item.rawText}</span>
-                            <span className="history-row-meta">{formatSubmissionQueueTimestamp(item.submittedAtMs)}</span>
-                          </button>
-                        )
-                      }
-
-                      if (historyItem.kind === 'submission') {
-                        const { submission } = historyItem
-                        return (
-                          <button
-                            key={historyItem.key}
-                            type="button"
-                            className={`history-list-row submission ${isSelected ? 'active' : ''}`}
-                            onClick={() => setSelectedHistoryItemKey(historyItem.key)}
-                            role="option"
-                            aria-selected={isSelected}
-                          >
-                            <span className="history-row-kicker">
-                              Submission
-                              <span className="history-pill">{formatHistorySourceLabel(submission.status)}</span>
-                            </span>
-                            <strong>{formatHistorySourceLabel(submission.captureSource)}</strong>
-                            <span className="history-row-text">{submission.rawText}</span>
-                            <span className="history-row-meta">
-                              {formatHistoryTimestamp(submission.messageTimestamp)}
-                              {' | '}
-                              Entries {submission.savedEntryCount}/{submission.interpretedEntryCount}
-                            </span>
-                          </button>
-                        )
-                      }
-
-                      const { entry } = historyItem
-                      const blockColor = resolveTimelineBlockColor(
-                        entry,
-                        activityColorById,
-                        engagementColorById,
-                      )
-
-                      return (
-                        <button
-                          key={historyItem.key}
-                          type="button"
-                          className={`history-list-row entry ${isSelected ? 'active' : ''}`}
-                          style={{ '--history-entry-color': blockColor } as CSSProperties}
-                          onClick={() => setSelectedHistoryItemKey(historyItem.key)}
-                          role="option"
-                          aria-selected={isSelected}
-                        >
-                          <span className="history-row-kicker">
-                            Entry
-                            <span className="history-pill">{formatHistorySourceLabel(entry.source)}</span>
-                          </span>
-                          <strong>{formatHistoryEntryTitle(entry)}</strong>
-                          <span className="history-row-text">{entry.description || 'No description'}</span>
-                          <span className="history-row-meta">
-                            {formatHistoryEntryTime(entry)}
-                            {' | '}
-                            {formatQuickBlockDuration(entry.durationMinutes)}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </section>
-
-              <aside className="history-detail-section">
-                {selectedHistoryItem ? (
-                  <>
-                    <div className="history-detail-header">
-                      <div>
-                        <span>
-                          {selectedHistoryItem.kind === 'queue'
-                            ? 'Live Queue'
-                            : selectedHistoryItem.kind === 'submission'
-                              ? 'Submission'
-                              : 'Entry'}
-                        </span>
-                        <h3>
-                          {selectedHistoryItem.kind === 'queue'
-                            ? formatHistorySourceLabel(selectedHistoryItem.item.captureSource)
-                            : selectedHistoryItem.kind === 'submission'
-                              ? formatHistorySourceLabel(selectedHistoryItem.submission.captureSource)
-                              : formatHistoryEntryTitle(selectedHistoryItem.entry)}
-                        </h3>
-                      </div>
-                      {selectedHistoryItem.kind === 'queue' ? (
-                        <span className={`submission-queue-item-badge ${selectedHistoryItem.item.state}`}>
-                          {formatSubmissionQueueStateLabel(selectedHistoryItem.item.state)}
-                        </span>
-                      ) : selectedHistoryItem.kind === 'submission' ? (
-                        <span className="history-pill">{formatHistorySourceLabel(selectedHistoryItem.submission.status)}</span>
-                      ) : (
-                        <span className="history-pill">{formatHistorySourceLabel(selectedHistoryItem.entry.source)}</span>
-                      )}
-                    </div>
-
-                    {selectedHistoryItem.kind === 'queue' ? (
-                      <div className="history-detail-body">
-                        <p className="history-detail-text">{selectedHistoryItem.item.rawText}</p>
-                        <div className="history-meta-grid">
-                          <span>Submitted {formatSubmissionQueueTimestamp(selectedHistoryItem.item.submittedAtMs)}</span>
-                          <span>{selectedHistoryItem.item.statusMessage}</span>
-                          {selectedHistoryItem.item.createdEntryCount !== undefined ? (
-                            <span>Entries created {selectedHistoryItem.item.createdEntryCount}</span>
-                          ) : null}
-                          {selectedHistoryItem.item.completedDurationMs !== undefined ? (
-                            <span>Completed in {formatSubmissionQueueDuration(selectedHistoryItem.item.completedDurationMs)}</span>
-                          ) : null}
-                          {selectedHistoryItem.item.modelUsedLabel ? (
-                            <span>Model {selectedHistoryItem.item.modelUsedLabel}</span>
-                          ) : null}
-                          {selectedHistoryItem.item.transcriptionModelUsedLabel ? (
-                            <span>Transcription {selectedHistoryItem.item.transcriptionModelUsedLabel}</span>
-                          ) : null}
-                        </div>
-                        {selectedHistoryItem.item.correlationId ? (
-                          <p className="history-card-meta">
-                            Correlation ID: <code>{selectedHistoryItem.item.correlationId}</code>
-                          </p>
-                        ) : null}
-                      </div>
-                    ) : null}
-
-                    {selectedHistoryItem.kind === 'submission' ? (
-                      <div className="history-detail-body">
-                        <p className="history-detail-text">{selectedHistoryItem.submission.rawText}</p>
-                        <div className="history-meta-grid">
-                          <span>Submitted {formatHistoryTimestamp(selectedHistoryItem.submission.messageTimestamp)}</span>
-                          <span>Created {formatHistoryTimestamp(selectedHistoryItem.submission.createdAt)}</span>
-                          <span>
-                            Entries {selectedHistoryItem.submission.savedEntryCount}/
-                            {selectedHistoryItem.submission.interpretedEntryCount}
-                          </span>
-                          <span>Unique {selectedHistoryItem.submission.uniqueEntryCount}</span>
-                          <span>Confidence {formatHistoryConfidence(selectedHistoryItem.submission.confidence)}</span>
-                          {selectedHistoryItem.submission.modelUsedLabel ? (
-                            <span>Model {selectedHistoryItem.submission.modelUsedLabel}</span>
-                          ) : null}
-                          {selectedHistoryItem.submission.transcriptionModelUsedLabel ? (
-                            <span>Transcription {selectedHistoryItem.submission.transcriptionModelUsedLabel}</span>
-                          ) : null}
-                          {selectedHistoryItem.submission.containsMultipleEvents ? (
-                            <span>Multiple events</span>
-                          ) : null}
-                          {selectedHistoryItem.submission.truncatedEntryCount > 0 ? (
-                            <span>Truncated {selectedHistoryItem.submission.truncatedEntryCount}</span>
-                          ) : null}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {selectedHistoryItem.kind === 'entry' ? (
-                      <div className="history-detail-body">
-                        <p className="history-detail-text">{selectedHistoryItem.entry.description || 'No description'}</p>
-                        <div className="history-meta-grid">
-                          <span>{formatHistoryEntryTime(selectedHistoryItem.entry)}</span>
-                          <span>{formatQuickBlockDuration(selectedHistoryItem.entry.durationMinutes)}</span>
-                          <span>Created {formatHistoryTimestamp(selectedHistoryItem.entry.createdAt)}</span>
-                          <span>Updated {formatHistoryTimestamp(selectedHistoryItem.entry.updatedAt)}</span>
-                          <span>Confidence {formatHistoryConfidence(selectedHistoryItem.entry.confidence)}</span>
-                          {selectedHistoryItem.entry.engagementName || selectedHistoryItem.entry.engagementCode ? (
-                            <span>
-                              {formatEntityDisplayLabel(
-                                selectedHistoryItem.entry.engagementName,
-                                selectedHistoryItem.entry.engagementCode,
-                              )}
-                            </span>
-                          ) : null}
-                          {selectedHistoryItem.entry.activityName || selectedHistoryItem.entry.activityCode ? (
-                            <span>
-                              {formatEntityDisplayLabel(
-                                selectedHistoryItem.entry.activityName,
-                                selectedHistoryItem.entry.activityCode,
-                              )}
-                            </span>
-                          ) : null}
-                          {selectedHistoryItem.entry.modelUsedLabel ? (
-                            <span>Model {selectedHistoryItem.entry.modelUsedLabel}</span>
-                          ) : null}
-                          {selectedHistoryItem.entry.transcriptionModelUsedLabel ? (
-                            <span>Transcription {selectedHistoryItem.entry.transcriptionModelUsedLabel}</span>
-                          ) : null}
-                        </div>
-                        {selectedHistoryItem.entry.warningFlags.length > 0 ? (
-                          <div className="history-warning-row">
-                            {selectedHistoryItem.entry.warningFlags.map((warningType) => (
-                              <WarningBadge key={`${selectedHistoryItem.entry.id}-${warningType}`} type={warningType} />
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <p className="history-empty">Select a history item.</p>
-                )}
-              </aside>
             </div>
           </section>
         ) : null}
@@ -11587,6 +11374,152 @@ function App() {
           </section>
         ) : null}
 
+        {activeView === 'reportingV2' ? (
+          <section className="panel reporting-panel reporting-v2-panel">
+            <header className="reporting-toolbar">
+              <div className="reporting-title-block">
+                <h2>Reporting V2</h2>
+                <p>
+                  {weeklySummary
+                    ? `${weeklySummary.weekStartDate} - ${weeklySummary.weekEndDate}`
+                    : selectedDate}
+                </p>
+              </div>
+
+              <div className="reporting-toolbar-main">
+                <div className="timeline-controls timeline-stepper reporting-week-stepper" aria-label="Reporting V2 week navigation">
+                  <button
+                    type="button"
+                    className="timeline-arrow-button stepper-button stepper-prev"
+                    aria-label="Previous week"
+                    title="Previous week"
+                    onClick={() => onShiftSummaryWeek(-1)}
+                    disabled={isBusy || isWeeklySummaryLoading}
+                  >
+                    <span className="control-icon chevron-left" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="stepper-button stepper-center"
+                    onClick={onJumpToThisWeek}
+                    disabled={isBusy || isWeeklySummaryLoading}
+                  >
+                    This Week
+                  </button>
+                  <button
+                    type="button"
+                    className="timeline-arrow-button stepper-button stepper-next"
+                    aria-label="Next week"
+                    title="Next week"
+                    onClick={() => onShiftSummaryWeek(1)}
+                    disabled={isBusy || isWeeklySummaryLoading}
+                  >
+                    <span className="control-icon chevron-right" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            </header>
+
+            <section className="reporting-command-row reporting-v2-command-row" aria-label="Reporting V2 controls and weekly totals">
+              <div className="reporting-week-total-strip" aria-label="Weekly total breakdown">
+                <span className="reporting-command-label">Weekly Total Hours</span>
+                <div className="reporting-week-total-values">
+                  {reportingWeeklyTotalSegments.length > 0 ? (
+                    reportingWeeklyTotalSegments.map((segment, segmentIndex) => {
+                      const segmentLabel = splitTimelineTotalSegmentLabel(segment.label)
+
+                      return (
+                        <Fragment key={segment.key}>
+                          {segmentIndex > 0 ? (
+                            <span
+                              className={`reporting-total-separator ${
+                                segment.key === 'total' ? 'primary' : 'secondary'
+                              }`}
+                              aria-hidden="true"
+                            >
+                              &bull;
+                            </span>
+                          ) : null}
+                          <span
+                            className={`reporting-total-segment ${
+                              segment.key === 'total' ? 'primary' : 'secondary'
+                            }`}
+                          >
+                            <strong>{segmentLabel.amount}</strong>
+                            <span>{segmentLabel.label}</span>
+                          </span>
+                        </Fragment>
+                      )
+                    })
+                  ) : (
+                    <span className="reporting-total-empty">No weekly total</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="reporting-v2-view-controls">
+                <label className="reporting-table-preset-select">
+                  <span>Table View</span>
+                  <select
+                    value={selectedReportingDisplayPreset?.id ?? ''}
+                    onChange={(event) => onSelectReportingDisplayPreset(event.target.value)}
+                    disabled={isBusy || isReportingStateSaving}
+                  >
+                    {resolvedReportingState.displayPresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="ghost reporting-toolbar-button"
+                  onClick={() => openReportingDisplayPresetEditor('edit')}
+                  disabled={isBusy || isReportingStateSaving || !selectedReportingDisplayPreset}
+                >
+                  <img className="reporting-preset-button-icon" src={editIcon} alt="" aria-hidden="true" />
+                  Customize
+                </button>
+                <button
+                  type="button"
+                  className="button-soft-primary reporting-toolbar-button"
+                  onClick={() => {
+                    setReportingExportPreviewSheet('weeklyHours')
+                    setIsReportingExportModalOpen(true)
+                  }}
+                  disabled={
+                    isBusy
+                    || isWeeklySummaryLoading
+                    || isSummaryExporting
+                    || isSummaryLayoutSaving
+                    || !weeklySummary
+                  }
+                >
+                  <span className="control-icon download-icon" aria-hidden="true" />
+                  {isSummaryExporting ? 'Exporting...' : 'Export'}
+                </button>
+              </div>
+            </section>
+
+            {weeklySummaryError ? (
+              <p className="mini-calendar-error">{weeklySummaryError}</p>
+            ) : null}
+
+            <ReportingTableView
+              summary={weeklySummary}
+              preset={selectedReportingDisplayPreset}
+              dayIndexes={reportingV2DayIndexes}
+              engagementById={engagementById}
+              activityById={activityById}
+              timelineTotalPreferences={timelineTotalPreferences}
+              displayedWeekTotalBreakdown={displayedSummaryWeekTotalBreakdown}
+              isLoading={isWeeklySummaryLoading}
+              onOpenNotes={onOpenSummaryNotes}
+            />
+          </section>
+        ) : null}
+
           </div>
         </main>
       </div>
@@ -11826,126 +11759,374 @@ function App() {
             }
           }}
         >
-          <div
-            className="reporting-display-preset-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label={
-              reportingDisplayPresetModal.mode === 'create'
-                ? 'Create reporting table preset'
-                : 'Edit reporting table preset'
-            }
-          >
-            <header className="reporting-display-preset-header">
-              <div>
-                <h3>
-                  {reportingDisplayPresetModal.mode === 'create'
-                    ? 'New Table Preset'
-                    : 'Edit Table Preset'}
-                </h3>
-                <p>Adjust the Reporting table. Export columns are managed separately.</p>
-              </div>
-              <button
-                type="button"
-                className="timeline-editor-close"
-                onClick={resetReportingDisplayPresetEditor}
-                aria-label="Close table preset editor"
-                title="Close"
-              >
-                <span className="control-icon close-icon" aria-hidden="true" />
-              </button>
-            </header>
-
-            <div className="reporting-display-preset-form">
-              <label>
-                <span>Preset Name</span>
-                <input
-                  type="text"
-                  value={reportingDisplayPresetDraftName}
-                  onChange={(event) => {
-                    setReportingDisplayPresetDraftName(event.target.value)
-                    setReportingDisplayPresetDraftError(null)
-                  }}
-                  maxLength={REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH}
-                  placeholder="Preset name"
-                />
-              </label>
-
-              <label>
-                <span>Row Label</span>
-                <select
-                  value={reportingDisplayPresetDraft.rowLabelMode}
-                  onChange={(event) =>
-                    setReportingDisplayPresetDraft((previous) => (
-                      previous
-                        ? {
-                          ...previous,
-                          rowLabelMode: event.target.value as ReportingDisplayPreset['rowLabelMode'],
-                        }
-                        : previous
-                    ))
-                  }
+          {activeView === 'reportingV2' ? (
+            <div
+              className="reporting-display-preset-modal reporting-v2-preset-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Customize reporting table view"
+            >
+              <header className="reporting-display-preset-header">
+                <div>
+                  <h3>Customize View</h3>
+                </div>
+                <button
+                  type="button"
+                  className="timeline-editor-close"
+                  onClick={resetReportingDisplayPresetEditor}
+                  aria-label="Close table view editor"
+                  title="Close"
                 >
-                  <option value="combined">Engagement / Activity</option>
-                  <option value="separate">Engagement over Activity</option>
-                  <option value="activityOnly">Activity focused</option>
-                </select>
-              </label>
+                  <span className="control-icon close-icon" aria-hidden="true" />
+                </button>
+              </header>
 
-              <div className="reporting-display-options" role="group" aria-label="Reporting display options">
-                {([
-                  ['showCodes', 'Show codes'],
-                  ['showClient', 'Show client'],
-                  ['showEngagementType', 'Show engagement type'],
-                  ['showEmptyDays', 'Show empty days'],
-                ] as const).map(([key, label]) => (
-                  <label key={key} className="reporting-display-option">
+              <div className="reporting-v2-preset-editor">
+                <section className="reporting-v2-settings-panel" aria-label="View settings">
+                  <label className="reporting-v2-field">
+                    <span>View</span>
+                    <select
+                      value={reportingDisplayPresetModal.presetId ?? reportingDisplayPresetDraft.id}
+                      onChange={(event) => onSelectReportingDisplayEditorPreset(event.target.value)}
+                    >
+                      {resolvedReportingState.displayPresets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="reporting-v2-field">
+                    <span>View Name</span>
                     <input
-                      type="checkbox"
-                      checked={reportingDisplayPresetDraft[key]}
+                      type="text"
+                      value={reportingDisplayPresetDraftName}
+                      onChange={(event) => {
+                        setReportingDisplayPresetDraftName(event.target.value)
+                        setReportingDisplayPresetDraftError(null)
+                      }}
+                      maxLength={REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH}
+                      placeholder="View name"
+                    />
+                  </label>
+
+                  <label className="reporting-v2-field">
+                    <span>Details Format</span>
+                    <select
+                      value={reportingDisplayPresetDraft.rowLabelMode}
                       onChange={(event) =>
                         setReportingDisplayPresetDraft((previous) => (
-                          previous ? { ...previous, [key]: event.target.checked } : previous
+                          previous
+                            ? {
+                              ...previous,
+                              rowLabelMode: event.target.value as ReportingDisplayPreset['rowLabelMode'],
+                            }
+                            : previous
                         ))
                       }
-                    />
-                    <span>{label}</span>
+                    >
+                      <option value="combined">Engagement / Activity</option>
+                      <option value="separate">Engagement over Activity</option>
+                      <option value="activityOnly">Activity focused</option>
+                    </select>
                   </label>
-                ))}
+
+                  <div className="reporting-display-options reporting-v2-option-grid" role="group" aria-label="View options">
+                    {([
+                      ['showCodes', 'Show codes'],
+                      ['showClient', 'Show client'],
+                      ['showEngagementType', 'Show type'],
+                      ['showEmptyDays', 'Show empty days'],
+                    ] as const).map(([key, label]) => (
+                      <label key={key} className="reporting-display-option">
+                        <input
+                          type="checkbox"
+                          checked={reportingDisplayPresetDraft[key]}
+                          onChange={(event) =>
+                            setReportingDisplayPresetDraft((previous) => (
+                              previous ? { ...previous, [key]: event.target.checked } : previous
+                            ))
+                          }
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="reporting-v2-column-panel" aria-label="View columns">
+                  <div className="reporting-v2-column-panel-header">
+                    <h4>Columns</h4>
+                    <button
+                      type="button"
+                      className="button-soft-primary reporting-v2-add-column"
+                      onClick={() => setIsReportingDisplayColumnPickerOpen((previous) => !previous)}
+                    >
+                      <span className="control-icon plus-icon" aria-hidden="true" />
+                      Add Column
+                    </button>
+                  </div>
+
+                  <div className="reporting-v2-column-list">
+                    {reportingDisplayDraftColumns.map((column) => {
+                      const columnLabel = getReportingDisplayColumnLabel(column)
+                      const isRequiredColumn = column.kind !== 'field'
+                      const isDragged = reportingDisplayDraggedColumnId === column.id
+                      const dragStyle = isDragged && reportingDisplayDragPreview?.surface === 'list'
+                        ? ({
+                          transform: `translate3d(0, ${reportingDisplayDragPreview.offsetY}px, 0)`,
+                          zIndex: 6,
+                        } as CSSProperties)
+                        : undefined
+
+                      return (
+                        <div
+                          key={column.id}
+                          data-reporting-display-column-id={column.id}
+                          className={`reporting-v2-column-row ${isDragged ? 'is-dragging' : ''}`}
+                          style={dragStyle}
+                        >
+                          <button
+                            type="button"
+                            className="reporting-v2-column-handle"
+                            aria-label={`Reorder ${columnLabel}`}
+                            onPointerDown={(event) => onStartReportingDisplayColumnPointerDrag(event, column.id)}
+                          >
+                            <ReportingColumnReorderIcon />
+                          </button>
+                          <span>{columnLabel}</span>
+                          {isRequiredColumn ? (
+                            <strong>Required</strong>
+                          ) : (
+                            <button
+                              type="button"
+                              className="summary-layout-editor-remove"
+                              onClick={() => onRemoveReportingDisplayColumn(column.id)}
+                              aria-label={`Remove ${columnLabel}`}
+                              disabled={reportingDisplayDraftFieldCount <= 1}
+                            >
+                              -
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {isReportingDisplayColumnPickerOpen ? (
+                    <div className="reporting-v2-column-picker">
+                      {REPORTING_DISPLAY_FIELD_GROUPS.map((group) => (
+                        <div key={group.label} className="reporting-v2-column-picker-group">
+                          <span>{group.label}</span>
+                          <div>
+                            {group.keys.map((fieldKey) => {
+                              const option = REPORTING_DISPLAY_FIELD_OPTIONS.find((candidate) => candidate.key === fieldKey)
+                              const isEnabled = reportingDisplayDraftFieldKeys.has(fieldKey)
+
+                              return (
+                                <button
+                                  key={fieldKey}
+                                  type="button"
+                                  onClick={() => onAddReportingDisplayColumn(fieldKey)}
+                                  disabled={isEnabled}
+                                >
+                                  {option?.label ?? fieldKey}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className="reporting-v2-preview-panel" aria-label="Table view preview">
+                  <div className="reporting-v2-preview-header">
+                    <h4>Preview</h4>
+                  </div>
+                  <ReportingTableView
+                    summary={weeklySummary}
+                    preset={reportingDisplayPresetDraft}
+                    dayIndexes={reportingDisplayEditorDayIndexes}
+                    engagementById={engagementById}
+                    activityById={activityById}
+                    timelineTotalPreferences={timelineTotalPreferences}
+                    displayedWeekTotalBreakdown={displayedSummaryWeekTotalBreakdown}
+                    isLoading={isWeeklySummaryLoading}
+                    rowsLimit={4}
+                    isPreview
+                    draggedColumnId={reportingDisplayDraggedColumnId}
+                    dragPreview={reportingDisplayDragPreview}
+                    onColumnPointerDown={onStartReportingDisplayColumnPointerDrag}
+                  />
+                </section>
               </div>
+
+              {reportingDisplayPresetDraftError ? (
+                <p className="mini-calendar-error">{reportingDisplayPresetDraftError}</p>
+              ) : null}
+
+              <footer className="reporting-display-preset-actions reporting-v2-preset-actions">
+                <div>
+                  {reportingDisplayPresetModal.mode === 'edit' ? (
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={onDeleteReportingDisplayPreset}
+                      disabled={isReportingStateSaving || resolvedReportingState.displayPresets.length <= 1}
+                    >
+                      <span className="control-icon trash-icon" aria-hidden="true" />
+                      Delete
+                    </button>
+                  ) : null}
+                </div>
+                <div>
+                  <button type="button" className="ghost" onClick={resetReportingDisplayPresetEditor}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={onSaveReportingDisplayPresetAsNew}
+                    disabled={isReportingStateSaving}
+                  >
+                    <span className="control-icon plus-icon" aria-hidden="true" />
+                    Save as New
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onSaveReportingDisplayPreset}
+                    disabled={isReportingStateSaving}
+                  >
+                    <span className="control-icon save-icon" aria-hidden="true" />
+                    {isReportingStateSaving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              </footer>
             </div>
-
-            {reportingDisplayPresetDraftError ? (
-              <p className="mini-calendar-error">{reportingDisplayPresetDraftError}</p>
-            ) : null}
-
-            <footer className="reporting-display-preset-actions">
-              {reportingDisplayPresetModal.mode === 'edit' ? (
+          ) : (
+            <div
+              className="reporting-display-preset-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label={
+                reportingDisplayPresetModal.mode === 'create'
+                  ? 'Create reporting table preset'
+                  : 'Edit reporting table preset'
+              }
+            >
+              <header className="reporting-display-preset-header">
+                <div>
+                  <h3>
+                    {reportingDisplayPresetModal.mode === 'create'
+                      ? 'New Table Preset'
+                      : 'Edit Table Preset'}
+                  </h3>
+                </div>
                 <button
                   type="button"
-                  className="danger"
-                  onClick={onDeleteReportingDisplayPreset}
-                  disabled={isReportingStateSaving || resolvedReportingState.displayPresets.length <= 1}
+                  className="timeline-editor-close"
+                  onClick={resetReportingDisplayPresetEditor}
+                  aria-label="Close table preset editor"
+                  title="Close"
                 >
-                  <span className="control-icon trash-icon" aria-hidden="true" />
-                  Delete Preset
+                  <span className="control-icon close-icon" aria-hidden="true" />
                 </button>
-              ) : <span />}
-              <div>
-                <button type="button" className="ghost" onClick={resetReportingDisplayPresetEditor}>
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={onSaveReportingDisplayPreset}
-                  disabled={isReportingStateSaving}
-                >
-                  <span className="control-icon save-icon" aria-hidden="true" />
-                  {isReportingStateSaving ? 'Saving...' : 'Save Preset'}
-                </button>
+              </header>
+
+              <div className="reporting-display-preset-form">
+                <label>
+                  <span>Preset Name</span>
+                  <input
+                    type="text"
+                    value={reportingDisplayPresetDraftName}
+                    onChange={(event) => {
+                      setReportingDisplayPresetDraftName(event.target.value)
+                      setReportingDisplayPresetDraftError(null)
+                    }}
+                    maxLength={REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH}
+                    placeholder="Preset name"
+                  />
+                </label>
+
+                <label>
+                  <span>Row Label</span>
+                  <select
+                    value={reportingDisplayPresetDraft.rowLabelMode}
+                    onChange={(event) =>
+                      setReportingDisplayPresetDraft((previous) => (
+                        previous
+                          ? {
+                            ...previous,
+                            rowLabelMode: event.target.value as ReportingDisplayPreset['rowLabelMode'],
+                          }
+                          : previous
+                      ))
+                    }
+                  >
+                    <option value="combined">Engagement / Activity</option>
+                    <option value="separate">Engagement over Activity</option>
+                    <option value="activityOnly">Activity focused</option>
+                  </select>
+                </label>
+
+                <div className="reporting-display-options" role="group" aria-label="Reporting display options">
+                  {([
+                    ['showCodes', 'Show codes'],
+                    ['showClient', 'Show client'],
+                    ['showEngagementType', 'Show engagement type'],
+                    ['showEmptyDays', 'Show empty days'],
+                  ] as const).map(([key, label]) => (
+                    <label key={key} className="reporting-display-option">
+                      <input
+                        type="checkbox"
+                        checked={reportingDisplayPresetDraft[key]}
+                        onChange={(event) =>
+                          setReportingDisplayPresetDraft((previous) => (
+                            previous ? { ...previous, [key]: event.target.checked } : previous
+                          ))
+                        }
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
               </div>
-            </footer>
-          </div>
+
+              {reportingDisplayPresetDraftError ? (
+                <p className="mini-calendar-error">{reportingDisplayPresetDraftError}</p>
+              ) : null}
+
+              <footer className="reporting-display-preset-actions">
+                {reportingDisplayPresetModal.mode === 'edit' ? (
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={onDeleteReportingDisplayPreset}
+                    disabled={isReportingStateSaving || resolvedReportingState.displayPresets.length <= 1}
+                  >
+                    <span className="control-icon trash-icon" aria-hidden="true" />
+                    Delete Preset
+                  </button>
+                ) : <span />}
+                <div>
+                  <button type="button" className="ghost" onClick={resetReportingDisplayPresetEditor}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onSaveReportingDisplayPreset}
+                    disabled={isReportingStateSaving}
+                  >
+                    <span className="control-icon save-icon" aria-hidden="true" />
+                    {isReportingStateSaving ? 'Saving...' : 'Save Preset'}
+                  </button>
+                </div>
+              </footer>
+            </div>
+          )}
         </div>,
         document.body,
       ) : null}
@@ -12590,6 +12771,21 @@ function generateSubmissionQueueId(): string {
   return `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+function isActiveSubmissionQueueItem(item: SubmissionQueueItem): boolean {
+  return item.state === 'pending' || item.state === 'running'
+}
+
+function isFinishedSubmissionQueueItem(item: SubmissionQueueItem): boolean {
+  return item.state === 'success' || item.state === 'error'
+}
+
+function formatLlmSubmissionStatusMessage(
+  count: number,
+  status: 'processing' | 'created' | 'failed',
+): string {
+  return `${count} ${count === 1 ? 'entry' : 'entries'} ${status}.`
+}
+
 function generateCalendarCandidateId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID()
@@ -12888,107 +13084,6 @@ function blobToBase64(blob: Blob): Promise<string> {
   })
 }
 
-function formatSubmissionQueueStateLabel(state: SubmissionQueueItemState): string {
-  if (state === 'pending') {
-    return 'Queued'
-  }
-
-  if (state === 'running') {
-    return 'Processing'
-  }
-
-  if (state === 'success') {
-    return 'Completed'
-  }
-
-  return 'Failed'
-}
-
-function formatSubmissionQueueSuccessMessage(createdEntryCount: number, completedAt: Date): string {
-  return `Added ${createdEntryCount} new entr${createdEntryCount === 1 ? 'y' : 'ies'} on ${formatSubmissionQueueOutcomeTimestamp(completedAt)}.`
-}
-
-function formatSubmissionQueueOutcomeTimestamp(value: Date): string {
-  const date = new Intl.DateTimeFormat('en-US', {
-    month: 'numeric',
-    day: 'numeric',
-    year: 'numeric',
-  }).format(value)
-  const showMinutes = value.getMinutes() !== 0
-  const time = new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: showMinutes ? '2-digit' : undefined,
-  }).format(value)
-  return `${date} at ${time}`
-}
-
-function formatSubmissionQueueTimestamp(timestampMs: number): string {
-  return formatSubmissionQueueOutcomeTimestamp(new Date(timestampMs))
-}
-
-function formatSubmissionQueueDuration(durationMs: number): string {
-  const totalSeconds = Math.max(0, Math.round(durationMs / 1000))
-  if (totalSeconds < 60) {
-    return `${totalSeconds}s`
-  }
-
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
-}
-
-function formatHistorySourceLabel(value: string): string {
-  if (value === 'manual') {
-    return 'Manual'
-  }
-
-  if (value === 'voice') {
-    return 'Voice'
-  }
-
-  if (value === 'calendar') {
-    return 'Calendar'
-  }
-
-  if (value === 'text') {
-    return 'AI Text'
-  }
-
-  if (value === 'ai') {
-    return 'AI'
-  }
-
-  return value
-    .split(/[_\s-]+/)
-    .filter(Boolean)
-    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
-    .join(' ') || 'Unknown'
-}
-
-function formatHistoryTimestamp(timestampSeconds: number): string {
-  return formatSubmissionQueueOutcomeTimestamp(new Date(timestampSeconds * 1000))
-}
-
-function formatHistoryEntryTime(entry: TimelineEntry): string {
-  return `${formatMonthDay(entry.date)} ${minuteToLabel(entry.startMinute)} - ${minuteToLabel(entry.endMinute)}`
-}
-
-function formatHistoryEntryTitle(entry: TimelineEntry): string {
-  if (entry.activityName || entry.activityCode) {
-    return formatEntityDisplayLabel(entry.activityName, entry.activityCode)
-  }
-
-  if (entry.engagementName || entry.engagementCode) {
-    return formatEntityDisplayLabel(entry.engagementName, entry.engagementCode)
-  }
-
-  return 'Uncategorized entry'
-}
-
-function formatHistoryConfidence(confidence: number): string {
-  return `${Math.round(confidence * 100)}%`
-}
-
 function extractErrorMessage(error: unknown): string {
   if (isAppCommandError(error)) {
     return error.message
@@ -13149,16 +13244,6 @@ function formatTimelineWeekRangeLabel(startDate: string, endDate: string): Timel
     endYear,
     isSameYear: startYear === endYear,
   }
-}
-
-function formatTimelineWeekRange(startDate: string, endDate: string): string {
-  const label = formatTimelineWeekRangeLabel(startDate, endDate)
-
-  if (label.isSameYear) {
-    return `${label.startMonthDay} - ${label.endMonthDay}, ${label.endYear}`
-  }
-
-  return `${label.startMonthDay}, ${label.startYear} - ${label.endMonthDay}, ${label.endYear}`
 }
 
 function formatWeekTimelineDayLabel(date: string): string {
@@ -14797,5 +14882,616 @@ function buildNextSummaryLayoutPresetName(
   return `${trimmedBaseName} ${suffix}`
 }
 
-export default App
+function buildComparableReportingDisplayPreset(
+  preset: ReportingDisplayPreset,
+  name: string,
+) {
+  return {
+    name,
+    density: preset.density,
+    rowLabelMode: preset.rowLabelMode,
+    showCodes: preset.showCodes,
+    showClient: preset.showClient,
+    showEngagementType: preset.showEngagementType,
+    showEmptyDays: preset.showEmptyDays,
+    columns: resolveReportingDisplayColumns(preset),
+  }
+}
 
+function areReportingDisplayPresetDraftsEqual(
+  savedPreset: ReportingDisplayPreset,
+  savedName: string,
+  draftPreset: ReportingDisplayPreset,
+  draftName: string,
+): boolean {
+  return JSON.stringify(buildComparableReportingDisplayPreset(savedPreset, savedName))
+    === JSON.stringify(buildComparableReportingDisplayPreset(draftPreset, draftName))
+}
+
+function collectReportingDisplayColumnRects(): Map<string, DOMRect> {
+  const rects = new Map<string, DOMRect>()
+  if (typeof document === 'undefined') {
+    return rects
+  }
+
+  const columnCounts = new Map<string, number>()
+  document
+    .querySelectorAll<HTMLElement>('.reporting-v2-preset-modal [data-reporting-display-column-id]')
+    .forEach((element) => {
+      const columnId = element.dataset.reportingDisplayColumnId
+      if (!columnId) {
+        return
+      }
+
+      const surface = getReportingDisplayElementSurface(element)
+      const columnKey = `${surface}:${columnId}`
+      const count = columnCounts.get(columnKey) ?? 0
+      columnCounts.set(columnKey, count + 1)
+      rects.set(`${columnKey}:${count}`, element.getBoundingClientRect())
+    })
+
+  return rects
+}
+
+function animateReportingDisplayColumnRects(previousRects: Map<string, DOMRect>): void {
+  if (previousRects.size === 0 || typeof window === 'undefined' || typeof document === 'undefined') {
+    return
+  }
+
+  const columnCounts = new Map<string, number>()
+  document
+    .querySelectorAll<HTMLElement>('.reporting-v2-preset-modal [data-reporting-display-column-id]')
+    .forEach((element) => {
+      const columnId = element.dataset.reportingDisplayColumnId
+      if (!columnId) {
+        return
+      }
+
+      if (element.classList.contains('is-dragging')) {
+        return
+      }
+
+      const surface = getReportingDisplayElementSurface(element)
+      const columnKey = `${surface}:${columnId}`
+      const count = columnCounts.get(columnKey) ?? 0
+      columnCounts.set(columnKey, count + 1)
+      const previousRect = previousRects.get(`${columnKey}:${count}`)
+      if (!previousRect) {
+        return
+      }
+
+      const nextRect = element.getBoundingClientRect()
+      const deltaX = previousRect.left - nextRect.left
+      const deltaY = previousRect.top - nextRect.top
+      if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) {
+        return
+      }
+
+      element.style.transition = 'none'
+      element.style.transform = `translate(${deltaX}px, ${deltaY}px)`
+      element.style.zIndex = '4'
+
+      window.requestAnimationFrame(() => {
+        element.style.transition = 'transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)'
+        element.style.transform = ''
+        window.setTimeout(() => {
+          element.style.transition = ''
+          element.style.transform = ''
+          element.style.zIndex = ''
+        }, 210)
+      })
+    })
+}
+
+function getReportingDisplayElementSurface(element: HTMLElement): ReportingDisplayDragSurface {
+  return element.classList.contains('reporting-v2-column-row') ? 'list' : 'table'
+}
+
+function getFirstReportingDisplayColumnElement(
+  columnId: string,
+  surface: ReportingDisplayDragSurface,
+): HTMLElement | null {
+  if (typeof document === 'undefined') {
+    return null
+  }
+
+  const elements = document.querySelectorAll<HTMLElement>(
+    '.reporting-v2-preset-modal [data-reporting-display-column-id]',
+  )
+  for (const element of elements) {
+    if (
+      element.dataset.reportingDisplayColumnId === columnId
+      && getReportingDisplayElementSurface(element) === surface
+    ) {
+      return element
+    }
+  }
+
+  return null
+}
+
+interface ReportingTableViewProps {
+  summary: TimelineWeeklySummary | null
+  preset: ReportingDisplayPreset | undefined
+  dayIndexes: number[]
+  engagementById: Map<string, Engagement>
+  activityById: Map<string, Activity>
+  timelineTotalPreferences: TimelineTotalPreferences
+  displayedWeekTotalBreakdown: TimelineTotalBreakdown | null
+  isLoading?: boolean
+  rowsLimit?: number
+  isPreview?: boolean
+  draggedColumnId?: string | null
+  dragPreview?: ReportingDisplayDragPreview | null
+  onOpenNotes?: (rowIndex: number, dayIndex: number) => void
+  onColumnPointerDown?: (event: ReactPointerEvent<HTMLElement>, columnId: string) => void
+}
+
+function ReportingColumnReorderIcon() {
+  return (
+    <svg
+      className="reporting-v2-reorder-icon"
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        fillRule="evenodd"
+        d="M1 11.5a.5.5 0 0 0 .5.5h11.793l-3.147 3.146a.5.5 0 0 0 .708.708l4-4a.5.5 0 0 0 0-.708l-4-4a.5.5 0 0 0-.708.708L13.293 11H1.5a.5.5 0 0 0-.5.5m14-7a.5.5 0 0 1-.5.5H2.707l3.147 3.146a.5.5 0 1 1-.708.708l-4-4a.5.5 0 0 1 0-.708l4-4a.5.5 0 1 1 .708.708L2.707 4H14.5a.5.5 0 0 1 .5.5"
+      />
+    </svg>
+  )
+}
+
+function ReportingTableView({
+  summary,
+  preset,
+  dayIndexes,
+  engagementById,
+  activityById,
+  timelineTotalPreferences,
+  displayedWeekTotalBreakdown,
+  isLoading = false,
+  rowsLimit,
+  isPreview = false,
+  draggedColumnId = null,
+  dragPreview = null,
+  onOpenNotes,
+  onColumnPointerDown,
+}: ReportingTableViewProps) {
+  const columns = resolveReportingDisplayColumns(preset)
+  const visibleRows = rowsLimit === undefined
+    ? summary?.rows ?? []
+    : (summary?.rows ?? []).slice(0, rowsLimit)
+  const firstFieldColumnId = columns.find((column) => column.kind === 'field')?.id ?? null
+  const gridColumns = buildReportingDisplayGridColumns(columns, dayIndexes)
+  const canReorderColumns = Boolean(onColumnPointerDown)
+  const getColumnStateClass = (columnId: string): string => [
+    draggedColumnId === columnId ? 'is-dragging' : '',
+  ].filter(Boolean).join(' ')
+  const getColumnDragStyle = (columnId: string): CSSProperties | undefined => {
+    if (
+      !dragPreview
+      || dragPreview.surface !== 'table'
+      || dragPreview.columnId !== columnId
+    ) {
+      return undefined
+    }
+
+    return {
+      transform: `translate3d(${dragPreview.offsetX}px, 0, 0)`,
+      zIndex: 6,
+    }
+  }
+
+  const renderDragHandle = (column: ReportingDisplayColumn, label: string) => (
+    onColumnPointerDown ? (
+      <button
+        type="button"
+        className="reporting-v2-column-handle"
+        aria-label={`Reorder ${label}`}
+        onPointerDown={(event) => onColumnPointerDown(event, column.id)}
+      >
+        <ReportingColumnReorderIcon />
+      </button>
+    ) : null
+  )
+
+  return (
+    <div
+      className={`reporting-v2-table-wrap ${isPreview ? 'is-preview' : ''}`}
+      aria-busy={isLoading}
+    >
+      {isLoading ? (
+        <p className="reporting-empty-state">Loading weekly summary...</p>
+      ) : summary ? (
+        <div
+          className="reporting-v2-table"
+          role="table"
+          aria-label={isPreview ? 'Reporting table view preview' : 'Reporting table view'}
+          style={{ '--reporting-v2-grid-columns': gridColumns } as CSSProperties}
+        >
+          <div className="reporting-v2-row reporting-v2-head" role="row">
+            {columns.map((column) => {
+              const columnStateClass = getColumnStateClass(column.id)
+              const columnDragStyle = getColumnDragStyle(column.id)
+
+              if (column.kind === 'dayGroup') {
+                return dayIndexes.map((dayIndex) => {
+                  const headerLabel = SUMMARY_DAY_NAMES[dayIndex]?.slice(0, 3) ?? 'Day'
+                  return (
+                    <span
+                      key={`${column.id}-${dayIndex}`}
+                      data-reporting-display-column-id={column.id}
+                      className={`reporting-v2-header-cell reporting-v2-day-header ${canReorderColumns ? 'has-handle' : ''} ${columnStateClass}`}
+                      role="columnheader"
+                      style={columnDragStyle}
+                    >
+                      {renderDragHandle(column, 'days')}
+                      <span>{headerLabel}</span>
+                      <small>{formatMonthDay(summary.days[dayIndex]?.date ?? summary.weekStartDate)}</small>
+                    </span>
+                  )
+                })
+              }
+
+              const label = getReportingDisplayColumnLabel(column)
+              return (
+                <span
+                  key={column.id}
+                  data-reporting-display-column-id={column.id}
+                  className={`reporting-v2-header-cell ${canReorderColumns ? 'has-handle' : ''} ${columnStateClass}`}
+                  role="columnheader"
+                  style={columnDragStyle}
+                >
+                  {renderDragHandle(column, label)}
+                  <span>{label}</span>
+                </span>
+              )
+            })}
+          </div>
+
+          <div className="reporting-v2-body">
+            {visibleRows.length === 0 ? (
+              <p className="reporting-empty-state">No time entries for this week.</p>
+            ) : (
+              visibleRows.map((row, rowIndex) => {
+                const rowKey = getSummaryRowKey(row, rowIndex)
+                const isExcludedFromReportingTotal =
+                  isReportingRowExcludedFromPrimaryTotal(row, timelineTotalPreferences)
+
+                return (
+                  <div
+                    key={rowKey}
+                    className={`reporting-v2-row ${row.isUncategorized ? 'is-uncategorized' : ''}`}
+                    role="row"
+                  >
+                    {columns.map((column) => {
+                      const columnDragStyle = getColumnDragStyle(column.id)
+
+                      if (column.kind === 'dayGroup') {
+                        return dayIndexes.map((dayIndex) => {
+                          const cell = row.cells[dayIndex]
+                          const hasHours = Boolean(cell && cell.totalMinutes > 0)
+                          const noteLabel = `Open notes for ${formatEntityDisplayLabel(row.activityName, row.activityCode)} on ${SUMMARY_DAY_NAMES[dayIndex]}`
+                          const columnStateClass = getColumnStateClass(column.id)
+
+                          return (
+                            <span
+                              key={`${column.id}-${rowKey}-${dayIndex}`}
+                              data-reporting-display-column-id={column.id}
+                              className={`reporting-v2-cell reporting-v2-day-cell ${columnStateClass}`}
+                              role="cell"
+                              style={columnDragStyle}
+                            >
+                              {hasHours && cell ? (
+                                onOpenNotes ? (
+                                  <button
+                                    type="button"
+                                    className={`reporting-hours-button ${cell.notes.length > 0 ? 'has-notes' : ''}`}
+                                    onClick={() => onOpenNotes(rowIndex, dayIndex)}
+                                    aria-label={noteLabel}
+                                  >
+                                    {formatMinutesAsHours(cell.totalMinutes)}
+                                    {cell.notes.length > 0 ? (
+                                      <span className="reporting-note-mark" aria-hidden="true" />
+                                    ) : null}
+                                  </button>
+                                ) : (
+                                  <span className={`reporting-hours-button is-static ${cell.notes.length > 0 ? 'has-notes' : ''}`}>
+                                    {formatMinutesAsHours(cell.totalMinutes)}
+                                    {cell.notes.length > 0 ? (
+                                      <span className="reporting-note-mark" aria-hidden="true" />
+                                    ) : null}
+                                  </span>
+                                )
+                              ) : (
+                                <span className="reporting-zero">-</span>
+                              )}
+                            </span>
+                          )
+                        })
+                      }
+
+                      if (column.kind === 'rowTotal') {
+                        const columnStateClass = getColumnStateClass(column.id)
+                        return (
+                          <strong
+                            key={`${column.id}-${rowKey}`}
+                            data-reporting-display-column-id={column.id}
+                            className={`reporting-v2-cell reporting-v2-total-cell ${columnStateClass}`}
+                            role="cell"
+                            style={columnDragStyle}
+                          >
+                            {isExcludedFromReportingTotal
+                              ? 'Excluded'
+                              : formatMinutesAsHours(row.rowTotalMinutes)}
+                          </strong>
+                        )
+                      }
+
+                      return (
+                        <span
+                          key={`${column.id}-${rowKey}`}
+                          data-reporting-display-column-id={column.id}
+                          className={`reporting-v2-cell reporting-v2-field-cell ${getReportingDisplayColumnWrapClass(column)} ${getColumnStateClass(column.id)}`}
+                          role="cell"
+                          style={columnDragStyle}
+                        >
+                          {renderReportingDisplayFieldCell(
+                            column.fieldKey,
+                            row,
+                            preset,
+                            engagementById,
+                            activityById,
+                          )}
+                        </span>
+                      )
+                    })}
+                  </div>
+                )
+              })
+            )}
+          </div>
+
+          <div className="reporting-v2-row reporting-v2-foot" role="row">
+            {columns.map((column) => {
+              const columnDragStyle = getColumnDragStyle(column.id)
+
+              if (column.kind === 'dayGroup') {
+                return dayIndexes.map((dayIndex) => (
+                  <span
+                    key={`${column.id}-total-${dayIndex}`}
+                    data-reporting-display-column-id={column.id}
+                    className={getColumnStateClass(column.id)}
+                    role="cell"
+                    style={columnDragStyle}
+                  >
+                    {formatMinutesAsHours(
+                      finalizeTimelineTotalBreakdown(
+                        summary.dayTotalBreakdowns[dayIndex],
+                        timelineTotalPreferences,
+                      ).primaryMinutes,
+                    )}
+                  </span>
+                ))
+              }
+
+              if (column.kind === 'rowTotal') {
+                return (
+                  <strong
+                    key={`${column.id}-week-total`}
+                    data-reporting-display-column-id={column.id}
+                    className={getColumnStateClass(column.id)}
+                    role="cell"
+                    style={columnDragStyle}
+                  >
+                    {displayedWeekTotalBreakdown
+                      ? formatMinutesAsHours(displayedWeekTotalBreakdown.primaryMinutes)
+                      : formatMinutesAsHours(summary.weekTotalMinutes)}
+                  </strong>
+                )
+              }
+
+              return (
+                <strong
+                  key={`${column.id}-footer`}
+                  data-reporting-display-column-id={column.id}
+                  className={getColumnStateClass(column.id)}
+                  role="cell"
+                  style={columnDragStyle}
+                >
+                  {column.id === firstFieldColumnId ? 'Day Totals' : ''}
+                </strong>
+              )
+            })}
+          </div>
+        </div>
+      ) : (
+        <p className="reporting-empty-state">No summary data available.</p>
+      )}
+    </div>
+  )
+}
+
+function resolveReportingDisplayColumns(
+  preset: ReportingDisplayPreset | null | undefined,
+): ReportingDisplayColumn[] {
+  const columns = preset?.columns?.length ? preset.columns : buildDefaultReportingDisplayColumns()
+  return columns.map((column) => ({ ...column }))
+}
+
+function buildReportingDisplayDayIndexes(
+  summary: TimelineWeeklySummary | null | undefined,
+  preset: ReportingDisplayPreset | null | undefined,
+): number[] {
+  if (!summary) {
+    return []
+  }
+
+  const allDayIndexes = summary.days.map((_, dayIndex) => dayIndex)
+  if (preset?.showEmptyDays ?? true) {
+    return allDayIndexes
+  }
+
+  const visibleDayIndexes = allDayIndexes.filter((dayIndex) => (
+    summary.dayTotalBreakdowns[dayIndex]?.primaryMinutes
+    ?? summary.dayTotalMinutes[dayIndex]
+    ?? 0
+  ) > 0)
+
+  return visibleDayIndexes.length > 0 ? visibleDayIndexes : allDayIndexes
+}
+
+function buildReportingDisplayGridColumns(
+  columns: ReportingDisplayColumn[],
+  dayIndexes: number[],
+): string {
+  return columns.flatMap((column) => {
+    if (column.kind === 'dayGroup') {
+      return dayIndexes.map(() => 'minmax(0, 0.38fr)')
+    }
+
+    if (column.kind === 'rowTotal') {
+      return ['minmax(0, 0.38fr)']
+    }
+
+    switch (column.fieldKey) {
+      case 'details':
+        return ['minmax(0, 1.55fr)']
+      case 'engagement':
+      case 'activity':
+        return ['minmax(0, 0.92fr)']
+      case 'client':
+        return ['minmax(0, 0.78fr)']
+      case 'engagementCode':
+      case 'activityCode':
+      case 'engagementType':
+        return ['minmax(0, 0.58fr)']
+      default:
+        return ['minmax(0, 0.88fr)']
+    }
+  }).join(' ')
+}
+
+function getReportingDisplayColumnLabel(column: ReportingDisplayColumn): string {
+  if (column.kind === 'dayGroup') {
+    return 'Days'
+  }
+
+  if (column.kind === 'rowTotal') {
+    return 'Total'
+  }
+
+  return getReportingDisplayFieldOption(column.fieldKey)?.label ?? 'Field'
+}
+
+function getReportingDisplayColumnWrapClass(column: ReportingDisplayColumn): string {
+  if (column.kind !== 'field') {
+    return ''
+  }
+
+  return getReportingDisplayFieldOption(column.fieldKey)?.wraps ? 'wraps' : ''
+}
+
+function getReportingDisplayColumnDropTarget(
+  clientX: number,
+  clientY: number,
+): { columnId: string; insertAfterTarget: boolean } | null {
+  const targetElement = document.elementFromPoint(clientX, clientY)
+  const targetColumnElement = targetElement
+    ?.closest<HTMLElement>('[data-reporting-display-column-id]')
+  const columnId = targetColumnElement?.dataset.reportingDisplayColumnId
+  if (!targetColumnElement || !columnId) {
+    return null
+  }
+
+  const targetRect = targetColumnElement.getBoundingClientRect()
+  const isVerticalTarget = targetColumnElement.classList.contains('reporting-v2-column-row')
+  const insertAfterTarget = isVerticalTarget
+    ? clientY > targetRect.top + (targetRect.height / 2)
+    : clientX > targetRect.left + (targetRect.width / 2)
+
+  return {
+    columnId,
+    insertAfterTarget,
+  }
+}
+
+function moveReportingDisplayColumn(
+  columns: ReportingDisplayColumn[],
+  sourceColumnId: string,
+  targetColumnId: string,
+  insertAfterTarget: boolean,
+): ReportingDisplayColumn[] {
+  const sourceIndex = columns.findIndex((column) => column.id === sourceColumnId)
+  const targetIndex = columns.findIndex((column) => column.id === targetColumnId)
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+    return columns
+  }
+
+  const sourceColumn = columns[sourceIndex]
+  const next = columns.filter((column) => column.id !== sourceColumnId)
+  const nextTargetIndex = next.findIndex((column) => column.id === targetColumnId)
+  if (nextTargetIndex < 0) {
+    return columns
+  }
+
+  const insertionIndex = nextTargetIndex + (insertAfterTarget ? 1 : 0)
+  return [
+    ...next.slice(0, insertionIndex),
+    sourceColumn,
+    ...next.slice(insertionIndex),
+  ]
+}
+
+function renderReportingDisplayFieldCell(
+  fieldKey: ReportingDisplayFieldKey,
+  row: TimelineWeeklySummary['rows'][number],
+  preset: ReportingDisplayPreset | undefined,
+  engagementById: Map<string, Engagement>,
+  activityById: Map<string, Activity>,
+) {
+  const showCodes = preset?.showCodes ?? true
+  const engagement = row.engagementId ? engagementById.get(row.engagementId) : null
+  const activity = row.activityId ? activityById.get(row.activityId) : null
+
+  switch (fieldKey) {
+    case 'details': {
+      const rowMeta = formatReportingRowMeta(row, preset)
+      return (
+        <span className="reporting-v2-details-cell">
+          <strong>{formatReportingRowPrimary(row, preset)}</strong>
+          <span>{formatReportingRowSecondary(row, preset)}</span>
+          {rowMeta.length > 0 ? <small>{rowMeta.join(' | ')}</small> : null}
+        </span>
+      )
+    }
+    case 'engagement':
+      return formatReportingEntityLabel(row.engagementName, row.engagementCode, showCodes, 'Uncategorized')
+    case 'activity':
+      return formatReportingEntityLabel(row.activityName, row.activityCode, showCodes, 'Uncategorized')
+    case 'client':
+      return normalizeDisplayText(row.clientName) ?? '-'
+    case 'engagementType':
+      return row.engagementType ? formatEngagementTypeLabel(row.engagementType) : '-'
+    case 'engagementCode':
+      return formatSummaryCodeValue(row.engagementCode, row.isUncategorized)
+    case 'activityCode':
+      return formatSummaryCodeValue(row.activityCode, row.isUncategorized)
+    case 'engagementTags':
+      return engagement && engagement.tags.length > 0 ? joinTags(engagement.tags) : '-'
+    case 'activityTags':
+      return activity && activity.tags.length > 0 ? joinTags(activity.tags) : '-'
+    case 'engagementUsage':
+      return normalizeDisplayText(engagement?.describeWhenToUse) ?? '-'
+    case 'activityUsage':
+      return normalizeDisplayText(activity?.describeWhenToUse) ?? '-'
+    default:
+      return '-'
+  }
+}
+
+export default App

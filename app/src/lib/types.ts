@@ -302,6 +302,33 @@ export interface SummaryLayoutState {
 export type ReportingViewMode = 'table' | 'activityDetail'
 export type ReportingDisplayDensity = 'compact' | 'comfortable'
 export type ReportingRowLabelMode = 'combined' | 'separate' | 'activityOnly'
+export type ReportingDisplayFieldKey =
+  | 'details'
+  | 'engagement'
+  | 'activity'
+  | 'client'
+  | 'engagementType'
+  | 'engagementCode'
+  | 'activityCode'
+  | 'engagementTags'
+  | 'activityTags'
+  | 'engagementUsage'
+  | 'activityUsage'
+
+export type ReportingDisplayColumn =
+  | {
+    kind: 'field'
+    id: string
+    fieldKey: ReportingDisplayFieldKey
+  }
+  | {
+    kind: 'dayGroup'
+    id: string
+  }
+  | {
+    kind: 'rowTotal'
+    id: string
+  }
 
 export interface ReportingDisplayPreset {
   id: string
@@ -312,6 +339,7 @@ export interface ReportingDisplayPreset {
   showClient: boolean
   showEngagementType: boolean
   showEmptyDays: boolean
+  columns: ReportingDisplayColumn[]
 }
 
 export interface ReportingState {
@@ -362,32 +390,6 @@ export interface QuickAddPreferences {
   hiddenEngagementIds: string[]
   activityOrder: Record<string, string[]>
   hiddenActivityIds: string[]
-}
-
-export interface HistoryListResult {
-  weekStartDate: string
-  weekEndDate: string
-  submissions: HistorySubmission[]
-  entries: TimelineEntry[]
-}
-
-export interface HistorySubmission {
-  id: string
-  rawText: string
-  captureSource: string
-  status: string
-  messageTimestamp: number
-  createdAt: number
-  interpretedEntryCount: number
-  uniqueEntryCount: number
-  savedEntryCount: number
-  truncatedEntryCount: number
-  containsMultipleEvents: boolean
-  confidence: number
-  modelUsed: OpenAiModelId | null
-  modelUsedLabel: string | null
-  transcriptionModelUsed: TranscriptionModelId | null
-  transcriptionModelUsedLabel: string | null
 }
 
 export interface SettingsStatus {

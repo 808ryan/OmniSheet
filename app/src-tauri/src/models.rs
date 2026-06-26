@@ -746,6 +746,53 @@ pub enum ReportingRowLabelMode {
     ActivityOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReportingDisplayFieldKey {
+    Details,
+    Engagement,
+    Activity,
+    Client,
+    EngagementType,
+    EngagementCode,
+    ActivityCode,
+    EngagementTags,
+    ActivityTags,
+    EngagementUsage,
+    ActivityUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ReportingDisplayColumn {
+    Field {
+        id: String,
+        #[serde(rename = "fieldKey", alias = "field_key")]
+        field_key: ReportingDisplayFieldKey,
+    },
+    DayGroup {
+        id: String,
+    },
+    RowTotal {
+        id: String,
+    },
+}
+
+pub fn default_reporting_display_columns() -> Vec<ReportingDisplayColumn> {
+    vec![
+        ReportingDisplayColumn::Field {
+            id: "reporting-field-details".to_string(),
+            field_key: ReportingDisplayFieldKey::Details,
+        },
+        ReportingDisplayColumn::DayGroup {
+            id: "reporting-days".to_string(),
+        },
+        ReportingDisplayColumn::RowTotal {
+            id: "reporting-row-total".to_string(),
+        },
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportingDisplayPreset {
@@ -757,6 +804,8 @@ pub struct ReportingDisplayPreset {
     pub show_client: bool,
     pub show_engagement_type: bool,
     pub show_empty_days: bool,
+    #[serde(default = "default_reporting_display_columns")]
+    pub columns: Vec<ReportingDisplayColumn>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -825,36 +874,6 @@ pub struct QuickAddSuggestionResult {
 #[serde(rename_all = "camelCase")]
 pub struct IdResult {
     pub id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryListResult {
-    pub week_start_date: String,
-    pub week_end_date: String,
-    pub submissions: Vec<HistorySubmission>,
-    pub entries: Vec<TimelineEntry>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistorySubmission {
-    pub id: String,
-    pub raw_text: String,
-    pub capture_source: String,
-    pub status: String,
-    pub message_timestamp: i64,
-    pub created_at: i64,
-    pub interpreted_entry_count: i64,
-    pub unique_entry_count: i64,
-    pub saved_entry_count: i64,
-    pub truncated_entry_count: i64,
-    pub contains_multiple_events: bool,
-    pub confidence: f64,
-    pub model_used: Option<OpenAiModelId>,
-    pub model_used_label: Option<String>,
-    pub transcription_model_used: Option<TranscriptionModelId>,
-    pub transcription_model_used_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
