@@ -1533,6 +1533,19 @@ function App() {
     }
     return values
   }, [engagements])
+  const optimisticEntryDraftPreview = useMemo(
+    () => (
+      selectedEntry && entryDraft && selectedEntry.id === entryDraft.id
+        ? buildOptimisticTimelineEntryPreview(
+          selectedEntry,
+          entryDraft,
+          engagementById,
+          activityById,
+        )
+        : null
+    ),
+    [activityById, engagementById, entryDraft, selectedEntry],
+  )
   const quickAddPreferences = useMemo(
     () => sanitizeQuickAddPreferences(settingsStatus?.quickAddPreferences, engagements),
     [engagements, settingsStatus?.quickAddPreferences],
@@ -2146,9 +2159,17 @@ function App() {
     ),
     [timelineEntries, timelinePositioningPreferences, timelineWindow],
   )
+  const optimisticTimelineEntries = useMemo(
+    () => applyOptimisticTimelineEntryPreview(
+      timelineEntries,
+      optimisticEntryDraftPreview,
+      (entry) => entry.date === selectedDate,
+    ),
+    [optimisticEntryDraftPreview, selectedDate, timelineEntries],
+  )
   const timelineEntriesForLayout = useMemo(
-    () => applyDragPreviewToTimelineEntries(timelineEntries, timelineDragState),
-    [timelineDragState, timelineEntries],
+    () => applyDragPreviewToTimelineEntries(optimisticTimelineEntries, timelineDragState),
+    [optimisticTimelineEntries, timelineDragState],
   )
   const timelineDayTotalBreakdown = useMemo(
     () => buildTimelineTotalBreakdown(
@@ -2198,9 +2219,21 @@ function App() {
     () => weekTimeline?.entries ?? [],
     [weekTimeline],
   )
+  const weekTimelineDateSet = useMemo(
+    () => new Set(weekTimelineDays.map((day) => day.date)),
+    [weekTimelineDays],
+  )
+  const optimisticWeekTimelineEntries = useMemo(
+    () => applyOptimisticTimelineEntryPreview(
+      weekTimelineEntries,
+      optimisticEntryDraftPreview,
+      (entry) => weekTimelineDateSet.has(entry.date),
+    ),
+    [optimisticEntryDraftPreview, weekTimelineDateSet, weekTimelineEntries],
+  )
   const weekTimelineEntriesForLayout = useMemo(
-    () => applyDragPreviewToTimelineEntries(weekTimelineEntries, timelineDragState),
-    [timelineDragState, weekTimelineEntries],
+    () => applyDragPreviewToTimelineEntries(optimisticWeekTimelineEntries, timelineDragState),
+    [optimisticWeekTimelineEntries, timelineDragState],
   )
   const weekTimelineDayTotalBreakdowns = useMemo(
     () => buildTimelineDayTotalBreakdowns(
@@ -9443,7 +9476,7 @@ function App() {
                               )}</span>
                             </div>
                             <div className="quick-add-grid">
-                              {group.activities.map(({ activity, engagement, usageCount, lastUsedAt }) => {
+                              {group.activities.map(({ activity, engagement }) => {
                                 const activityColor = activity.colorHex ?? engagementColor
                                 const isDraggingActivity =
                                   quickBlockDragState?.activityId === activity.id
@@ -9479,11 +9512,7 @@ function App() {
                                     }}
                                     disabled={isBusy}
                                     aria-label={`Add ${fullActivityLabel} for ${formatQuickBlockDuration(durationMinutes)}`}
-                                    title={
-                                      usageCount > 0 && lastUsedAt
-                                        ? `${fullActivityLabel} - used ${usageCount} time${usageCount === 1 ? '' : 's'}`
-                                        : fullActivityLabel
-                                    }
+                                    title={fullActivityLabel}
                                     style={{
                                       '--quick-add-color': activityColor,
                                       '--quick-add-duration-progress': `${quickBlockDurationProgress(durationMinutes)}%`,
@@ -13223,6 +13252,62 @@ function applyDragPreviewToTimelineEntries(
         }
       : entry,
   )
+}
+
+function applyOptimisticTimelineEntryPreview(
+  entries: TimelineEntry[],
+  optimisticEntry: TimelineEntry | null,
+  shouldIncludeEntry: (entry: TimelineEntry) => boolean,
+): TimelineEntry[] {
+  if (!optimisticEntry || !shouldIncludeEntry(optimisticEntry)) {
+    return entries
+  }
+
+  return entries.some((entry) => entry.id === optimisticEntry.id)
+    ? replaceTimelineEntry(entries, optimisticEntry)
+    : entries
+}
+
+function buildOptimisticTimelineEntryPreview(
+  currentEntry: TimelineEntry,
+  entryDraft: EntryDraft,
+  engagementById: Map<string, Engagement>,
+  activityById: Map<string, Activity>,
+): TimelineEntry | null {
+  const savePlan = buildEntryDraftSavePlan(entryDraft)
+  if (!savePlan.ok) {
+    return null
+  }
+
+  const { normalizedDraft } = savePlan
+  const engagement = normalizedDraft.engagementId
+    ? engagementById.get(normalizedDraft.engagementId) ?? null
+    : null
+  const activity = normalizedDraft.activityId
+    ? activityById.get(normalizedDraft.activityId) ?? null
+    : null
+  const warningFlags: WarningType[] = []
+
+  if (!normalizedDraft.engagementId || !normalizedDraft.activityId) {
+    warningFlags.push('unmatched')
+  }
+
+  return {
+    ...currentEntry,
+    date: normalizedDraft.date,
+    startMinute: savePlan.startMinute,
+    endMinute: savePlan.endMinute,
+    durationMinutes: savePlan.endMinute - savePlan.startMinute,
+    description: normalizedDraft.description.trim(),
+    engagementId: normalizedDraft.engagementId || null,
+    activityId: normalizedDraft.activityId || null,
+    engagementCode: engagement?.code ?? null,
+    engagementName: engagement?.name ?? null,
+    engagementType: engagement?.engagementType ?? null,
+    activityCode: activity?.code ?? null,
+    activityName: activity?.name ?? null,
+    warningFlags,
+  }
 }
 
 function createEmptyTimelineTotalBreakdown(): TimelineTotalBreakdown {
