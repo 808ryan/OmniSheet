@@ -613,6 +613,31 @@
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 12px 22px rgba(16, 24, 40, 0.06), var(--glass-inset);
+  position: relative;
+  isolation: isolate;
+  --segmented-active-radius: 12px;
+  --segmented-indicator-inset: 0.32rem;
+}
+
+.segmented-control-indicator {
+  position: absolute;
+  top: var(--segmented-indicator-inset);
+  bottom: var(--segmented-indicator-inset);
+  left: 0;
+  z-index: 0;
+  width: 0;
+  border-radius: var(--segmented-active-radius);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.92),
+    0 2px 5px rgba(16, 24, 40, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  pointer-events: none;
+  transform: translate3d(0, 0, 0);
+  transition:
+    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    width 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  will-change: transform, width;
 }
 
 .segmented-control button {
@@ -623,18 +648,22 @@
   padding: 0.5rem 0.9rem;
   min-width: 6.2rem;
   font-weight: 600;
+  position: relative;
+  z-index: 1;
 }
 
 .segmented-control button.active {
-  background: rgba(255, 255, 255, 0.9);
   color: var(--ink);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.8),
-    0 1px 2px rgba(16, 24, 40, 0.08);
 }
 
 .segmented-control button:not(.active):hover {
   background: rgba(255, 255, 255, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .segmented-control-indicator {
+    transition: none;
+  }
 }
 
 .main-view-tabs {
@@ -2968,6 +2997,8 @@ button.danger:hover:not(:disabled) {
 }
 
 .codes-create-form .engagement-type-segmented {
+  --segmented-active-radius: 8px;
+  --segmented-indicator-inset: 0.16rem;
   min-height: 2.35rem;
   padding: 0.16rem;
   border-radius: 10px;
@@ -4002,6 +4033,8 @@ button.danger:hover:not(:disabled) {
 }
 
 .codes-edit-form .engagement-type-segmented {
+  --segmented-active-radius: 8px;
+  --segmented-indicator-inset: 0.16rem;
   width: 100%;
   min-height: 2.35rem;
   grid-template-columns: repeat(2, minmax(0, 1fr));
