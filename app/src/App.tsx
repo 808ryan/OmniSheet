@@ -49,6 +49,7 @@ import {
 } from './lib/api'
 import { isAppRuntime, isTauriRuntime } from './lib/runtime'
 import { QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
+import { SegmentedControl } from './SegmentedControl'
 import {
   buildDefaultSummaryLayoutState,
   cloneSummaryLayoutPreset,
@@ -839,6 +840,14 @@ const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'reporting', label: 'Reporting' },
   { id: 'settings', label: 'Settings' },
   { id: 'diagnostics', label: 'Diagnostics' },
+]
+const ENGAGEMENT_TYPE_SEGMENT_OPTIONS: Array<{ id: EngagementType; label: string }> = [
+  { id: 'external', label: 'External' },
+  { id: 'internal', label: 'Internal' },
+]
+const CALENDAR_BULK_TAB_OPTIONS: Array<{ id: CalendarBulkTab; label: string }> = [
+  { id: 'submission', label: 'Calendar Submission' },
+  { id: 'review', label: 'Review Events' },
 ]
 const TIMELINE_WEEK_START_OPTIONS: Array<{ id: TimelineWeekStartDay; label: string }> = [
   { id: 'saturday', label: 'Saturday' },
@@ -7998,29 +8007,19 @@ function App() {
                 </label>
                 <div className="code-editor-field">
                   <span className="code-editor-field-label">Engagement Type</span>
-                  <div
-                    className="segmented-control engagement-type-segmented"
-                    role="group"
-                    aria-label="Add engagement type"
-                  >
-                    {(['external', 'internal'] as const).map((engagementType) => (
-                      <button
-                        key={engagementType}
-                        type="button"
-                        className={codesCreateEngagementForm.engagementType === engagementType ? 'active' : ''}
-                        aria-pressed={codesCreateEngagementForm.engagementType === engagementType}
-                        onClick={() => {
-                          setHasManualCodesCreateEngagementTypeSelection(true)
-                          setCodesCreateEngagementForm((previous) => ({
-                            ...previous,
-                            engagementType,
-                          }))
-                        }}
-                      >
-                        {engagementType === 'external' ? 'External' : 'Internal'}
-                      </button>
-                    ))}
-                  </div>
+                  <SegmentedControl
+                    ariaLabel="Add engagement type"
+                    className="engagement-type-segmented"
+                    options={ENGAGEMENT_TYPE_SEGMENT_OPTIONS}
+                    value={codesCreateEngagementForm.engagementType}
+                    onChange={(engagementType) => {
+                      setHasManualCodesCreateEngagementTypeSelection(true)
+                      setCodesCreateEngagementForm((previous) => ({
+                        ...previous,
+                        engagementType,
+                      }))
+                    }}
+                  />
                 </div>
                 <label>
                   Color
@@ -8753,29 +8752,20 @@ function App() {
 
         <div className={`calendar-bulk-top-row ${calendarBulkTab === 'review' ? 'is-review' : ''}`}>
           <div className="calendar-bulk-tabs-and-stepper">
-            <div className="segmented-control calendar-bulk-tabs" role="tablist" aria-label="Calendar bulk workflows">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={calendarBulkTab === 'submission'}
-                className={calendarBulkTab === 'submission' ? 'active' : ''}
-                onClick={() => setCalendarBulkTab('submission')}
-              >
-                Calendar Submission
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={calendarBulkTab === 'review'}
-                className={calendarBulkTab === 'review' ? 'active' : ''}
-                onClick={() => {
+            <SegmentedControl
+              ariaLabel="Calendar bulk workflows"
+              className="calendar-bulk-tabs"
+              mode="tab"
+              options={CALENDAR_BULK_TAB_OPTIONS}
+              value={calendarBulkTab}
+              onChange={(nextCalendarBulkTab) => {
+                if (nextCalendarBulkTab === 'review') {
                   calendarReviewAutoCenterKeyRef.current = null
-                  setCalendarBulkTab('review')
-                }}
-              >
-                Review Events
-              </button>
-            </div>
+                }
+
+                setCalendarBulkTab(nextCalendarBulkTab)
+              }}
+            />
 
             {calendarBulkTab === 'review' ? (
               <div className="calendar-review-stepper">
@@ -9654,20 +9644,14 @@ function App() {
         </aside>
 
         <main className="app-main">
-          <div className="segmented-control main-view-tabs" role="tablist" aria-label="Main views">
-            {mainViewTabs.map((view) => (
-              <button
-                key={view.id}
-                type="button"
-                role="tab"
-                aria-selected={activeView === view.id}
-                className={activeView === view.id ? 'active' : ''}
-                onClick={() => onSelectView(view.id)}
-              >
-                {view.label}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            ariaLabel="Main views"
+            className="main-view-tabs"
+            mode="tab"
+            options={mainViewTabs}
+            value={activeView}
+            onChange={onSelectView}
+          />
 
           <div className="app-notices" aria-live="polite">
             {errorMessage ? (
@@ -10527,29 +10511,19 @@ function App() {
                     </label>
                     <div className="code-editor-field">
                       <span className="code-editor-field-label">Engagement Type</span>
-                      <div
-                        className="segmented-control engagement-type-segmented"
-                        role="group"
-                        aria-label="Engagement type"
-                      >
-                        {(['external', 'internal'] as const).map((engagementType) => (
-                          <button
-                            key={engagementType}
-                            type="button"
-                            className={engagementForm.engagementType === engagementType ? 'active' : ''}
-                            aria-pressed={engagementForm.engagementType === engagementType}
-                            onClick={() => {
-                              setHasManualEngagementTypeSelection(true)
-                              setEngagementForm((previous) => ({
-                                ...previous,
-                                engagementType,
-                              }))
-                            }}
-                          >
-                            {engagementType === 'external' ? 'External' : 'Internal'}
-                          </button>
-                        ))}
-                      </div>
+                      <SegmentedControl
+                        ariaLabel="Engagement type"
+                        className="engagement-type-segmented"
+                        options={ENGAGEMENT_TYPE_SEGMENT_OPTIONS}
+                        value={engagementForm.engagementType}
+                        onChange={(engagementType) => {
+                          setHasManualEngagementTypeSelection(true)
+                          setEngagementForm((previous) => ({
+                            ...previous,
+                            engagementType,
+                          }))
+                        }}
+                      />
                     </div>
                     <label>
                       Color
