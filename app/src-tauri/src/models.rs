@@ -10,58 +10,101 @@ pub struct ApiKeyInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OpenAiModelId {
-    #[serde(rename = "gpt-5.4")]
-    Gpt54,
-    #[serde(rename = "gpt-5.4-mini")]
-    Gpt54Mini,
-    #[serde(rename = "gpt-5-nano")]
-    Gpt5Nano,
-    #[serde(rename = "gpt-4.1-nano")]
-    Gpt41Nano,
+    #[serde(rename = "gpt-5.5-instant", alias = "gpt-5.5")]
+    Gpt55Instant,
+    #[serde(rename = "gpt-5.5-low")]
+    Gpt55Low,
+    #[serde(rename = "gpt-5.5-medium")]
+    Gpt55Medium,
+    #[serde(rename = "gpt-5.5-high")]
+    Gpt55High,
+    #[serde(rename = "gpt-5.4-nano-instant", alias = "gpt-5.4-nano")]
+    Gpt54NanoInstant,
+    #[serde(rename = "gpt-5.4-nano-low")]
+    Gpt54NanoLow,
+    #[serde(rename = "gpt-5.4-nano-medium")]
+    Gpt54NanoMedium,
+    #[serde(rename = "gpt-5.4-nano-high")]
+    Gpt54NanoHigh,
 }
 
 impl Default for OpenAiModelId {
     fn default() -> Self {
-        Self::Gpt5Nano
+        Self::Gpt55Instant
     }
 }
 
 impl OpenAiModelId {
-    pub const ALL: [Self; 4] = [
-        Self::Gpt54,
-        Self::Gpt54Mini,
-        Self::Gpt5Nano,
-        Self::Gpt41Nano,
+    pub const ALL: [Self; 8] = [
+        Self::Gpt55Instant,
+        Self::Gpt55Low,
+        Self::Gpt55Medium,
+        Self::Gpt55High,
+        Self::Gpt54NanoInstant,
+        Self::Gpt54NanoLow,
+        Self::Gpt54NanoMedium,
+        Self::Gpt54NanoHigh,
     ];
 
     pub fn default_calendar_bulk_model() -> Self {
-        Self::Gpt54
+        Self::Gpt55Instant
     }
 
     pub fn api_name(self) -> &'static str {
         match self {
-            Self::Gpt54 => "gpt-5.4",
-            Self::Gpt54Mini => "gpt-5.4-mini",
-            Self::Gpt5Nano => "gpt-5-nano",
-            Self::Gpt41Nano => "gpt-4.1-nano",
+            Self::Gpt55Instant | Self::Gpt55Low | Self::Gpt55Medium | Self::Gpt55High => "gpt-5.5",
+            Self::Gpt54NanoInstant
+            | Self::Gpt54NanoLow
+            | Self::Gpt54NanoMedium
+            | Self::Gpt54NanoHigh => "gpt-5.4-nano",
+        }
+    }
+
+    pub fn storage_value(self) -> &'static str {
+        match self {
+            Self::Gpt55Instant => "gpt-5.5-instant",
+            Self::Gpt55Low => "gpt-5.5-low",
+            Self::Gpt55Medium => "gpt-5.5-medium",
+            Self::Gpt55High => "gpt-5.5-high",
+            Self::Gpt54NanoInstant => "gpt-5.4-nano-instant",
+            Self::Gpt54NanoLow => "gpt-5.4-nano-low",
+            Self::Gpt54NanoMedium => "gpt-5.4-nano-medium",
+            Self::Gpt54NanoHigh => "gpt-5.4-nano-high",
         }
     }
 
     pub fn display_label(self) -> &'static str {
         match self {
-            Self::Gpt54 => "GPT-5.4",
-            Self::Gpt54Mini => "GPT-5.4 Mini",
-            Self::Gpt5Nano => "GPT-5 Nano",
-            Self::Gpt41Nano => "GPT-4.1 Nano",
+            Self::Gpt55Instant => "GPT-5.5 Instant",
+            Self::Gpt55Low => "GPT-5.5 Low",
+            Self::Gpt55Medium => "GPT-5.5 Medium",
+            Self::Gpt55High => "GPT-5.5 High",
+            Self::Gpt54NanoInstant => "GPT-5.4 Nano Instant",
+            Self::Gpt54NanoLow => "GPT-5.4 Nano Low",
+            Self::Gpt54NanoMedium => "GPT-5.4 Nano Medium",
+            Self::Gpt54NanoHigh => "GPT-5.4 Nano High",
+        }
+    }
+
+    pub fn reasoning_effort(self) -> Option<&'static str> {
+        match self {
+            Self::Gpt55Instant | Self::Gpt54NanoInstant => Some("none"),
+            Self::Gpt55Low | Self::Gpt54NanoLow => Some("low"),
+            Self::Gpt55Medium | Self::Gpt54NanoMedium => Some("medium"),
+            Self::Gpt55High | Self::Gpt54NanoHigh => Some("high"),
         }
     }
 
     pub fn from_api_name(value: &str) -> Option<Self> {
         match value.trim() {
-            "gpt-5.4" => Some(Self::Gpt54),
-            "gpt-5.4-mini" => Some(Self::Gpt54Mini),
-            "gpt-5-nano" => Some(Self::Gpt5Nano),
-            "gpt-4.1-nano" => Some(Self::Gpt41Nano),
+            "gpt-5.5" | "gpt-5.5-instant" => Some(Self::Gpt55Instant),
+            "gpt-5.5-low" => Some(Self::Gpt55Low),
+            "gpt-5.5-medium" => Some(Self::Gpt55Medium),
+            "gpt-5.5-high" => Some(Self::Gpt55High),
+            "gpt-5.4-nano" | "gpt-5.4-nano-instant" => Some(Self::Gpt54NanoInstant),
+            "gpt-5.4-nano-low" => Some(Self::Gpt54NanoLow),
+            "gpt-5.4-nano-medium" => Some(Self::Gpt54NanoMedium),
+            "gpt-5.4-nano-high" => Some(Self::Gpt54NanoHigh),
             _ => None,
         }
     }
@@ -153,7 +196,7 @@ pub enum TimelineWeekStartDay {
 
 impl Default for TimelineWeekStartDay {
     fn default() -> Self {
-        Self::Sunday
+        Self::Saturday
     }
 }
 
@@ -390,6 +433,7 @@ pub struct InterpretTextInput {
     pub client_local_date: String,
     pub client_local_time: String,
     pub client_utc_offset_minutes: i64,
+    pub selected_date: Option<String>,
     pub open_ai_model: Option<OpenAiModelId>,
     pub capture_source: Option<CaptureSourceId>,
     pub transcription_model: Option<TranscriptionModelId>,
@@ -998,7 +1042,12 @@ pub struct ContextActivity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmResponse {
+    #[serde(default)]
     pub entries: Vec<LlmEntry>,
+    #[serde(default)]
+    pub gap_fill_requests: Vec<LlmGapFillRequest>,
+    #[serde(default)]
+    pub time_off_requests: Vec<LlmTimeOffRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1025,6 +1074,38 @@ pub struct LlmAlternativeActivity {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmGapFillRequest {
+    pub date: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    #[serde(default)]
+    pub activities: Vec<LlmGapFillActivity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmGapFillActivity {
+    pub engagement_ref: Option<String>,
+    pub activity_ref: Option<String>,
+    pub label: Option<String>,
+    pub description: Option<String>,
+    pub activity_reason: Option<String>,
+    pub alternative_activities: Option<Vec<LlmAlternativeActivity>>,
+    pub confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmTimeOffRequest {
+    pub kind: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub description: Option<String>,
+    pub confidence: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NormalizedEntry {
     pub date: String,
@@ -1044,57 +1125,161 @@ mod tests {
 
     use super::{
         CodeContext, ContextActivity, ContextEngagement, OpenAiModelId, SummaryLayoutColumn,
-        SummaryLayoutFieldKey, TranscriptionModelId,
+        SummaryLayoutFieldKey, TimelineWeekStartDay, TranscriptionModelId,
     };
 
     #[test]
     fn openai_model_default_and_labels_match_expected_values() {
         let default_model = OpenAiModelId::default();
 
-        assert_eq!(default_model, OpenAiModelId::Gpt5Nano);
-        assert_eq!(default_model.api_name(), "gpt-5-nano");
-        assert_eq!(default_model.display_label(), "GPT-5 Nano");
+        assert_eq!(default_model, OpenAiModelId::Gpt55Instant);
+        assert_eq!(default_model.api_name(), "gpt-5.5");
+        assert_eq!(default_model.storage_value(), "gpt-5.5-instant");
+        assert_eq!(default_model.display_label(), "GPT-5.5 Instant");
         assert_eq!(
             OpenAiModelId::default_calendar_bulk_model(),
-            OpenAiModelId::Gpt54
+            OpenAiModelId::Gpt55Instant
         );
-        assert_eq!(OpenAiModelId::Gpt54.api_name(), "gpt-5.4");
-        assert_eq!(OpenAiModelId::Gpt54.display_label(), "GPT-5.4");
-        assert_eq!(OpenAiModelId::Gpt54Mini.api_name(), "gpt-5.4-mini");
-        assert_eq!(OpenAiModelId::Gpt54Mini.display_label(), "GPT-5.4 Mini");
-        assert_eq!(OpenAiModelId::Gpt41Nano.display_label(), "GPT-4.1 Nano");
+        assert_eq!(OpenAiModelId::Gpt55Instant.api_name(), "gpt-5.5");
+        assert_eq!(
+            OpenAiModelId::Gpt55Instant.display_label(),
+            "GPT-5.5 Instant"
+        );
+        assert_eq!(OpenAiModelId::Gpt55Instant.reasoning_effort(), Some("none"));
+        assert_eq!(OpenAiModelId::Gpt55Low.storage_value(), "gpt-5.5-low");
+        assert_eq!(OpenAiModelId::Gpt55Low.display_label(), "GPT-5.5 Low");
+        assert_eq!(OpenAiModelId::Gpt55Low.reasoning_effort(), Some("low"));
+        assert_eq!(OpenAiModelId::Gpt55Medium.storage_value(), "gpt-5.5-medium");
+        assert_eq!(OpenAiModelId::Gpt55Medium.display_label(), "GPT-5.5 Medium");
+        assert_eq!(
+            OpenAiModelId::Gpt55Medium.reasoning_effort(),
+            Some("medium")
+        );
+        assert_eq!(OpenAiModelId::Gpt55High.storage_value(), "gpt-5.5-high");
+        assert_eq!(OpenAiModelId::Gpt55High.display_label(), "GPT-5.5 High");
+        assert_eq!(OpenAiModelId::Gpt55High.reasoning_effort(), Some("high"));
+        assert_eq!(OpenAiModelId::Gpt54NanoInstant.api_name(), "gpt-5.4-nano");
+        assert_eq!(
+            OpenAiModelId::Gpt54NanoInstant.storage_value(),
+            "gpt-5.4-nano-instant"
+        );
+        assert_eq!(
+            OpenAiModelId::Gpt54NanoInstant.display_label(),
+            "GPT-5.4 Nano Instant"
+        );
+        assert_eq!(
+            OpenAiModelId::Gpt54NanoInstant.reasoning_effort(),
+            Some("none")
+        );
+        assert_eq!(
+            OpenAiModelId::Gpt54NanoLow.display_label(),
+            "GPT-5.4 Nano Low"
+        );
+        assert_eq!(OpenAiModelId::Gpt54NanoLow.reasoning_effort(), Some("low"));
+        assert_eq!(
+            OpenAiModelId::Gpt54NanoMedium.display_label(),
+            "GPT-5.4 Nano Medium"
+        );
+        assert_eq!(
+            OpenAiModelId::Gpt54NanoMedium.reasoning_effort(),
+            Some("medium")
+        );
+        assert_eq!(
+            OpenAiModelId::Gpt54NanoHigh.display_label(),
+            "GPT-5.4 Nano High"
+        );
+        assert_eq!(
+            OpenAiModelId::Gpt54NanoHigh.reasoning_effort(),
+            Some("high")
+        );
     }
 
     #[test]
     fn openai_model_serialization_round_trips_supported_ids() {
-        let serialized = serde_json::to_string(&OpenAiModelId::Gpt41Nano)
+        let serialized = serde_json::to_string(&OpenAiModelId::Gpt55High)
             .expect("model serialization should work");
-        assert_eq!(serialized, "\"gpt-4.1-nano\"");
+        assert_eq!(serialized, "\"gpt-5.5-high\"");
 
         let parsed: OpenAiModelId =
-            serde_json::from_str("\"gpt-5-nano\"").expect("model deserialization should work");
-        assert_eq!(parsed, OpenAiModelId::Gpt5Nano);
+            serde_json::from_str("\"gpt-5.5-medium\"").expect("model deserialization should work");
+        assert_eq!(parsed, OpenAiModelId::Gpt55Medium);
+
+        let parsed_legacy_gpt55: OpenAiModelId =
+            serde_json::from_str("\"gpt-5.5\"").expect("legacy GPT-5.5 id should deserialize");
+        assert_eq!(parsed_legacy_gpt55, OpenAiModelId::Gpt55Instant);
+
+        let parsed_legacy_gpt54_nano: OpenAiModelId = serde_json::from_str("\"gpt-5.4-nano\"")
+            .expect("legacy GPT-5.4 nano id should deserialize");
+        assert_eq!(parsed_legacy_gpt54_nano, OpenAiModelId::Gpt54NanoInstant);
+
         assert_eq!(
-            OpenAiModelId::from_api_name("gpt-4.1-nano"),
-            Some(OpenAiModelId::Gpt41Nano)
+            OpenAiModelId::from_api_name("gpt-5.5"),
+            Some(OpenAiModelId::Gpt55Instant)
         );
         assert_eq!(
-            OpenAiModelId::from_api_name("gpt-5.4"),
-            Some(OpenAiModelId::Gpt54)
+            OpenAiModelId::from_api_name("gpt-5.5-instant"),
+            Some(OpenAiModelId::Gpt55Instant)
         );
         assert_eq!(
-            OpenAiModelId::from_api_name("gpt-5.4-mini"),
-            Some(OpenAiModelId::Gpt54Mini)
+            OpenAiModelId::from_api_name("gpt-5.5-low"),
+            Some(OpenAiModelId::Gpt55Low)
         );
-        assert_eq!(OpenAiModelId::from_api_name("gpt-4.1"), None);
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.5-medium"),
+            Some(OpenAiModelId::Gpt55Medium)
+        );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.5-high"),
+            Some(OpenAiModelId::Gpt55High)
+        );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.4-nano"),
+            Some(OpenAiModelId::Gpt54NanoInstant)
+        );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.4-nano-instant"),
+            Some(OpenAiModelId::Gpt54NanoInstant)
+        );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.4-nano-low"),
+            Some(OpenAiModelId::Gpt54NanoLow)
+        );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.4-nano-medium"),
+            Some(OpenAiModelId::Gpt54NanoMedium)
+        );
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.4-nano-high"),
+            Some(OpenAiModelId::Gpt54NanoHigh)
+        );
+        assert_eq!(OpenAiModelId::from_api_name("gpt-5.4"), None);
+        assert_eq!(OpenAiModelId::from_api_name("gpt-4.1-nano"), None);
 
         let options = OpenAiModelId::options();
         assert!(options
             .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt54));
+            .any(|option| option.id == OpenAiModelId::Gpt55Instant));
         assert!(options
             .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt54Mini));
+            .any(|option| option.id == OpenAiModelId::Gpt55Low));
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt55Medium));
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt55High));
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt54NanoInstant));
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt54NanoLow));
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt54NanoMedium));
+        assert!(options
+            .iter()
+            .any(|option| option.id == OpenAiModelId::Gpt54NanoHigh));
     }
 
     #[test]
@@ -1105,6 +1290,15 @@ mod tests {
         assert_eq!(default_model.api_name(), "gpt-4o-mini-transcribe");
         assert_eq!(default_model.display_label(), "GPT-4o Mini Transcribe");
         assert_eq!(TranscriptionModelId::Whisper1.display_label(), "Whisper");
+    }
+
+    #[test]
+    fn timeline_week_start_default_is_saturday() {
+        assert_eq!(
+            TimelineWeekStartDay::default(),
+            TimelineWeekStartDay::Saturday
+        );
+        assert_eq!(TimelineWeekStartDay::default().setting_value(), "saturday");
     }
 
     #[test]

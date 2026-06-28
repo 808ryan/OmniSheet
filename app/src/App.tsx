@@ -3,6 +3,7 @@ import type {
   ClipboardEvent as ReactClipboardEvent,
   CSSProperties,
   FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from 'react'
@@ -49,6 +50,7 @@ import {
 } from './lib/api'
 import { isAppRuntime, isTauriRuntime } from './lib/runtime'
 import { QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
+import { SegmentedControl } from './SegmentedControl'
 import {
   buildDefaultSummaryLayoutState,
   cloneSummaryLayoutPreset,
@@ -154,6 +156,7 @@ interface SubmissionQueueItem {
   clientLocalDate: string
   clientLocalTime: string
   clientUtcOffsetMinutes: number
+  selectedDate?: string
   timezone: string
   state: SubmissionQueueItemState
   createdEntryCount?: number
@@ -601,8 +604,8 @@ const MAX_CONCURRENT_SUBMISSIONS = 5
 const SYSTEM_NOTICE_AUTO_DISMISS_MS = 4000
 const LLM_SUBMISSION_STATUS_DISMISS_MS = 5000
 const CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD = 0.75
-const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5-nano'
-const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-5.4'
+const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
+const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-5.5-instant'
 const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-4o-mini-transcribe'
 const MAX_VOICE_RECORDING_DURATION_MS = 120_000
 const PREFERRED_VOICE_MIME_TYPES = [
@@ -840,6 +843,14 @@ const SEGMENTED_VIEWS: Array<{ id: View; label: string }> = [
   { id: 'settings', label: 'Settings' },
   { id: 'diagnostics', label: 'Diagnostics' },
 ]
+const ENGAGEMENT_TYPE_SEGMENT_OPTIONS: Array<{ id: EngagementType; label: string }> = [
+  { id: 'external', label: 'External' },
+  { id: 'internal', label: 'Internal' },
+]
+const CALENDAR_BULK_TAB_OPTIONS: Array<{ id: CalendarBulkTab; label: string }> = [
+  { id: 'submission', label: 'Calendar Submission' },
+  { id: 'review', label: 'Review Events' },
+]
 const TIMELINE_WEEK_START_OPTIONS: Array<{ id: TimelineWeekStartDay; label: string }> = [
   { id: 'saturday', label: 'Saturday' },
   { id: 'sunday', label: 'Sunday' },
@@ -850,10 +861,9 @@ const REPORTING_DISPLAY_FIELD_GROUPS: Array<{
   label: string
   keys: ReportingDisplayFieldKey[]
 }> = [
-  { label: 'Core', keys: ['details', 'engagement', 'activity', 'client'] },
+  { label: 'Primary', keys: ['details', 'engagement', 'activity', 'client'] },
   { label: 'Codes', keys: ['engagementCode', 'activityCode'] },
   { label: 'Classification', keys: ['engagementType', 'engagementTags', 'activityTags'] },
-  { label: 'Guidance', keys: ['engagementUsage', 'activityUsage'] },
 ]
 const SUMMARY_LAYOUT_DAY_COLUMN_WIDTH = '8.5rem'
 const SUMMARY_LAYOUT_ROW_TOTAL_WIDTH = '8.5rem'
@@ -1044,14 +1054,14 @@ function App() {
   const timelineExcludeUncategorizedFromDailyTotals =
     settingsStatus?.timelineExcludeUncategorizedFromDailyTotals ?? true
   const timelineShowUncategorizedDailyTotal =
-    settingsStatus?.timelineShowUncategorizedDailyTotal ?? true
+    settingsStatus?.timelineShowUncategorizedDailyTotal ?? false
   const timelineIncludeExternalInTotals =
     settingsStatus?.timelineIncludeExternalInTotals ?? true
   const timelineIncludeInternalInTotals =
     settingsStatus?.timelineIncludeInternalInTotals ?? false
   const timelineSeparateEngagementTypeTotals =
     settingsStatus?.timelineSeparateEngagementTypeTotals ?? true
-  const timelineWeekStartDay: TimelineWeekStartDay = settingsStatus?.timelineWeekStartDay ?? 'sunday'
+  const timelineWeekStartDay: TimelineWeekStartDay = settingsStatus?.timelineWeekStartDay ?? 'saturday'
   const currentTimelinePreferences: SettingsTimelinePreferencesInput = {
     timelineExcludeUncategorizedFromDailyTotals,
     timelineShowUncategorizedDailyTotal,
@@ -1060,7 +1070,7 @@ function App() {
     timelineSeparateEngagementTypeTotals,
     timelineWeekStartDay,
   }
-  const showDiagnosticsTab = settingsStatus?.showDiagnosticsTab ?? true
+  const showDiagnosticsTab = settingsStatus?.showDiagnosticsTab ?? false
   const mainViewTabs = useMemo(
     () => SEGMENTED_VIEWS.filter((view) => showDiagnosticsTab || view.id !== 'diagnostics'),
     [showDiagnosticsTab],
@@ -1122,7 +1132,7 @@ function App() {
   const [calendarIsImporting, setCalendarIsImporting] = useState(false)
   const [calendarReviewCandidates, setCalendarReviewCandidates] = useState<CalendarReviewCandidate[]>([])
   const [selectedCalendarCandidateId, setSelectedCalendarCandidateId] = useState<string | null>(null)
-  const [calendarIgnoredKeywordDraft, setCalendarIgnoredKeywordDraft] = useState('lunch')
+  const [calendarIgnoredKeywordDraft, setCalendarIgnoredKeywordDraft] = useState('lunch\nfocus\nblock')
 
   const [selectedDate, setSelectedDate] = useState(todayDate)
   const [visibleMonth, setVisibleMonth] = useState(() => monthKeyFromDate(todayDate))
@@ -1207,7 +1217,6 @@ function App() {
   const [reportingDisplayPresetDraftName, setReportingDisplayPresetDraftName] = useState('')
   const [reportingDisplayPresetDraftError, setReportingDisplayPresetDraftError] =
     useState<string | null>(null)
-  const [isReportingDisplayColumnPickerOpen, setIsReportingDisplayColumnPickerOpen] = useState(false)
   const [reportingDisplayDraggedColumnId, setReportingDisplayDraggedColumnId] =
     useState<string | null>(null)
   const [reportingDisplayDragPreview, setReportingDisplayDragPreview] =
@@ -1394,7 +1403,6 @@ function App() {
     setReportingDisplayPresetDraft(null)
     setReportingDisplayPresetDraftName('')
     setReportingDisplayPresetDraftError(null)
-    setIsReportingDisplayColumnPickerOpen(false)
     setReportingDisplayDraggedColumnId(null)
     setReportingDisplayDragPreview(null)
     reportingDisplayDragCleanupRef.current?.()
@@ -1896,12 +1904,6 @@ function App() {
     () => reportingDisplayDraftColumns.filter((column) => column.kind === 'field').length,
     [reportingDisplayDraftColumns],
   )
-  const reportingDisplayDraftFieldKeys = useMemo(
-    () => new Set(reportingDisplayDraftColumns
-      .filter((column): column is Extract<ReportingDisplayColumn, { kind: 'field' }> => column.kind === 'field')
-      .map((column) => column.fieldKey)),
-    [reportingDisplayDraftColumns],
-  )
   useLayoutEffect(() => {
     const previousRects = reportingDisplayAnimationRectsRef.current
     if (!previousRects) {
@@ -2012,10 +2014,22 @@ function App() {
     const createdCount = submissionQueue
       .filter((item) => item.state === 'success')
       .reduce((total, item) => total + (item.createdEntryCount ?? 0), 0)
+    const zeroEntrySuccessCount = submissionQueue.filter((item) =>
+      item.state === 'success' && item.createdEntryCount === 0
+    ).length
     if (createdCount > 0) {
       return {
         kind: 'success',
         message: formatLlmSubmissionStatusMessage(createdCount, 'created'),
+      }
+    }
+
+    if (zeroEntrySuccessCount > 0) {
+      return {
+        kind: 'success',
+        message: zeroEntrySuccessCount === 1
+          ? 'No open gaps found.'
+          : `${zeroEntrySuccessCount} submissions completed with no open gaps found.`,
       }
     }
 
@@ -2070,6 +2084,7 @@ function App() {
     clientLocalDate,
     clientLocalTime,
     clientUtcOffsetMinutes,
+    selectedDate,
     timezone,
     captureSource,
     transcriptionModelUsed,
@@ -2081,6 +2096,7 @@ function App() {
     clientLocalDate: string
     clientLocalTime: string
     clientUtcOffsetMinutes: number
+    selectedDate?: string
     timezone: string
     captureSource: CaptureSourceId
     transcriptionModelUsed?: TranscriptionModelId
@@ -2096,6 +2112,7 @@ function App() {
       clientLocalDate,
       clientLocalTime,
       clientUtcOffsetMinutes,
+      selectedDate,
       timezone,
       state: 'pending',
       transcriptionModelUsed,
@@ -4030,6 +4047,7 @@ function App() {
           clientLocalDate: item.clientLocalDate,
           clientLocalTime: item.clientLocalTime,
           clientUtcOffsetMinutes: item.clientUtcOffsetMinutes,
+          selectedDate: item.selectedDate,
           timezone: item.timezone,
           captureSource: item.captureSource,
           transcriptionModel: item.transcriptionModelUsed,
@@ -4378,6 +4396,7 @@ function App() {
         clientLocalDate: formatDate(submittedAt),
         clientLocalTime: formatLocalTime(submittedAt),
         clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+        selectedDate: selectedDateRef.current,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         state: 'running',
       }
@@ -5479,6 +5498,7 @@ function App() {
       clientLocalDate: formatDate(submittedAt),
       clientLocalTime: formatLocalTime(submittedAt),
       clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+      selectedDate: selectedDateRef.current,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
       captureSource: captureDraftMetadata?.captureSource ?? 'text',
       transcriptionModelUsed: captureDraftMetadata?.transcriptionModelUsed,
@@ -5486,6 +5506,22 @@ function App() {
     })
     setCaptureDraftMetadata(null)
     setVoiceCaptureStatusMessage(null)
+  }
+
+  const onCaptureMessageKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      event.key !== 'Enter'
+      || event.shiftKey
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.nativeEvent.isComposing
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    event.currentTarget.form?.requestSubmit()
   }
 
   const onSubmitEngagement = (event: FormEvent<HTMLFormElement>) => {
@@ -6909,7 +6945,6 @@ function App() {
     }
 
     setReportingDisplayPresetDraftError(null)
-    setIsReportingDisplayColumnPickerOpen(false)
     setReportingDisplayDraggedColumnId(null)
     setReportingDisplayDragPreview(null)
   }, [resolvedReportingState.displayPresets, selectedReportingDisplayPreset])
@@ -7051,7 +7086,6 @@ function App() {
       ]
     })
     setReportingDisplayPresetDraftError(null)
-    setIsReportingDisplayColumnPickerOpen(false)
   }
 
   const onRemoveReportingDisplayColumn = (columnId: string) => {
@@ -7113,7 +7147,6 @@ function App() {
       presetId: nextPreset.id,
     })
     setReportingDisplayPresetDraftError(null)
-    setIsReportingDisplayColumnPickerOpen(false)
     setReportingDisplayDraggedColumnId(null)
     setReportingDisplayDragPreview(null)
     reportingDisplayDragCleanupRef.current?.()
@@ -7998,29 +8031,19 @@ function App() {
                 </label>
                 <div className="code-editor-field">
                   <span className="code-editor-field-label">Engagement Type</span>
-                  <div
-                    className="segmented-control engagement-type-segmented"
-                    role="group"
-                    aria-label="Add engagement type"
-                  >
-                    {(['external', 'internal'] as const).map((engagementType) => (
-                      <button
-                        key={engagementType}
-                        type="button"
-                        className={codesCreateEngagementForm.engagementType === engagementType ? 'active' : ''}
-                        aria-pressed={codesCreateEngagementForm.engagementType === engagementType}
-                        onClick={() => {
-                          setHasManualCodesCreateEngagementTypeSelection(true)
-                          setCodesCreateEngagementForm((previous) => ({
-                            ...previous,
-                            engagementType,
-                          }))
-                        }}
-                      >
-                        {engagementType === 'external' ? 'External' : 'Internal'}
-                      </button>
-                    ))}
-                  </div>
+                  <SegmentedControl
+                    ariaLabel="Add engagement type"
+                    className="engagement-type-segmented"
+                    options={ENGAGEMENT_TYPE_SEGMENT_OPTIONS}
+                    value={codesCreateEngagementForm.engagementType}
+                    onChange={(engagementType) => {
+                      setHasManualCodesCreateEngagementTypeSelection(true)
+                      setCodesCreateEngagementForm((previous) => ({
+                        ...previous,
+                        engagementType,
+                      }))
+                    }}
+                  />
                 </div>
                 <label>
                   Color
@@ -8753,29 +8776,20 @@ function App() {
 
         <div className={`calendar-bulk-top-row ${calendarBulkTab === 'review' ? 'is-review' : ''}`}>
           <div className="calendar-bulk-tabs-and-stepper">
-            <div className="segmented-control calendar-bulk-tabs" role="tablist" aria-label="Calendar bulk workflows">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={calendarBulkTab === 'submission'}
-                className={calendarBulkTab === 'submission' ? 'active' : ''}
-                onClick={() => setCalendarBulkTab('submission')}
-              >
-                Calendar Submission
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={calendarBulkTab === 'review'}
-                className={calendarBulkTab === 'review' ? 'active' : ''}
-                onClick={() => {
+            <SegmentedControl
+              ariaLabel="Calendar bulk workflows"
+              className="calendar-bulk-tabs"
+              mode="tab"
+              options={CALENDAR_BULK_TAB_OPTIONS}
+              value={calendarBulkTab}
+              onChange={(nextCalendarBulkTab) => {
+                if (nextCalendarBulkTab === 'review') {
                   calendarReviewAutoCenterKeyRef.current = null
-                  setCalendarBulkTab('review')
-                }}
-              >
-                Review Events
-              </button>
-            </div>
+                }
+
+                setCalendarBulkTab(nextCalendarBulkTab)
+              }}
+            />
 
             {calendarBulkTab === 'review' ? (
               <div className="calendar-review-stepper">
@@ -9427,6 +9441,7 @@ function App() {
                 <textarea
                   aria-label="Entry message"
                   value={captureMessage}
+                  onKeyDown={onCaptureMessageKeyDown}
                   onChange={(event) => {
                     const nextValue = event.target.value
                     setCaptureMessage(nextValue)
@@ -9501,11 +9516,12 @@ function App() {
                 <button
                   type="button"
                   className="quick-add-settings-button"
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={openQuickAddSettings}
                   aria-label="Open Quick Entry settings"
                   title="Quick Entry settings"
                 >
-                  <img src={settingsIcon} alt="" aria-hidden="true" />
+                  <img src={settingsIcon} alt="" aria-hidden="true" draggable={false} />
                 </button>
               </div>
               <input
@@ -9654,20 +9670,14 @@ function App() {
         </aside>
 
         <main className="app-main">
-          <div className="segmented-control main-view-tabs" role="tablist" aria-label="Main views">
-            {mainViewTabs.map((view) => (
-              <button
-                key={view.id}
-                type="button"
-                role="tab"
-                aria-selected={activeView === view.id}
-                className={activeView === view.id ? 'active' : ''}
-                onClick={() => onSelectView(view.id)}
-              >
-                {view.label}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            ariaLabel="Main views"
+            className="main-view-tabs"
+            mode="tab"
+            options={mainViewTabs}
+            value={activeView}
+            onChange={onSelectView}
+          />
 
           <div className="app-notices" aria-live="polite">
             {errorMessage ? (
@@ -10527,29 +10537,19 @@ function App() {
                     </label>
                     <div className="code-editor-field">
                       <span className="code-editor-field-label">Engagement Type</span>
-                      <div
-                        className="segmented-control engagement-type-segmented"
-                        role="group"
-                        aria-label="Engagement type"
-                      >
-                        {(['external', 'internal'] as const).map((engagementType) => (
-                          <button
-                            key={engagementType}
-                            type="button"
-                            className={engagementForm.engagementType === engagementType ? 'active' : ''}
-                            aria-pressed={engagementForm.engagementType === engagementType}
-                            onClick={() => {
-                              setHasManualEngagementTypeSelection(true)
-                              setEngagementForm((previous) => ({
-                                ...previous,
-                                engagementType,
-                              }))
-                            }}
-                          >
-                            {engagementType === 'external' ? 'External' : 'Internal'}
-                          </button>
-                        ))}
-                      </div>
+                      <SegmentedControl
+                        ariaLabel="Engagement type"
+                        className="engagement-type-segmented"
+                        options={ENGAGEMENT_TYPE_SEGMENT_OPTIONS}
+                        value={engagementForm.engagementType}
+                        onChange={(engagementType) => {
+                          setHasManualEngagementTypeSelection(true)
+                          setEngagementForm((previous) => ({
+                            ...previous,
+                            engagementType,
+                          }))
+                        }}
+                      />
                     </div>
                     <label>
                       Color
@@ -11176,7 +11176,7 @@ function App() {
                       value={calendarIgnoredKeywordDraft}
                       onChange={(event) => setCalendarIgnoredKeywordDraft(event.target.value)}
                       rows={4}
-                      placeholder="lunch"
+                      placeholder={'lunch\nfocus\nblock'}
                       disabled={isBusy || settingsStatus === null}
                     />
                     <button
@@ -11702,7 +11702,7 @@ function App() {
               </header>
 
               <div className="reporting-v2-preset-editor">
-                <section className="reporting-v2-settings-panel" aria-label="Preset settings">
+                <section className="reporting-v2-settings-panel reporting-v2-preset-strip" aria-label="Preset settings">
                   <label className="reporting-v2-field">
                     <span>Preset</span>
                     <select
@@ -11732,83 +11732,45 @@ function App() {
                   </label>
                 </section>
 
-                <section className="reporting-v2-column-panel" aria-label="Preset columns">
-                  <div className="reporting-v2-column-panel-header">
-                    <h4>Columns</h4>
-                    <button
-                      type="button"
-                      className="button-soft-primary reporting-v2-add-column"
-                      onClick={() => setIsReportingDisplayColumnPickerOpen((previous) => !previous)}
-                    >
-                      <span className="control-icon plus-icon" aria-hidden="true" />
-                      Add Column
-                    </button>
-                  </div>
+                <div className="reporting-v2-builder">
+                  <section className="reporting-v2-available-panel" aria-label="Available columns">
+                    <div className="reporting-v2-panel-header">
+                      <h4>Available Columns</h4>
+                    </div>
 
-                  <div className="reporting-v2-column-list">
-                    {reportingDisplayDraftColumns.map((column) => {
-                      const columnLabel = getReportingDisplayColumnLabel(column)
-                      const isRequiredColumn = column.kind !== 'field'
-                      const isDragged = reportingDisplayDraggedColumnId === column.id
-                      const dragStyle = isDragged && reportingDisplayDragPreview?.surface === 'list'
-                        ? ({
-                          transform: `translate3d(0, ${reportingDisplayDragPreview.offsetY}px, 0)`,
-                          zIndex: 6,
-                        } as CSSProperties)
-                        : undefined
-
-                      return (
-                        <div
-                          key={column.id}
-                          data-reporting-display-column-id={column.id}
-                          className={`reporting-v2-column-row ${isDragged ? 'is-dragging' : ''}`}
-                          style={dragStyle}
-                        >
-                          <button
-                            type="button"
-                            className="reporting-v2-column-handle"
-                            aria-label={`Reorder ${columnLabel}`}
-                            onPointerDown={(event) => onStartReportingDisplayColumnPointerDrag(event, column.id)}
-                          >
-                            <ReportingColumnReorderIcon />
-                          </button>
-                          <span>{columnLabel}</span>
-                          {isRequiredColumn ? (
-                            <strong>Required</strong>
-                          ) : (
-                            <button
-                              type="button"
-                              className="summary-layout-editor-remove"
-                              onClick={() => onRemoveReportingDisplayColumn(column.id)}
-                              aria-label={`Remove ${columnLabel}`}
-                              disabled={reportingDisplayDraftFieldCount <= 1}
-                            >
-                              -
-                            </button>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-
-                  {isReportingDisplayColumnPickerOpen ? (
-                    <div className="reporting-v2-column-picker">
+                    <div className="reporting-v2-available-column-groups">
                       {REPORTING_DISPLAY_FIELD_GROUPS.map((group) => (
-                        <div key={group.label} className="reporting-v2-column-picker-group">
+                        <div key={group.label} className="reporting-v2-available-column-group">
                           <span>{group.label}</span>
                           <div>
                             {group.keys.map((fieldKey) => {
                               const option = REPORTING_DISPLAY_FIELD_OPTIONS.find((candidate) => candidate.key === fieldKey)
-                              const isEnabled = reportingDisplayDraftFieldKeys.has(fieldKey)
+                              const label = option?.label ?? fieldKey
+                              const selectedColumn = reportingDisplayDraftColumns.find((candidate) => (
+                                candidate.kind === 'field' && candidate.fieldKey === fieldKey
+                              ))
+                              const isSelected = Boolean(selectedColumn)
 
                               return (
                                 <button
                                   key={fieldKey}
                                   type="button"
-                                  onClick={() => onAddReportingDisplayColumn(fieldKey)}
-                                  disabled={isEnabled}
+                                  className={`reporting-v2-available-column ${isSelected ? 'is-selected' : ''}`}
+                                  onClick={() => {
+                                    if (selectedColumn) {
+                                      onRemoveReportingDisplayColumn(selectedColumn.id)
+                                    } else {
+                                      onAddReportingDisplayColumn(fieldKey)
+                                    }
+                                  }}
+                                  aria-label={isSelected ? `Remove ${label}` : `Add ${label}`}
+                                  title={isSelected ? `Remove ${label}` : `Add ${label}`}
                                 >
-                                  {option?.label ?? fieldKey}
+                                  <span
+                                    className={`control-icon ${isSelected ? 'minus-icon' : 'plus-icon'}`}
+                                    aria-hidden="true"
+                                  />
+                                  <span>{label}</span>
                                 </button>
                               )
                             })}
@@ -11816,8 +11778,60 @@ function App() {
                         </div>
                       ))}
                     </div>
-                  ) : null}
-                </section>
+                  </section>
+
+                  <section className="reporting-v2-column-panel" aria-label="Preset columns">
+                    <div className="reporting-v2-panel-header">
+                      <h4>Preset Columns</h4>
+                    </div>
+
+                    <div className="reporting-v2-column-list">
+                      {reportingDisplayDraftColumns.map((column) => {
+                        const columnLabel = getReportingDisplayColumnLabel(column)
+                        const isRequiredColumn = column.kind !== 'field'
+                        const isDragged = reportingDisplayDraggedColumnId === column.id
+                        const dragStyle = isDragged && reportingDisplayDragPreview?.surface === 'list'
+                          ? ({
+                            transform: `translate3d(0, ${reportingDisplayDragPreview.offsetY}px, 0)`,
+                            zIndex: 6,
+                          } as CSSProperties)
+                          : undefined
+
+                        return (
+                          <div
+                            key={column.id}
+                            data-reporting-display-column-id={column.id}
+                            className={`reporting-v2-column-row ${isDragged ? 'is-dragging' : ''}`}
+                            style={dragStyle}
+                          >
+                            <button
+                              type="button"
+                              className="reporting-v2-column-handle"
+                              aria-label={`Reorder ${columnLabel}`}
+                              onPointerDown={(event) => onStartReportingDisplayColumnPointerDrag(event, column.id)}
+                            >
+                              <ReportingColumnReorderIcon />
+                            </button>
+                            <span>{columnLabel}</span>
+                            {isRequiredColumn ? (
+                              <strong>Required</strong>
+                            ) : (
+                              <button
+                                type="button"
+                                className="summary-layout-editor-remove"
+                                onClick={() => onRemoveReportingDisplayColumn(column.id)}
+                                aria-label={`Remove ${columnLabel}`}
+                                disabled={reportingDisplayDraftFieldCount <= 1}
+                              >
+                                <span className="control-icon minus-icon" aria-hidden="true" />
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </section>
+                </div>
 
                 <section className="reporting-v2-preview-panel" aria-label="Preset preview">
                   <div className="reporting-v2-preview-header">

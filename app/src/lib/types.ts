@@ -1,5 +1,13 @@
 export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
-export type OpenAiModelId = 'gpt-5.4' | 'gpt-5.4-mini' | 'gpt-5-nano' | 'gpt-4.1-nano'
+export type OpenAiModelId =
+  | 'gpt-5.5-instant'
+  | 'gpt-5.5-low'
+  | 'gpt-5.5-medium'
+  | 'gpt-5.5-high'
+  | 'gpt-5.4-nano-instant'
+  | 'gpt-5.4-nano-low'
+  | 'gpt-5.4-nano-medium'
+  | 'gpt-5.4-nano-high'
 export type TranscriptionModelId = 'gpt-4o-mini-transcribe' | 'whisper-1'
 export type CaptureSourceId = 'text' | 'voice' | 'calendar'
 export type TimelineWeekStartDay = 'saturday' | 'sunday' | 'monday'
@@ -86,6 +94,7 @@ export interface InterpretTextInput {
   clientLocalDate: string
   clientLocalTime: string
   clientUtcOffsetMinutes: number
+  selectedDate?: string
   openAiModel?: OpenAiModelId
   captureSource?: CaptureSourceId
   transcriptionModel?: TranscriptionModelId

@@ -20,6 +20,39 @@ use crate::models::{
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
 pub const DIAGNOSTICS_RETENTION_DAYS: i64 = 7;
 const MAX_USAGE_DESCRIPTION_LENGTH: usize = 500;
+const STANDARD_TIME_OFF_CODES_SEEDED_SETTING: &str = "standard_time_off_codes_seeded_v1";
+
+#[derive(Clone, Copy)]
+struct StandardTimeOffDefinition {
+    engagement_id: &'static str,
+    activity_id: &'static str,
+    code: &'static str,
+    name: &'static str,
+    color_hex: &'static str,
+    tags: &'static [&'static str],
+    describe_when_to_use: &'static str,
+}
+
+const STANDARD_TIME_OFF_DEFINITIONS: [StandardTimeOffDefinition; 2] = [
+    StandardTimeOffDefinition {
+        engagement_id: "standard-vacation-engagement",
+        activity_id: "standard-vacation-activity",
+        code: "VACATION",
+        name: "Vacation",
+        color_hex: "#2F80ED",
+        tags: &["ooo", "out of office", "pto", "vacation", "time off"],
+        describe_when_to_use: "Use for vacation, PTO, OOO, out of office, and personal time off days.",
+    },
+    StandardTimeOffDefinition {
+        engagement_id: "standard-public-holiday-engagement",
+        activity_id: "standard-public-holiday-activity",
+        code: "HOLIDAY",
+        name: "Public Holiday",
+        color_hex: "#34A853",
+        tags: &["holiday", "public holiday", "observed holiday"],
+        describe_when_to_use: "Use for public holidays, observed holidays, and OOO time specifically taken for a holiday.",
+    },
+];
 
 pub fn current_unix_timestamp() -> i64 {
     SystemTime::now()
@@ -173,6 +206,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
     ensure_expected_columns(conn)?;
     migrate_optional_user_code_schema(conn)?;
     ensure_optional_code_indexes(conn)?;
+    ensure_standard_time_off_codes(conn)?;
 
     Ok(())
 }
@@ -461,6 +495,282 @@ fn ensure_engagement_type_values(
     )?;
 
     Ok(())
+}
+
+fn ensure_standard_time_off_codes(conn: &Connection) -> AppResult<()> {
+    if get_app_setting(conn, STANDARD_TIME_OFF_CODES_SEEDED_SETTING)?.as_deref() == Some("1") {
+        return Ok(());
+    }
+
+    for definition in STANDARD_TIME_OFF_DEFINITIONS {
+        let engagement_id = ensure_standard_time_off_engagement(conn, definition)?;
+        ensure_standard_time_off_activity(conn, definition, &engagement_id)?;
+    }
+
+    upsert_app_setting(conn, STANDARD_TIME_OFF_CODES_SEEDED_SETTING, "1")?;
+    Ok(())
+}
+
+fn ensure_standard_time_off_engagement(
+    conn: &Connection,
+    definition: StandardTimeOffDefinition,
+) -> AppResult<String> {
+    let name_key = definition.name.to_ascii_lowercase();
+    let existing_id = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM engagements
+            WHERE upper(trim(COALESCE(code, ''))) = ?1
+               OR lower(trim(name)) = ?2
+            ORDER BY
+              CASE WHEN upper(trim(COALESCE(code, ''))) = ?1 THEN 0 ELSE 1 END,
+              created_at ASC
+            LIMIT 1
+            "#,
+            params![definition.code, name_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    if let Some(id) = existing_id {
+        let now = current_unix_timestamp();
+        let tags_json = serde_json::to_string(&definition.tags)?;
+        let can_set_code = !engagement_code_exists_elsewhere(conn, definition.code, &id)?;
+        if can_set_code {
+            conn.execute(
+                r#"
+                UPDATE engagements
+                SET code = CASE
+                      WHEN code IS NULL OR trim(code) = '' THEN ?2
+                      ELSE code
+                    END,
+                    engagement_type = 'internal',
+                    color_hex = COALESCE(color_hex, ?3),
+                    tags = CASE
+                      WHEN trim(tags) = '' OR tags = '[]' THEN ?4
+                      ELSE tags
+                    END,
+                    describe_when_to_use = COALESCE(NULLIF(trim(describe_when_to_use), ''), ?5),
+                    is_active = 1,
+                    updated_at = ?6
+                WHERE id = ?1
+                "#,
+                params![
+                    id,
+                    definition.code,
+                    definition.color_hex,
+                    tags_json,
+                    definition.describe_when_to_use,
+                    now,
+                ],
+            )?;
+        } else {
+            conn.execute(
+                r#"
+                UPDATE engagements
+                SET engagement_type = 'internal',
+                    color_hex = COALESCE(color_hex, ?2),
+                    tags = CASE
+                      WHEN trim(tags) = '' OR tags = '[]' THEN ?3
+                      ELSE tags
+                    END,
+                    describe_when_to_use = COALESCE(NULLIF(trim(describe_when_to_use), ''), ?4),
+                    is_active = 1,
+                    updated_at = ?5
+                WHERE id = ?1
+                "#,
+                params![
+                    id,
+                    definition.color_hex,
+                    tags_json,
+                    definition.describe_when_to_use,
+                    now,
+                ],
+            )?;
+        }
+
+        return Ok(id);
+    }
+
+    let now = current_unix_timestamp();
+    let tags_json = serde_json::to_string(&definition.tags)?;
+    conn.execute(
+        r#"
+        INSERT INTO engagements (
+          id, code, name, client, engagement_type, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, NULL, 'internal', ?4, ?5, ?6, 1, ?7, ?7)
+        "#,
+        params![
+            definition.engagement_id,
+            definition.code,
+            definition.name,
+            definition.color_hex,
+            tags_json,
+            definition.describe_when_to_use,
+            now,
+        ],
+    )?;
+
+    Ok(definition.engagement_id.to_string())
+}
+
+fn ensure_standard_time_off_activity(
+    conn: &Connection,
+    definition: StandardTimeOffDefinition,
+    engagement_id: &str,
+) -> AppResult<String> {
+    let name_key = definition.name.to_ascii_lowercase();
+    let existing_id = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM activities
+            WHERE engagement_id = ?1
+              AND (
+                upper(trim(COALESCE(code, ''))) = ?2
+                OR lower(trim(name)) = ?3
+              )
+            ORDER BY
+              CASE WHEN upper(trim(COALESCE(code, ''))) = ?2 THEN 0 ELSE 1 END,
+              created_at ASC
+            LIMIT 1
+            "#,
+            params![engagement_id, definition.code, name_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    if let Some(id) = existing_id {
+        let now = current_unix_timestamp();
+        let tags_json = serde_json::to_string(&definition.tags)?;
+        let can_set_code =
+            !activity_code_exists_elsewhere(conn, engagement_id, definition.code, &id)?;
+        if can_set_code {
+            conn.execute(
+                r#"
+                UPDATE activities
+                SET code = CASE
+                      WHEN code IS NULL OR trim(code) = '' THEN ?3
+                      ELSE code
+                    END,
+                    color_hex = COALESCE(color_hex, ?4),
+                    tags = CASE
+                      WHEN trim(tags) = '' OR tags = '[]' THEN ?5
+                      ELSE tags
+                    END,
+                    describe_when_to_use = COALESCE(NULLIF(trim(describe_when_to_use), ''), ?6),
+                    is_active = 1,
+                    updated_at = ?7
+                WHERE id = ?1
+                  AND engagement_id = ?2
+                "#,
+                params![
+                    id,
+                    engagement_id,
+                    definition.code,
+                    definition.color_hex,
+                    tags_json,
+                    definition.describe_when_to_use,
+                    now,
+                ],
+            )?;
+        } else {
+            conn.execute(
+                r#"
+                UPDATE activities
+                SET color_hex = COALESCE(color_hex, ?3),
+                    tags = CASE
+                      WHEN trim(tags) = '' OR tags = '[]' THEN ?4
+                      ELSE tags
+                    END,
+                    describe_when_to_use = COALESCE(NULLIF(trim(describe_when_to_use), ''), ?5),
+                    is_active = 1,
+                    updated_at = ?6
+                WHERE id = ?1
+                  AND engagement_id = ?2
+                "#,
+                params![
+                    id,
+                    engagement_id,
+                    definition.color_hex,
+                    tags_json,
+                    definition.describe_when_to_use,
+                    now,
+                ],
+            )?;
+        }
+
+        return Ok(id);
+    }
+
+    let now = current_unix_timestamp();
+    let tags_json = serde_json::to_string(&definition.tags)?;
+    conn.execute(
+        r#"
+        INSERT INTO activities (
+          id, engagement_id, code, name, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)
+        "#,
+        params![
+            definition.activity_id,
+            engagement_id,
+            definition.code,
+            definition.name,
+            definition.color_hex,
+            tags_json,
+            definition.describe_when_to_use,
+            now,
+        ],
+    )?;
+
+    Ok(definition.activity_id.to_string())
+}
+
+fn engagement_code_exists_elsewhere(
+    conn: &Connection,
+    code: &str,
+    current_id: &str,
+) -> AppResult<bool> {
+    let exists = conn.query_row(
+        r#"
+        SELECT EXISTS(
+          SELECT 1
+          FROM engagements
+          WHERE upper(trim(COALESCE(code, ''))) = ?1
+            AND id <> ?2
+        )
+        "#,
+        params![code, current_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    Ok(exists == 1)
+}
+
+fn activity_code_exists_elsewhere(
+    conn: &Connection,
+    engagement_id: &str,
+    code: &str,
+    current_id: &str,
+) -> AppResult<bool> {
+    let exists = conn.query_row(
+        r#"
+        SELECT EXISTS(
+          SELECT 1
+          FROM activities
+          WHERE engagement_id = ?1
+            AND upper(trim(COALESCE(code, ''))) = ?2
+            AND id <> ?3
+        )
+        "#,
+        params![engagement_id, code, current_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    Ok(exists == 1)
 }
 
 pub fn upsert_engagement(conn: &Connection, input: EngagementUpsertInput) -> AppResult<String> {
@@ -2233,13 +2543,156 @@ mod tests {
             None
         );
 
-        upsert_app_setting(&connection, "openai_model", "gpt-4.1-nano")
+        upsert_app_setting(&connection, "openai_model", "gpt-5.5-high")
             .expect("setting should save");
 
         assert_eq!(
             get_app_setting(&connection, "openai_model").expect("settings lookup should work"),
-            Some("gpt-4.1-nano".to_string())
+            Some("gpt-5.5-high".to_string())
         );
+    }
+
+    #[test]
+    fn migrations_seed_standard_time_off_code_pairs() {
+        let connection = test_connection();
+
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        let vacation = engagements
+            .iter()
+            .find(|engagement| engagement.code.as_deref() == Some("VACATION"))
+            .expect("vacation engagement should be seeded");
+        let holiday = engagements
+            .iter()
+            .find(|engagement| engagement.code.as_deref() == Some("HOLIDAY"))
+            .expect("holiday engagement should be seeded");
+
+        assert_eq!(vacation.name, "Vacation");
+        assert_eq!(vacation.engagement_type, EngagementType::Internal);
+        assert!(vacation.is_active);
+        assert!(vacation.activities.iter().any(|activity| {
+            activity.code.as_deref() == Some("VACATION")
+                && activity.name == "Vacation"
+                && activity.is_active
+        }));
+
+        assert_eq!(holiday.name, "Public Holiday");
+        assert_eq!(holiday.engagement_type, EngagementType::Internal);
+        assert!(holiday.is_active);
+        assert!(holiday.activities.iter().any(|activity| {
+            activity.code.as_deref() == Some("HOLIDAY")
+                && activity.name == "Public Holiday"
+                && activity.is_active
+        }));
+    }
+
+    #[test]
+    fn migrations_do_not_duplicate_standard_time_off_code_pairs() {
+        let connection = test_connection();
+
+        run_migrations(&connection).expect("second migration should run");
+
+        let engagement_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM engagements WHERE code IN ('VACATION', 'HOLIDAY')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("engagement count should load");
+        let activity_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM activities WHERE code IN ('VACATION', 'HOLIDAY')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("activity count should load");
+
+        assert_eq!(engagement_count, 2);
+        assert_eq!(activity_count, 2);
+    }
+
+    #[test]
+    fn migrations_reuse_existing_matching_standard_time_off_records() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE engagements (
+                  id TEXT PRIMARY KEY,
+                  code TEXT,
+                  name TEXT NOT NULL,
+                  client TEXT,
+                  engagement_type TEXT NOT NULL DEFAULT 'external',
+                  color_hex TEXT,
+                  tags TEXT NOT NULL,
+                  describe_when_to_use TEXT,
+                  is_active INTEGER NOT NULL DEFAULT 1,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE activities (
+                  id TEXT PRIMARY KEY,
+                  engagement_id TEXT NOT NULL,
+                  code TEXT,
+                  name TEXT NOT NULL,
+                  color_hex TEXT,
+                  tags TEXT NOT NULL,
+                  describe_when_to_use TEXT,
+                  is_active INTEGER NOT NULL DEFAULT 1,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL,
+                  FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE app_settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+                );
+
+                INSERT INTO engagements (
+                  id, code, name, client, engagement_type, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+                )
+                VALUES (
+                  'existing-vacation', 'VACATION', 'Existing Vacation', NULL, 'external', NULL, '[]', NULL, 0, 1, 1
+                );
+
+                INSERT INTO activities (
+                  id, engagement_id, code, name, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+                )
+                VALUES (
+                  'existing-vacation-activity', 'existing-vacation', 'VACATION', 'Existing Vacation Activity', NULL, '[]', NULL, 0, 1, 1
+                );
+                "#,
+            )
+            .expect("existing tables should be created");
+
+        run_migrations(&connection).expect("migrations should run");
+
+        let vacation_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM engagements WHERE upper(trim(code)) = 'VACATION'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("vacation count should load");
+        let existing_status: (String, i64) = connection
+            .query_row(
+                "SELECT engagement_type, is_active FROM engagements WHERE id = 'existing-vacation'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("existing engagement should load");
+        let existing_activity_active: i64 = connection
+            .query_row(
+                "SELECT is_active FROM activities WHERE id = 'existing-vacation-activity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("existing activity should load");
+
+        assert_eq!(vacation_count, 1);
+        assert_eq!(existing_status, ("internal".to_string(), 1));
+        assert_eq!(existing_activity_active, 1);
     }
 
     #[test]
@@ -2262,7 +2715,7 @@ mod tests {
                 &raw_message_id,
                 "worked on counted activity",
                 "{\"entries\":[]}",
-                "gpt-5-nano",
+                "gpt-5.5-instant",
                 source,
                 None,
                 None,
@@ -2504,9 +2957,9 @@ mod tests {
         .expect("manual entry should save");
 
         let suggestions =
-            list_quick_add_suggestions(&connection, 3).expect("suggestions should load");
+            list_quick_add_suggestions(&connection, 5).expect("suggestions should load");
 
-        assert_eq!(suggestions.len(), 3);
+        assert!(suggestions.len() >= 3);
         assert_eq!(suggestions[0].activity_id, used_activity_id);
         assert_eq!(suggestions[0].usage_count, 1);
         assert!(suggestions.iter().any(|suggestion| {
@@ -2526,7 +2979,7 @@ mod tests {
             "raw-model",
             "worked on controls testing",
             "{\"entries\":[]}",
-            "gpt-5-nano",
+            "gpt-5.5-medium",
             "text",
             None,
             None,
@@ -2574,8 +3027,11 @@ mod tests {
             .next()
             .expect("entry should exist");
 
-        assert_eq!(saved_entry.model_used, Some(OpenAiModelId::Gpt5Nano));
-        assert_eq!(saved_entry.model_used_label.as_deref(), Some("GPT-5 Nano"));
+        assert_eq!(saved_entry.model_used, Some(OpenAiModelId::Gpt55Medium));
+        assert_eq!(
+            saved_entry.model_used_label.as_deref(),
+            Some("GPT-5.5 Medium")
+        );
     }
 
     #[test]
@@ -2718,7 +3174,7 @@ mod tests {
             "raw-voice",
             "worked on controls testing",
             "{\"entries\":[]}",
-            "gpt-5-nano",
+            "gpt-5.5-instant",
             "voice",
             Some("whisper-1"),
             Some(1800),
@@ -2957,7 +3413,7 @@ mod tests {
             "raw-1",
             "worked on client walkthrough",
             "{\"entries\":[]}",
-            "gpt-5-nano",
+            "gpt-5.5-instant",
             "text",
             None,
             None,
