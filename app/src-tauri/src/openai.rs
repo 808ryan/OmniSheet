@@ -75,6 +75,15 @@ Return strict JSON with this shape:
         }
       ]
     }
+  ],
+  "timeOffRequests": [
+    {
+      "kind": "vacation" | "holiday",
+      "startDate": "YYYY-MM-DD",
+      "endDate": "YYYY-MM-DD",
+      "description": string | null,
+      "confidence": number
+    }
   ]
 }
 
@@ -145,6 +154,15 @@ Gap fill rules:
 - For workday shorthand ranges in gap-fill wording, interpret "3 to 6" as "15:00" to "18:00" and "9 to 2" as "09:00" to "14:00" unless the wording clearly indicates otherwise.
 - Match each listed activity independently against the engagement/activity context. Include engagementRef/activityRef when reasonably known, and keep the user's visible words in label/description.
 
+Time off rules:
+- Use timeOffRequests, not regular entries, when the user says they are OOO, out of office, taking PTO, on vacation, or observing a holiday.
+- For OOO, out of office, PTO, and vacation, set kind = "vacation" unless the message also explicitly says holiday or public holiday.
+- For holiday or public holiday wording, set kind = "holiday", including phrases such as "OOO next Monday for holiday".
+- Do not choose engagementRef or activityRef for timeOffRequests; the app will map vacation and holiday requests to standard codes.
+- Set startDate and endDate as inclusive dates. For a single day, set both fields to the same date.
+- "next week" means the next Monday through Friday workweek after the clientLocalDate or selectedDate.
+- Business-day expansion is handled by the app; return one timeOffRequests item for a range instead of one entry per day.
+
 Examples:
 - Message: "for the past hour i've been in meetings for RR ITACs"
   clientLocalTime: "21:48"
@@ -185,6 +203,14 @@ Examples:
   Expected gap-fill intent: entries []; gapFillRequests[0] startTime "15:00", endTime "18:00", activities in the listed order.
 - Message: "From 9 to 2, worked on Example ITGCs, Non-SAP, ExampleCo"
   Expected gap-fill intent: entries []; gapFillRequests[0] startTime "09:00", endTime "14:00", activities in the listed order.
+- Message: "I'm OOO next week"
+  Expected time-off intent: entries []; timeOffRequests[0] kind "vacation", startDate as next Monday, endDate as next Friday.
+- Message: "I'm on vacation next week"
+  Expected time-off intent: entries []; timeOffRequests[0] kind "vacation", startDate as next Monday, endDate as next Friday.
+- Message: "I'm OOO on Friday"
+  Expected time-off intent: entries []; timeOffRequests[0] kind "vacation", startDate and endDate as that Friday.
+- Message: "I'm OOO next Monday for holiday"
+  Expected time-off intent: entries []; timeOffRequests[0] kind "holiday", startDate and endDate as the coming Monday.
 "#
 }
 
@@ -212,14 +238,20 @@ fn build_request_body(
       "engagementActivityContext": code_context,
     });
 
-    json!({
+    let mut request_body = json!({
       "model": model.api_name(),
       "response_format": { "type": "json_object" },
       "messages": [
         { "role": "system", "content": system_prompt },
         { "role": "user", "content": user_prompt.to_string() }
       ]
-    })
+    });
+
+    if let Some(effort) = model.reasoning_effort() {
+        request_body["reasoning_effort"] = json!(effort);
+    }
+
+    request_body
 }
 
 fn build_calendar_extraction_system_prompt() -> &'static str {
@@ -341,7 +373,7 @@ fn build_calendar_extraction_request_body(
         "engagementActivityContext": code_context,
     });
 
-    json!({
+    let mut request_body = json!({
         "model": model.api_name(),
         "input": [
             {
@@ -376,7 +408,13 @@ fn build_calendar_extraction_request_body(
                 "schema": calendar_event_schema()
             }
         }
-    })
+    });
+
+    if let Some(effort) = model.reasoning_effort() {
+        request_body["reasoning"] = json!({ "effort": effort });
+    }
+
+    request_body
 }
 
 fn audio_filename_for_mime_type(mime_type: &str) -> &'static str {
@@ -1062,8 +1100,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        audio_filename_for_mime_type, build_calendar_extraction_system_prompt, build_request_body,
-        build_system_prompt, calendar_event_schema, is_retryable_status,
+        audio_filename_for_mime_type, build_calendar_extraction_request_body,
+        build_calendar_extraction_system_prompt, build_request_body, build_system_prompt,
+        calendar_event_schema, is_retryable_status,
     };
     use crate::models::{CodeContext, OpenAiModelId};
 
@@ -1210,6 +1249,19 @@ mod tests {
     }
 
     #[test]
+    fn prompt_requests_time_off_contract_and_examples() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("\"timeOffRequests\""));
+        assert!(prompt.contains("Use timeOffRequests, not regular entries"));
+        assert!(prompt.contains("OOO, out of office, PTO, and vacation"));
+        assert!(prompt.contains("holiday or public holiday"));
+        assert!(prompt.contains("\"I'm OOO next week\""));
+        assert!(prompt.contains("\"I'm on vacation next week\""));
+        assert!(prompt.contains("\"I'm OOO on Friday\""));
+        assert!(prompt.contains("\"I'm OOO next Monday for holiday\""));
+    }
+
+    #[test]
     fn calendar_prompt_includes_short_block_visual_height_guidance() {
         let prompt = build_calendar_extraction_system_prompt();
         assert!(prompt.contains("15-minute and 30-minute blocks"));
@@ -1257,7 +1309,7 @@ mod tests {
     #[test]
     fn request_body_uses_resolved_model_id() {
         let request_body = build_request_body(
-            OpenAiModelId::Gpt41Nano,
+            OpenAiModelId::Gpt55Instant,
             "worked on controls testing",
             "2026-03-15T18:00:00Z",
             "2026-03-15",
@@ -1275,7 +1327,14 @@ mod tests {
                 .get("model")
                 .and_then(Value::as_str)
                 .expect("model should be serialized"),
-            "gpt-4.1-nano"
+            "gpt-5.5"
+        );
+        assert_eq!(
+            request_body
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .expect("reasoning effort should be serialized"),
+            "none"
         );
         let user_prompt = request_body
             .get("messages")
@@ -1285,6 +1344,72 @@ mod tests {
             .and_then(Value::as_str)
             .expect("user prompt should be serialized");
         assert!(user_prompt.contains("\"selectedDate\":\"2026-03-16\""));
+    }
+
+    #[test]
+    fn request_body_sets_configured_reasoning_effort() {
+        let request_body = build_request_body(
+            OpenAiModelId::Gpt54NanoHigh,
+            "worked on controls testing",
+            "2026-03-15T18:00:00Z",
+            "2026-03-15",
+            "11:00",
+            -420,
+            "America/Los_Angeles",
+            Some("2026-03-16"),
+            &CodeContext {
+                engagements: vec![],
+            },
+        );
+
+        assert_eq!(
+            request_body
+                .get("model")
+                .and_then(Value::as_str)
+                .expect("model should be serialized"),
+            "gpt-5.4-nano"
+        );
+        assert_eq!(
+            request_body
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .expect("reasoning effort should be serialized"),
+            "high"
+        );
+    }
+
+    #[test]
+    fn calendar_request_body_sets_configured_reasoning_effort() {
+        let request_body = build_calendar_extraction_request_body(
+            OpenAiModelId::Gpt54NanoLow,
+            "abc123",
+            "image/png",
+            "2026-03-15T18:00:00Z",
+            "2026-03-15",
+            "11:00",
+            -420,
+            "America/Los_Angeles",
+            "2026-03-16",
+            &CodeContext {
+                engagements: vec![],
+            },
+        );
+
+        assert_eq!(
+            request_body
+                .get("model")
+                .and_then(Value::as_str)
+                .expect("model should be serialized"),
+            "gpt-5.4-nano"
+        );
+        assert_eq!(
+            request_body
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(Value::as_str)
+                .expect("reasoning effort should be serialized"),
+            "low"
+        );
     }
 
     #[test]

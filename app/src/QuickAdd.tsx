@@ -34,7 +34,7 @@ interface RecordingResult {
   durationMs: number
 }
 
-const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5-nano'
+const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
 const PREFERRED_VOICE_MIME_TYPES = [
   'audio/webm;codecs=opus',
   'audio/webm',
