@@ -196,7 +196,7 @@ pub enum TimelineWeekStartDay {
 
 impl Default for TimelineWeekStartDay {
     fn default() -> Self {
-        Self::Sunday
+        Self::Saturday
     }
 }
 
@@ -1125,7 +1125,7 @@ mod tests {
 
     use super::{
         CodeContext, ContextActivity, ContextEngagement, OpenAiModelId, SummaryLayoutColumn,
-        SummaryLayoutFieldKey, TranscriptionModelId,
+        SummaryLayoutFieldKey, TimelineWeekStartDay, TranscriptionModelId,
     };
 
     #[test]
@@ -1290,6 +1290,15 @@ mod tests {
         assert_eq!(default_model.api_name(), "gpt-4o-mini-transcribe");
         assert_eq!(default_model.display_label(), "GPT-4o Mini Transcribe");
         assert_eq!(TranscriptionModelId::Whisper1.display_label(), "Whisper");
+    }
+
+    #[test]
+    fn timeline_week_start_default_is_saturday() {
+        assert_eq!(
+            TimelineWeekStartDay::default(),
+            TimelineWeekStartDay::Saturday
+        );
+        assert_eq!(TimelineWeekStartDay::default().setting_value(), "saturday");
     }
 
     #[test]

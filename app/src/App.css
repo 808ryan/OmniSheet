@@ -309,12 +309,19 @@
   border: 1px solid transparent;
   color: rgba(80, 98, 125, 0.72);
   box-shadow: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
 }
 
 .quick-add-settings-button img {
   width: 0.95rem;
   height: 0.95rem;
   display: block;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
   opacity: 0.82;
   transition:
     opacity 160ms ease,
