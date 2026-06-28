@@ -196,7 +196,11 @@ function QuickAdd() {
       touchedMonthKeys: result.touchedMonthKeys,
     })
     setStatus('success')
-    setStatusMessage(`Added ${result.createdEntryIds.length} entr${result.createdEntryIds.length === 1 ? 'y' : 'ies'}.`)
+    setStatusMessage(
+      result.createdEntryIds.length === 0
+        ? 'No open gaps found.'
+        : `Added ${result.createdEntryIds.length} entr${result.createdEntryIds.length === 1 ? 'y' : 'ies'}.`,
+    )
   }, [settingsStatus])
 
   const submitCurrentMessage = useCallback(async () => {

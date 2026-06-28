@@ -52,6 +52,29 @@ Return strict JSON with this shape:
       ] | null,
       "confidence": number
     }
+  ],
+  "gapFillRequests": [
+    {
+      "date": "YYYY-MM-DD" | null,
+      "startTime": "HH:MM" | null,
+      "endTime": "HH:MM" | null,
+      "activities": [
+        {
+          "engagementRef": string | null,
+          "activityRef": string | null,
+          "label": string,
+          "description": string,
+          "activityReason": string | null,
+          "alternativeActivities": [
+            {
+              "activityRef": string,
+              "reason": string
+            }
+          ] | null,
+          "confidence": number
+        }
+      ]
+    }
   ]
 }
 
@@ -113,6 +136,15 @@ Additional rules:
 - Confidence must be in range 0.0 to 1.0.
 - Never include text outside JSON.
 
+Gap fill rules:
+- Use gapFillRequests, not regular entries, when the user asks to fill open calendar/workday time or says they generally worked on multiple listed things within a range.
+- For gap fill requests, return entries = [] and one gapFillRequests item with activities in the same order as the user's list.
+- The app will calculate existing free gaps and exact durations; do not invent precise per-activity start/end blocks in entries for gap-fill intent.
+- If the user gives no date for a gap fill request, set date = selectedDate when provided; otherwise use clientLocalDate.
+- If the user gives no fill window, set startTime "09:00" and endTime "18:00".
+- For workday shorthand ranges in gap-fill wording, interpret "3 to 6" as "15:00" to "18:00" and "9 to 2" as "09:00" to "14:00" unless the wording clearly indicates otherwise.
+- Match each listed activity independently against the engagement/activity context. Include engagementRef/activityRef when reasonably known, and keep the user's visible words in label/description.
+
 Examples:
 - Message: "for the past hour i've been in meetings for RR ITACs"
   clientLocalTime: "21:48"
@@ -146,6 +178,13 @@ Examples:
   Expected categorization intent: use a generic meeting/admin activity only when there is no more specific workstream activity signal in the message.
 - Message: "worked on controls testing"
   Expected temporal intent: startTime null, endTime null, durationMinutes null.
+- Message: "Fill out my calendar using FF ITGCs, Non-SAP ITGCs, and PCC report 1"
+  selectedDate: "2026-04-15"
+  Expected gap-fill intent: entries []; gapFillRequests[0] date "2026-04-15", startTime "09:00", endTime "18:00", activities in the listed order.
+- Message: "Worked on FF ITGCs, Non-SAP, and PCC between 3 and 6"
+  Expected gap-fill intent: entries []; gapFillRequests[0] startTime "15:00", endTime "18:00", activities in the listed order.
+- Message: "From 9 to 2, worked on FF ITGCs, Non-SAP, PCC"
+  Expected gap-fill intent: entries []; gapFillRequests[0] startTime "09:00", endTime "14:00", activities in the listed order.
 "#
 }
 
@@ -157,6 +196,7 @@ fn build_request_body(
     client_local_time: &str,
     client_utc_offset_minutes: i64,
     timezone: &str,
+    selected_date: Option<&str>,
     code_context: &CodeContext,
 ) -> Value {
     let system_prompt = build_system_prompt();
@@ -168,6 +208,7 @@ fn build_request_body(
       "clientLocalTime": client_local_time,
       "clientUtcOffsetMinutes": client_utc_offset_minutes,
       "timezone": timezone,
+      "selectedDate": selected_date,
       "engagementActivityContext": code_context,
     });
 
@@ -423,6 +464,7 @@ pub async fn interpret_message(
     client_local_time: &str,
     client_utc_offset_minutes: i64,
     timezone: &str,
+    selected_date: Option<&str>,
     code_context: &CodeContext,
     attempt_telemetry: &mut Vec<LlmAttemptTelemetry>,
 ) -> AppResult<LlmResponse> {
@@ -434,6 +476,7 @@ pub async fn interpret_message(
         client_local_time,
         client_utc_offset_minutes,
         timezone,
+        selected_date,
         code_context,
     );
 
@@ -1154,6 +1197,19 @@ mod tests {
     }
 
     #[test]
+    fn prompt_requests_gap_fill_contract_and_defaults() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("\"gapFillRequests\""));
+        assert!(prompt.contains("Use gapFillRequests, not regular entries"));
+        assert!(prompt.contains("selectedDate"));
+        assert!(prompt.contains("startTime \"09:00\" and endTime \"18:00\""));
+        assert!(prompt
+            .contains("\"Fill out my calendar using FF ITGCs, Non-SAP ITGCs, and PCC report 1\""));
+        assert!(prompt.contains("\"Worked on FF ITGCs, Non-SAP, and PCC between 3 and 6\""));
+        assert!(prompt.contains("\"From 9 to 2, worked on FF ITGCs, Non-SAP, PCC\""));
+    }
+
+    #[test]
     fn calendar_prompt_includes_short_block_visual_height_guidance() {
         let prompt = build_calendar_extraction_system_prompt();
         assert!(prompt.contains("15-minute and 30-minute blocks"));
@@ -1208,6 +1264,7 @@ mod tests {
             "11:00",
             -420,
             "America/Los_Angeles",
+            Some("2026-03-16"),
             &CodeContext {
                 engagements: vec![],
             },
@@ -1220,6 +1277,14 @@ mod tests {
                 .expect("model should be serialized"),
             "gpt-4.1-nano"
         );
+        let user_prompt = request_body
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| messages.get(1))
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .expect("user prompt should be serialized");
+        assert!(user_prompt.contains("\"selectedDate\":\"2026-03-16\""));
     }
 
     #[test]
