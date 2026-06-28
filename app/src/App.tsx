@@ -3,6 +3,7 @@ import type {
   ClipboardEvent as ReactClipboardEvent,
   CSSProperties,
   FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from 'react'
@@ -1061,7 +1062,7 @@ function App() {
     settingsStatus?.timelineIncludeInternalInTotals ?? false
   const timelineSeparateEngagementTypeTotals =
     settingsStatus?.timelineSeparateEngagementTypeTotals ?? true
-  const timelineWeekStartDay: TimelineWeekStartDay = settingsStatus?.timelineWeekStartDay ?? 'sunday'
+  const timelineWeekStartDay: TimelineWeekStartDay = settingsStatus?.timelineWeekStartDay ?? 'saturday'
   const currentTimelinePreferences: SettingsTimelinePreferencesInput = {
     timelineExcludeUncategorizedFromDailyTotals,
     timelineShowUncategorizedDailyTotal,
@@ -5516,6 +5517,22 @@ function App() {
     setVoiceCaptureStatusMessage(null)
   }
 
+  const onCaptureMessageKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      event.key !== 'Enter'
+      || event.shiftKey
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.nativeEvent.isComposing
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    event.currentTarget.form?.requestSubmit()
+  }
+
   const onSubmitEngagement = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const savedEngagementId = engagementForm.id
@@ -9436,6 +9453,7 @@ function App() {
                 <textarea
                   aria-label="Entry message"
                   value={captureMessage}
+                  onKeyDown={onCaptureMessageKeyDown}
                   onChange={(event) => {
                     const nextValue = event.target.value
                     setCaptureMessage(nextValue)
@@ -9510,11 +9528,12 @@ function App() {
                 <button
                   type="button"
                   className="quick-add-settings-button"
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={openQuickAddSettings}
                   aria-label="Open Quick Entry settings"
                   title="Quick Entry settings"
                 >
-                  <img src={settingsIcon} alt="" aria-hidden="true" />
+                  <img src={settingsIcon} alt="" aria-hidden="true" draggable={false} />
                 </button>
               </div>
               <input

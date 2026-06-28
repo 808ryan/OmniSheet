@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { emit } from '@tauri-apps/api/event'
 
 import {
@@ -361,6 +361,22 @@ function QuickAdd() {
     void submitCurrentMessage()
   }
 
+  const onMessageKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      event.key !== 'Enter'
+      || event.shiftKey
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.nativeEvent.isComposing
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    event.currentTarget.form?.requestSubmit()
+  }
+
   const isBusy = status === 'submitting' || voiceCaptureState === 'transcribing'
   const canSubmit = voiceCaptureState === 'recording' || message.trim().length > 0
 
@@ -384,6 +400,7 @@ function QuickAdd() {
       <form className="quick-add-form" onSubmit={onSubmit}>
         <textarea
           value={message}
+          onKeyDown={onMessageKeyDown}
           onChange={(event) => {
             setMessage(event.target.value)
             setVoiceDraftMetadata(null)
