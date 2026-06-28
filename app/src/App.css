@@ -1923,7 +1923,7 @@ button.danger:hover:not(:disabled) {
 .week-timeline-frozen-gutter-layer {
   position: absolute;
   inset: 0;
-  z-index: 4;
+  z-index: 5;
   pointer-events: none;
 }
 

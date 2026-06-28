@@ -22,7 +22,7 @@ use crate::models::{
     CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, DateInput, DiagnosticsBundle,
     DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement, EngagementType,
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
-    LlmAlternativeActivity, LlmEntry, LlmGapFillActivity, LlmGapFillRequest,
+    LlmAlternativeActivity, LlmEntry, LlmGapFillActivity, LlmGapFillRequest, LlmTimeOffRequest,
     MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
     QuickAddPreferences, QuickAddSuggestionInput, QuickAddSuggestionResult, ReportingDisplayColumn,
     ReportingDisplayDensity, ReportingDisplayPreset, ReportingRowLabelMode, ReportingState,
@@ -49,8 +49,11 @@ const GLOBAL_ACTIVITY_FALLBACK_MIN_SCORE: f64 = 2.5;
 const GLOBAL_ACTIVITY_FALLBACK_MIN_MARGIN: f64 = 0.75;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
 const MAX_GAP_FILL_SAVED_ENTRIES_PER_MESSAGE: usize = 24;
+const MAX_TIME_OFF_SAVED_ENTRIES_PER_MESSAGE: usize = 45;
 const DEFAULT_GAP_FILL_START_MINUTE: i64 = 9 * 60;
 const DEFAULT_GAP_FILL_END_MINUTE: i64 = 18 * 60;
+const DEFAULT_TIME_OFF_START_MINUTE: i64 = 9 * 60;
+const DEFAULT_TIME_OFF_END_MINUTE: i64 = 17 * 60;
 const APP_SETTING_OPENAI_KEY_CONFIGURED: &str = "openai_key_configured";
 const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
 const APP_SETTING_CALENDAR_BULK_OPENAI_MODEL: &str = "calendar_bulk_openai_model";
@@ -939,9 +942,10 @@ fn record_invalid_saved_openai_model(
         None,
         None,
         json!({
-          "message": "Invalid saved OpenAI model; defaulted to GPT-5 Nano.",
+          "message": "Invalid saved OpenAI model; defaulted to GPT-5.5 Instant.",
           "invalidValue": invalid_value,
-          "fallbackModel": OpenAiModelId::default().api_name(),
+          "fallbackModel": OpenAiModelId::default().storage_value(),
+          "fallbackApiModel": OpenAiModelId::default().api_name(),
           "fallbackModelLabel": OpenAiModelId::default().display_label(),
         }),
     );
@@ -963,10 +967,11 @@ fn record_invalid_saved_calendar_bulk_model(
         None,
         None,
         json!({
-          "message": "Invalid saved calendar bulk model; defaulted to GPT-5.4.",
+          "message": "Invalid saved calendar bulk model; defaulted to GPT-5.5 Instant.",
           "setting": APP_SETTING_CALENDAR_BULK_OPENAI_MODEL,
           "invalidValue": invalid_value,
-          "fallbackModel": fallback_model.api_name(),
+          "fallbackModel": fallback_model.storage_value(),
+          "fallbackApiModel": fallback_model.api_name(),
           "fallbackModelLabel": fallback_model.display_label(),
         }),
     );
@@ -1820,6 +1825,44 @@ struct ResolvedGapFillActivity {
     confidence: f64,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TimeOffKind {
+    Vacation,
+    PublicHoliday,
+}
+
+impl TimeOffKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Vacation => "VACATION",
+            Self::PublicHoliday => "HOLIDAY",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Vacation => "Vacation",
+            Self::PublicHoliday => "Public Holiday",
+        }
+    }
+
+    fn storage_value(self) -> &'static str {
+        match self {
+            Self::Vacation => "vacation",
+            Self::PublicHoliday => "holiday",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTimeOffRequest {
+    kind: TimeOffKind,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    description: String,
+    confidence: f64,
+}
+
 #[derive(Debug, Clone)]
 struct GapFillSpan {
     activity_index: usize,
@@ -1967,7 +2010,7 @@ fn write_interpreted_prepared_entries(
         metadata.raw_message_id,
         metadata.raw_text,
         metadata.interpreted_entries_json,
-        metadata.selected_openai_model.api_name(),
+        metadata.selected_openai_model.storage_value(),
         capture_source_label(metadata.capture_source),
         metadata.transcription_model.map(|model| model.api_name()),
         metadata.transcription_duration_ms,
@@ -2181,6 +2224,397 @@ fn normalize_gap_fill_window(start_minute: i64, end_minute: i64) -> Option<Minut
         start_minute,
         end_minute,
     })
+}
+
+fn synthesize_time_off_request_from_text(
+    raw_text: &str,
+    input: &InterpretTextInput,
+    reference: &TemporalReference,
+) -> Option<LlmTimeOffRequest> {
+    let (normalized, tokens) = normalize_time_off_text(raw_text);
+    if !has_time_off_intent(&normalized, &tokens) {
+        return None;
+    }
+
+    let kind = if has_holiday_intent(&tokens) {
+        TimeOffKind::PublicHoliday
+    } else {
+        TimeOffKind::Vacation
+    };
+    let anchor_date = input
+        .selected_date
+        .as_deref()
+        .and_then(parse_date)
+        .unwrap_or(reference.local_date);
+    let (start_date, end_date) = detect_time_off_date_range(raw_text, &tokens, anchor_date);
+
+    Some(LlmTimeOffRequest {
+        kind: Some(kind.storage_value().to_string()),
+        start_date: Some(start_date.format("%Y-%m-%d").to_string()),
+        end_date: Some(end_date.format("%Y-%m-%d").to_string()),
+        description: Some(kind.name().to_string()),
+        confidence: Some(0.9),
+    })
+}
+
+fn normalize_time_off_text(raw_text: &str) -> (String, Vec<String>) {
+    let normalized = raw_text
+        .to_lowercase()
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() {
+                value
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let tokens = normalized
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    (
+        format!(
+            " {} ",
+            normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+        ),
+        tokens,
+    )
+}
+
+fn has_time_off_intent(normalized: &str, tokens: &[String]) -> bool {
+    let has_explicit_time_off = tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "ooo" | "pto" | "vacation"))
+        || normalized.contains(" out of office ");
+
+    has_explicit_time_off
+        || normalized.contains(" public holiday ")
+        || normalized.contains(" on holiday ")
+        || (has_holiday_intent(tokens) && has_holiday_date_context(tokens))
+}
+
+fn has_holiday_intent(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "holiday" | "holidays"))
+}
+
+fn has_holiday_date_context(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "today"
+                | "tomorrow"
+                | "week"
+                | "monday"
+                | "mon"
+                | "tuesday"
+                | "tue"
+                | "tues"
+                | "wednesday"
+                | "wed"
+                | "thursday"
+                | "thu"
+                | "thur"
+                | "thurs"
+                | "friday"
+                | "fri"
+                | "saturday"
+                | "sat"
+                | "sunday"
+                | "sun"
+        )
+    })
+}
+
+fn detect_time_off_date_range(
+    raw_text: &str,
+    tokens: &[String],
+    anchor_date: NaiveDate,
+) -> (NaiveDate, NaiveDate) {
+    if let Some(date) = detect_explicit_iso_date(raw_text) {
+        return (date, date);
+    }
+
+    if let Some((index, weekday)) = tokens
+        .iter()
+        .enumerate()
+        .find_map(|(index, token)| weekday_from_token(token).map(|weekday| (index, weekday)))
+    {
+        let force_next = index > 0 && tokens[index - 1] == "next";
+        let date = resolve_weekday_date(anchor_date, weekday, force_next);
+        return (date, date);
+    }
+
+    if contains_token_pair(tokens, "next", "week") {
+        return next_workweek_range(anchor_date);
+    }
+
+    if contains_token_pair(tokens, "this", "week") {
+        return current_workweek_range(anchor_date);
+    }
+
+    if tokens.iter().any(|token| token == "tomorrow") {
+        let date = anchor_date + Duration::days(1);
+        return (date, date);
+    }
+
+    if tokens.iter().any(|token| token == "today") {
+        return (anchor_date, anchor_date);
+    }
+
+    (anchor_date, anchor_date)
+}
+
+fn detect_explicit_iso_date(raw_text: &str) -> Option<NaiveDate> {
+    raw_text
+        .split_whitespace()
+        .filter_map(|token| {
+            let cleaned =
+                token.trim_matches(|value: char| !(value.is_ascii_digit() || value == '-'));
+            parse_date(cleaned)
+        })
+        .next()
+}
+
+fn contains_token_pair(tokens: &[String], first: &str, second: &str) -> bool {
+    tokens
+        .windows(2)
+        .any(|window| window[0] == first && window[1] == second)
+}
+
+fn weekday_from_token(value: &str) -> Option<Weekday> {
+    match value {
+        "monday" | "mon" => Some(Weekday::Mon),
+        "tuesday" | "tue" | "tues" => Some(Weekday::Tue),
+        "wednesday" | "wed" => Some(Weekday::Wed),
+        "thursday" | "thu" | "thur" | "thurs" => Some(Weekday::Thu),
+        "friday" | "fri" => Some(Weekday::Fri),
+        "saturday" | "sat" => Some(Weekday::Sat),
+        "sunday" | "sun" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+fn resolve_weekday_date(
+    anchor_date: NaiveDate,
+    target_weekday: Weekday,
+    force_next: bool,
+) -> NaiveDate {
+    let anchor_offset = anchor_date.weekday().num_days_from_monday() as i64;
+    let target_offset = target_weekday.num_days_from_monday() as i64;
+    let mut days_until = target_offset - anchor_offset;
+
+    if force_next {
+        if days_until <= 0 {
+            days_until += 7;
+        }
+    } else if days_until < 0 {
+        days_until += 7;
+    }
+
+    anchor_date + Duration::days(days_until)
+}
+
+fn current_workweek_range(anchor_date: NaiveDate) -> (NaiveDate, NaiveDate) {
+    let current_monday =
+        anchor_date - Duration::days(anchor_date.weekday().num_days_from_monday() as i64);
+    (current_monday, current_monday + Duration::days(4))
+}
+
+fn next_workweek_range(anchor_date: NaiveDate) -> (NaiveDate, NaiveDate) {
+    let (current_monday, _) = current_workweek_range(anchor_date);
+    let next_monday = current_monday + Duration::days(7);
+    (next_monday, next_monday + Duration::days(4))
+}
+
+fn resolve_time_off_request(request: &LlmTimeOffRequest) -> Option<ResolvedTimeOffRequest> {
+    let kind = parse_time_off_kind(request.kind.as_deref())?;
+    let start_date = request
+        .start_date
+        .as_deref()
+        .and_then(parse_date)
+        .or_else(|| request.end_date.as_deref().and_then(parse_date))?;
+    let end_date = request
+        .end_date
+        .as_deref()
+        .and_then(parse_date)
+        .unwrap_or(start_date);
+    let (start_date, end_date) = if end_date < start_date {
+        (end_date, start_date)
+    } else {
+        (start_date, end_date)
+    };
+    let description = request
+        .description
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| kind.name().to_string());
+
+    Some(ResolvedTimeOffRequest {
+        kind,
+        start_date,
+        end_date,
+        description,
+        confidence: normalize_confidence(request.confidence),
+    })
+}
+
+fn parse_time_off_kind(value: Option<&str>) -> Option<TimeOffKind> {
+    let normalized = value?.trim().to_lowercase();
+    if normalized.contains("holiday") {
+        return Some(TimeOffKind::PublicHoliday);
+    }
+
+    if ["vacation", "ooo", "out_of_office", "out of office", "pto"]
+        .iter()
+        .any(|candidate| normalized == *candidate)
+    {
+        return Some(TimeOffKind::Vacation);
+    }
+
+    None
+}
+
+fn prepare_time_off_entries(
+    requests: &[ResolvedTimeOffRequest],
+    raw_text: &str,
+    code_context: &CodeContext,
+) -> (Vec<PreparedEntry>, Vec<String>, Vec<Value>) {
+    let mut prepared_entries = Vec::new();
+    let mut notes = Vec::new();
+    let mut details = Vec::new();
+
+    for request in requests {
+        let Some((engagement_ref, activity_ref)) =
+            resolve_time_off_code_refs(request.kind, code_context)
+        else {
+            notes.push(format!(
+                "Time off request could not find active {} standard code.",
+                request.kind.name()
+            ));
+            details.push(json!({
+              "timeOff": true,
+              "kind": request.kind.storage_value(),
+              "startDate": request.start_date.format("%Y-%m-%d").to_string(),
+              "endDate": request.end_date.format("%Y-%m-%d").to_string(),
+              "savedEntryCount": 0,
+              "reason": "missing_standard_code",
+            }));
+            continue;
+        };
+
+        let mut saved_entry_count = 0;
+        let mut skipped_weekend_count = 0;
+        let mut date = request.start_date;
+        while date <= request.end_date {
+            if is_business_day(date) {
+                prepared_entries.push(PreparedEntry {
+                    entry: NormalizedEntry {
+                        date: date.format("%Y-%m-%d").to_string(),
+                        start_minute: DEFAULT_TIME_OFF_START_MINUTE,
+                        end_minute: DEFAULT_TIME_OFF_END_MINUTE,
+                        duration_minutes: DEFAULT_TIME_OFF_END_MINUTE
+                            - DEFAULT_TIME_OFF_START_MINUTE,
+                        description: request.description.clone(),
+                        user_submission_text: raw_text.to_string(),
+                        confidence: request.confidence,
+                        engagement_ref: Some(engagement_ref.clone()),
+                        activity_ref: Some(activity_ref.clone()),
+                    },
+                    used_activity_fallback: false,
+                    used_temporal_fallback: false,
+                    duration_defaulted: false,
+                    fallback_summary: Some("Time off request applied".to_string()),
+                });
+                saved_entry_count += 1;
+            } else {
+                skipped_weekend_count += 1;
+            }
+
+            date += Duration::days(1);
+        }
+
+        if saved_entry_count == 0 {
+            notes.push(format!(
+                "Time off request for {} had no business days.",
+                request.kind.name()
+            ));
+        }
+
+        details.push(json!({
+          "timeOff": true,
+          "kind": request.kind.storage_value(),
+          "startDate": request.start_date.format("%Y-%m-%d").to_string(),
+          "endDate": request.end_date.format("%Y-%m-%d").to_string(),
+          "windowStartMinute": DEFAULT_TIME_OFF_START_MINUTE,
+          "windowEndMinute": DEFAULT_TIME_OFF_END_MINUTE,
+          "savedEntryCount": saved_entry_count,
+          "skippedWeekendCount": skipped_weekend_count,
+          "engagementRef": engagement_ref,
+          "activityRef": activity_ref,
+        }));
+    }
+
+    (prepared_entries, notes, details)
+}
+
+fn apply_time_off_entry_cap(
+    prepared_entries: &mut Vec<PreparedEntry>,
+    normalization_notes: &mut Vec<String>,
+    normalization_details: &mut Vec<Value>,
+) {
+    if prepared_entries.len() <= MAX_TIME_OFF_SAVED_ENTRIES_PER_MESSAGE {
+        return;
+    }
+
+    let dropped_count = prepared_entries.len() - MAX_TIME_OFF_SAVED_ENTRIES_PER_MESSAGE;
+    prepared_entries.truncate(MAX_TIME_OFF_SAVED_ENTRIES_PER_MESSAGE);
+    normalization_notes.push(format!(
+        "Time off request produced too many entries; kept the first {} and dropped {}.",
+        MAX_TIME_OFF_SAVED_ENTRIES_PER_MESSAGE, dropped_count
+    ));
+    normalization_details.push(json!({
+      "timeOff": true,
+      "savedEntryCap": MAX_TIME_OFF_SAVED_ENTRIES_PER_MESSAGE,
+      "droppedEntryCount": dropped_count,
+    }));
+}
+
+fn resolve_time_off_code_refs(
+    kind: TimeOffKind,
+    code_context: &CodeContext,
+) -> Option<(String, String)> {
+    let code = kind.code();
+    let name = kind.name();
+    let engagement = code_context.engagements.iter().find(|engagement| {
+        text_matches_code_or_name(engagement.code.as_deref(), &engagement.name, code, name)
+    })?;
+    let activity = engagement.activities.iter().find(|activity| {
+        text_matches_code_or_name(activity.code.as_deref(), &activity.name, code, name)
+    })?;
+
+    Some((
+        engagement.engagement_ref.clone(),
+        activity.activity_ref.clone(),
+    ))
+}
+
+fn text_matches_code_or_name(
+    candidate_code: Option<&str>,
+    candidate_name: &str,
+    expected_code: &str,
+    expected_name: &str,
+) -> bool {
+    candidate_code.is_some_and(|code| code.trim().eq_ignore_ascii_case(expected_code))
+        || candidate_name.trim().eq_ignore_ascii_case(expected_name)
+}
+
+fn is_business_day(date: NaiveDate) -> bool {
+    !matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
 }
 
 fn prepare_gap_fill_entries(
@@ -3469,10 +3903,12 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
           "openAiKeyConfiguredFlag": open_ai_key_configured,
           "statusLevel": status_level_label(&status.status_level),
           "lastError": status.last_error,
-          "selectedOpenAiModel": status.selected_open_ai_model.api_name(),
+          "selectedOpenAiModel": status.selected_open_ai_model.storage_value(),
+          "selectedOpenAiApiModel": status.selected_open_ai_model.api_name(),
           "selectedOpenAiModelLabel": status.selected_open_ai_model.display_label(),
           "availableOpenAiModelCount": status.available_open_ai_models.len(),
-          "selectedCalendarBulkModel": status.selected_calendar_bulk_model.api_name(),
+          "selectedCalendarBulkModel": status.selected_calendar_bulk_model.storage_value(),
+          "selectedCalendarBulkApiModel": status.selected_calendar_bulk_model.api_name(),
           "selectedCalendarBulkModelLabel": status.selected_calendar_bulk_model.display_label(),
           "selectedTranscriptionModel": status.selected_transcription_model.api_name(),
           "selectedTranscriptionModelLabel": status.selected_transcription_model.display_label(),
@@ -3640,14 +4076,14 @@ pub fn settings_set_openai_model(
         db::upsert_app_setting(
             &connection,
             APP_SETTING_OPENAI_MODEL,
-            selected_model.api_name(),
+            selected_model.storage_value(),
         )
         .map_err(|error| error.to_string())?;
 
         let verified = db::get_app_setting(&connection, APP_SETTING_OPENAI_MODEL)
             .map_err(|error| error.to_string())?;
 
-        if verified.as_deref() != Some(selected_model.api_name()) {
+        if verified.as_deref() != Some(selected_model.storage_value()) {
             return Err("OpenAI model setting verification failed".to_string());
         }
 
@@ -3666,7 +4102,8 @@ pub fn settings_set_openai_model(
                 Some(duration_ms(started_at)),
                 None,
                 json!({
-                  "selectedOpenAiModel": selected_model.api_name(),
+                  "selectedOpenAiModel": selected_model.storage_value(),
+                  "selectedOpenAiApiModel": selected_model.api_name(),
                   "selectedOpenAiModelLabel": selected_model.display_label(),
                   "verified": true,
                 }),
@@ -3686,7 +4123,8 @@ pub fn settings_set_openai_model(
                 json!({
                   "stage": "save_model_setting",
                   "message": message,
-                  "selectedOpenAiModel": selected_model.api_name(),
+                  "selectedOpenAiModel": selected_model.storage_value(),
+                  "selectedOpenAiApiModel": selected_model.api_name(),
                   "selectedOpenAiModelLabel": selected_model.display_label(),
                 }),
             );
@@ -3724,14 +4162,14 @@ pub fn settings_set_calendar_bulk_model(
         db::upsert_app_setting(
             &connection,
             APP_SETTING_CALENDAR_BULK_OPENAI_MODEL,
-            selected_model.api_name(),
+            selected_model.storage_value(),
         )
         .map_err(|error| error.to_string())?;
 
         let verified = db::get_app_setting(&connection, APP_SETTING_CALENDAR_BULK_OPENAI_MODEL)
             .map_err(|error| error.to_string())?;
 
-        if verified.as_deref() != Some(selected_model.api_name()) {
+        if verified.as_deref() != Some(selected_model.storage_value()) {
             return Err("Calendar bulk add model setting verification failed".to_string());
         }
 
@@ -3750,7 +4188,8 @@ pub fn settings_set_calendar_bulk_model(
                 Some(duration_ms(started_at)),
                 None,
                 json!({
-                  "selectedCalendarBulkModel": selected_model.api_name(),
+                  "selectedCalendarBulkModel": selected_model.storage_value(),
+                  "selectedCalendarBulkApiModel": selected_model.api_name(),
                   "selectedCalendarBulkModelLabel": selected_model.display_label(),
                   "verified": true,
                 }),
@@ -3770,7 +4209,8 @@ pub fn settings_set_calendar_bulk_model(
                 json!({
                   "stage": "save_calendar_bulk_model_setting",
                   "message": message,
-                  "selectedCalendarBulkModel": selected_model.api_name(),
+                  "selectedCalendarBulkModel": selected_model.storage_value(),
+                  "selectedCalendarBulkApiModel": selected_model.api_name(),
                   "selectedCalendarBulkModelLabel": selected_model.display_label(),
                 }),
             );
@@ -4950,7 +5390,7 @@ pub async fn calendar_extract_events(
           "clientLocalDate": input.client_local_date,
           "clientLocalTime": input.client_local_time,
           "selectedDate": input.selected_date.clone(),
-          "requestedOpenAiModel": input.open_ai_model.map(|model| model.api_name()),
+          "requestedOpenAiModel": input.open_ai_model.map(|model| model.storage_value()),
           "ignoredKeywordCount": input.ignored_keywords.len(),
           "ignoreAllDayEvents": input.ignore_all_day_events,
         }),
@@ -5284,7 +5724,7 @@ pub fn calendar_import_entries(
             &raw_message_id,
             &raw_text,
             &interpreted_entries_json,
-            saved_openai_model.api_name(),
+            saved_openai_model.storage_value(),
             "calendar",
             None,
             None,
@@ -5815,7 +6255,7 @@ pub async fn interpret_text_message(
           "clientLocalTime": input.client_local_time,
           "clientUtcOffsetMinutes": input.client_utc_offset_minutes,
           "selectedDate": input.selected_date,
-          "requestedOpenAiModel": input.open_ai_model.map(|model| model.api_name()),
+          "requestedOpenAiModel": input.open_ai_model.map(|model| model.storage_value()),
           "captureSource": input.capture_source.map(capture_source_label),
           "transcriptionModel": input.transcription_model.map(|model| model.api_name()),
           "transcriptionDurationMs": input.transcription_duration_ms,
@@ -5937,7 +6377,7 @@ pub async fn interpret_text_message(
     let llm_duration_ms = duration_ms(llm_started_at);
     let llm_summary = llm_attempt_summary(&llm_attempts);
 
-    let llm_response = match llm_result {
+    let mut llm_response = match llm_result {
         Ok(response) => {
             record_backend_event_with_state(
                 &state,
@@ -5949,6 +6389,8 @@ pub async fn interpret_text_message(
                 None,
                 json!({
                   "entryCount": response.entries.len(),
+                  "gapFillRequestCount": response.gap_fill_requests.len(),
+                  "timeOffRequestCount": response.time_off_requests.len(),
                   "model": selected_openai_model.api_name(),
                   "modelLabel": selected_openai_model.display_label(),
                   "totalLlmDurationMs": llm_duration_ms,
@@ -5979,10 +6421,208 @@ pub async fn interpret_text_message(
         }
     };
 
-    let interpreted_entry_count = llm_response.entries.len() as i64;
+    if !llm_response
+        .time_off_requests
+        .iter()
+        .any(|request| resolve_time_off_request(request).is_some())
+    {
+        if let Some(request) = synthesize_time_off_request_from_text(
+            input.raw_text.trim(),
+            &input,
+            &temporal_reference,
+        ) {
+            llm_response.time_off_requests.push(request);
+        }
+    }
 
     let interpreted_entries_json = serde_json::to_string(&llm_response)
         .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+    let resolved_time_off_requests = llm_response
+        .time_off_requests
+        .iter()
+        .filter_map(resolve_time_off_request)
+        .collect::<Vec<_>>();
+
+    if !resolved_time_off_requests.is_empty() {
+        let mut normalization_notes = Vec::<String>::new();
+        if !llm_response.entries.is_empty() {
+            normalization_notes.push(
+                "Time off request returned with regular entries; ignored regular entries."
+                    .to_string(),
+            );
+        }
+        if !llm_response.gap_fill_requests.is_empty() {
+            normalization_notes.push(
+                "Time off request returned with gap fill requests; ignored gap fill requests."
+                    .to_string(),
+            );
+        }
+
+        let raw_message_id = Uuid::new_v4().to_string();
+        let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+
+        connection
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+            .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+        let write_result: Result<
+            (
+                InterpretWriteOutcome,
+                i64,
+                i64,
+                i64,
+                bool,
+                Vec<String>,
+                Vec<Value>,
+            ),
+            String,
+        > = (|| {
+            let (prepared_entries, time_off_notes, mut normalization_details) =
+                prepare_time_off_entries(
+                    &resolved_time_off_requests,
+                    input.raw_text.trim(),
+                    &code_context,
+                );
+            normalization_notes.extend(time_off_notes);
+
+            let mut prepared_entries = dedupe_prepared_entries(prepared_entries);
+            let unique_entry_count = prepared_entries.len() as i64;
+
+            apply_time_off_entry_cap(
+                &mut prepared_entries,
+                &mut normalization_notes,
+                &mut normalization_details,
+            );
+
+            let saved_entry_count = prepared_entries.len() as i64;
+            let truncated_entry_count = (unique_entry_count - saved_entry_count).max(0);
+            let contains_multiple_events = unique_entry_count > 1;
+            let confidence_average = if prepared_entries.is_empty() {
+                0.5
+            } else {
+                prepared_entries
+                    .iter()
+                    .map(|prepared| prepared.entry.confidence)
+                    .sum::<f64>()
+                    / prepared_entries.len() as f64
+            };
+
+            let metadata = InterpretWriteMetadata {
+                raw_message_id: &raw_message_id,
+                raw_text: input.raw_text.trim(),
+                interpreted_entries_json: &interpreted_entries_json,
+                selected_openai_model,
+                capture_source: input.capture_source.unwrap_or(CaptureSourceId::Text),
+                transcription_model: input.transcription_model,
+                transcription_duration_ms: input.transcription_duration_ms,
+                confidence_average,
+                raw_message_timestamp: parsed_timestamp.timestamp(),
+                interpreted_entry_count: unique_entry_count,
+                unique_entry_count,
+                saved_entry_count,
+                truncated_entry_count,
+                contains_multiple_events,
+            };
+            let outcome = write_interpreted_prepared_entries(
+                &connection,
+                metadata,
+                prepared_entries,
+                &code_context,
+            )?;
+
+            Ok((
+                outcome,
+                unique_entry_count,
+                saved_entry_count,
+                truncated_entry_count,
+                contains_multiple_events,
+                normalization_notes,
+                normalization_details,
+            ))
+        })();
+
+        let (
+            write_outcome,
+            unique_entry_count,
+            saved_entry_count,
+            truncated_entry_count,
+            contains_multiple_events,
+            normalization_notes,
+            normalization_details,
+        ) = match write_result {
+            Ok(value) => value,
+            Err(message) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    Some(input.raw_text.trim()),
+                    json!({ "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
+
+        connection
+            .execute_batch("COMMIT")
+            .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+        record_backend_event(
+            &connection,
+            state.inner(),
+            &correlation_id,
+            "command_success",
+            command,
+            "ok",
+            Some(duration_ms(started_at)),
+            Some(input.raw_text.trim()),
+            json!({
+              "rawMessageId": raw_message_id,
+              "createdEntryCount": write_outcome.created_entry_ids.len(),
+              "interpretedEntryCount": unique_entry_count,
+              "uniqueEntryCount": unique_entry_count,
+              "savedEntryCount": saved_entry_count,
+              "truncatedEntryCount": truncated_entry_count,
+              "containsMultipleEvents": contains_multiple_events,
+              "touchedMonthKeys": write_outcome.touched_month_keys.clone(),
+              "warningCount": write_outcome.warnings.len(),
+              "normalizationFallbackCount": 0,
+              "normalizationNotes": normalization_notes.clone(),
+              "normalizationDetails": normalization_details.clone(),
+              "model": selected_openai_model.api_name(),
+              "modelLabel": selected_openai_model.display_label(),
+              "captureSource": capture_source_label(input.capture_source.unwrap_or(CaptureSourceId::Text)),
+              "transcriptionModel": input.transcription_model.map(|model| model.api_name()),
+              "transcriptionDurationMs": input.transcription_duration_ms,
+              "llmDurationMs": llm_duration_ms,
+              "timeOff": true,
+              "timeOffRequestCount": resolved_time_off_requests.len(),
+            }),
+        );
+
+        return Ok(InterpretResult {
+            correlation_id,
+            raw_message_id,
+            created_entry_ids: write_outcome.created_entry_ids,
+            interpreted_entry_count: unique_entry_count,
+            unique_entry_count,
+            saved_entry_count,
+            truncated_entry_count,
+            contains_multiple_events,
+            touched_month_keys: write_outcome.touched_month_keys,
+            warnings: write_outcome.warnings,
+            normalization_notes,
+            model_used: selected_openai_model,
+            model_used_label: selected_openai_model.display_label().to_string(),
+            llm_duration_ms,
+        });
+    }
 
     if let Some(gap_fill_request) = llm_response.gap_fill_requests.iter().find_map(|request| {
         resolve_gap_fill_request(request, &input, &temporal_reference, input.raw_text.trim())
@@ -6182,6 +6822,8 @@ pub async fn interpret_text_message(
             llm_duration_ms,
         });
     }
+
+    let interpreted_entry_count = llm_response.entries.len() as i64;
 
     let normalization_results = llm_response
         .entries
@@ -6597,7 +7239,7 @@ pub async fn interpret_text_message(
             &raw_message_id,
             input.raw_text.trim(),
             &interpreted_entries_json,
-            selected_openai_model.api_name(),
+            selected_openai_model.storage_value(),
             capture_source_label(input.capture_source.unwrap_or(CaptureSourceId::Text)),
             input.transcription_model.map(|model| model.api_name()),
             input.transcription_duration_ms,
@@ -8462,18 +9104,20 @@ mod tests {
         Activity, ActivityUpsertInput, CalendarImportEntryInput, CalendarVisionEvent,
         CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, Engagement,
         EngagementType, EngagementUpsertInput, InterpretTextInput, KeySource, LlmEntry,
-        LlmGapFillActivity, LlmGapFillRequest, NormalizedEntry, OpenAiModelId, StatusLevel,
-        SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
-        TimelineCreateInput, TimelineEntry, TimelineTotalBreakdown, TimelineWeekStartDay,
-        TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
-        TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, TranscriptionModelId, WarningType,
+        LlmGapFillActivity, LlmGapFillRequest, LlmTimeOffRequest, NormalizedEntry, OpenAiModelId,
+        StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset,
+        SummaryLayoutState, TimelineCreateInput, TimelineEntry, TimelineTotalBreakdown,
+        TimelineWeekStartDay, TimelineWeeklySummary, TimelineWeeklySummaryCell,
+        TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
+        TranscriptionModelId, WarningType,
     };
     use crate::openai::LlmAttemptTelemetry;
 
     use super::{
         apply_activity_fallback_if_needed, apply_global_activity_fallback_if_needed,
-        apply_multi_event_sequence_adjustments, apply_timeline_preferences_to_weekly_summary,
-        build_export_metadata_maps, build_summary_export_hours_and_notes_sheet_columns,
+        apply_multi_event_sequence_adjustments, apply_time_off_entry_cap,
+        apply_timeline_preferences_to_weekly_summary, build_export_metadata_maps,
+        build_summary_export_hours_and_notes_sheet_columns,
         build_summary_export_hours_sheet_columns, capture_source_label,
         compute_gap_fill_free_intervals, create_manual_timeline_entry, dedupe_prepared_entries,
         default_summary_layout_state, derive_key_status_level, distribute_gap_fill_minutes,
@@ -8482,18 +9126,19 @@ mod tests {
         message_has_relative_duration_cue, normalize_calendar_bulk_ignored_keywords,
         normalize_confidence, normalize_llm_entry, normalize_snapped_update_window,
         normalize_summary_layout_preset_for_export, normalize_summary_layout_state,
-        prepare_gap_fill_entries, read_saved_openai_key_configured,
+        prepare_gap_fill_entries, prepare_time_off_entries, read_saved_openai_key_configured,
         read_saved_openai_key_configured_marker, reconcile_context_refs,
         resolve_calendar_candidate_ignored_state, resolve_calendar_event_date,
         resolve_calendar_event_time, resolve_gap_fill_request, resolve_requested_openai_model,
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
-        resolve_summary_export_free_text_value, round_to_nearest_15, summary_day_notes_header,
-        timeline_week_bounds, timeline_week_view_bounds, validate_calendar_import_entry,
-        validate_manual_create_refs, validate_manual_update_window, validate_timeline_preferences,
-        MinuteInterval, PreparedEntry, ResolvedGapFillActivity, ResolvedGapFillRequest,
+        resolve_summary_export_free_text_value, resolve_time_off_request, round_to_nearest_15,
+        summary_day_notes_header, synthesize_time_off_request_from_text, timeline_week_bounds,
+        timeline_week_view_bounds, validate_calendar_import_entry, validate_manual_create_refs,
+        validate_manual_update_window, validate_timeline_preferences, MinuteInterval,
+        PreparedEntry, ResolvedGapFillActivity, ResolvedGapFillRequest, ResolvedTimeOffRequest,
         SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType, TemporalReference,
-        TimelinePreferenceValues, APP_SETTING_OPENAI_KEY_CONFIGURED, MINUTES_IN_DAY,
+        TimeOffKind, TimelinePreferenceValues, APP_SETTING_OPENAI_KEY_CONFIGURED, MINUTES_IN_DAY,
     };
 
     fn test_connection() -> Connection {
@@ -8620,6 +9265,61 @@ mod tests {
             activity_reason: None,
             alternative_activities: None,
             confidence: 0.9,
+        }
+    }
+
+    fn time_off_code_context_for_test() -> CodeContext {
+        CodeContext {
+            engagements: vec![
+                ContextEngagement {
+                    id: "vacation-engagement".to_string(),
+                    engagement_ref: "eng-001".to_string(),
+                    code: Some("VACATION".to_string()),
+                    name: "Vacation".to_string(),
+                    tags: vec!["ooo".to_string(), "vacation".to_string()],
+                    describe_when_to_use: Some("Use for vacation and OOO.".to_string()),
+                    activities: vec![ContextActivity {
+                        id: "vacation-activity".to_string(),
+                        activity_ref: "act-001-001".to_string(),
+                        code: Some("VACATION".to_string()),
+                        name: "Vacation".to_string(),
+                        tags: vec!["ooo".to_string()],
+                        describe_when_to_use: Some("Use for vacation and OOO.".to_string()),
+                    }],
+                },
+                ContextEngagement {
+                    id: "holiday-engagement".to_string(),
+                    engagement_ref: "eng-002".to_string(),
+                    code: Some("HOLIDAY".to_string()),
+                    name: "Public Holiday".to_string(),
+                    tags: vec!["holiday".to_string()],
+                    describe_when_to_use: Some("Use for public holidays.".to_string()),
+                    activities: vec![ContextActivity {
+                        id: "holiday-activity".to_string(),
+                        activity_ref: "act-002-001".to_string(),
+                        code: Some("HOLIDAY".to_string()),
+                        name: "Public Holiday".to_string(),
+                        tags: vec!["holiday".to_string()],
+                        describe_when_to_use: Some("Use for public holidays.".to_string()),
+                    }],
+                },
+            ],
+        }
+    }
+
+    fn interpret_input_for_time_off(raw_text: &str) -> InterpretTextInput {
+        InterpretTextInput {
+            raw_text: raw_text.to_string(),
+            client_timestamp_iso: "2026-04-01T12:00:00-07:00".to_string(),
+            timezone: "America/Los_Angeles".to_string(),
+            client_local_date: "2026-04-01".to_string(),
+            client_local_time: "12:00".to_string(),
+            client_utc_offset_minutes: -420,
+            selected_date: None,
+            open_ai_model: None,
+            capture_source: None,
+            transcription_model: None,
+            transcription_duration_ms: None,
         }
     }
 
@@ -8835,6 +9535,250 @@ mod tests {
                 start_minute: 9 * 60,
                 end_minute: 18 * 60,
             }
+        );
+    }
+
+    #[test]
+    fn time_off_synthesis_maps_ooo_next_week_to_vacation_workweek() {
+        let input = interpret_input_for_time_off("I'm OOO next week");
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 4, 1).expect("valid date"),
+            rounded_end_minute: 12 * 60,
+        };
+
+        let request = synthesize_time_off_request_from_text(&input.raw_text, &input, &reference)
+            .and_then(|request| resolve_time_off_request(&request))
+            .expect("OOO should synthesize as time off");
+
+        assert_eq!(request.kind, TimeOffKind::Vacation);
+        assert_eq!(
+            request.start_date,
+            NaiveDate::from_ymd_opt(2026, 4, 6).expect("valid date")
+        );
+        assert_eq!(
+            request.end_date,
+            NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn time_off_synthesis_maps_vacation_next_week_to_vacation_workweek() {
+        let input = interpret_input_for_time_off("I'm on vacation next week");
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 4, 1).expect("valid date"),
+            rounded_end_minute: 12 * 60,
+        };
+
+        let request = synthesize_time_off_request_from_text(&input.raw_text, &input, &reference)
+            .and_then(|request| resolve_time_off_request(&request))
+            .expect("vacation should synthesize as time off");
+
+        assert_eq!(request.kind, TimeOffKind::Vacation);
+        assert_eq!(
+            request.start_date,
+            NaiveDate::from_ymd_opt(2026, 4, 6).expect("valid date")
+        );
+        assert_eq!(
+            request.end_date,
+            NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date")
+        );
+    }
+
+    #[test]
+    fn time_off_synthesis_maps_ooo_on_friday_to_single_vacation_day() {
+        let input = interpret_input_for_time_off("I'm OOO on Friday");
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 4, 1).expect("valid date"),
+            rounded_end_minute: 12 * 60,
+        };
+
+        let request = synthesize_time_off_request_from_text(&input.raw_text, &input, &reference)
+            .and_then(|request| resolve_time_off_request(&request))
+            .expect("Friday OOO should synthesize as time off");
+
+        assert_eq!(request.kind, TimeOffKind::Vacation);
+        assert_eq!(
+            request.start_date,
+            NaiveDate::from_ymd_opt(2026, 4, 3).expect("valid date")
+        );
+        assert_eq!(request.end_date, request.start_date);
+    }
+
+    #[test]
+    fn time_off_synthesis_maps_holiday_phrase_to_holiday() {
+        let input = interpret_input_for_time_off("I'm OOO next Monday for holiday");
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 4, 1).expect("valid date"),
+            rounded_end_minute: 12 * 60,
+        };
+
+        let request = synthesize_time_off_request_from_text(&input.raw_text, &input, &reference)
+            .and_then(|request| resolve_time_off_request(&request))
+            .expect("holiday OOO should synthesize as time off");
+
+        assert_eq!(request.kind, TimeOffKind::PublicHoliday);
+        assert_eq!(
+            request.start_date,
+            NaiveDate::from_ymd_opt(2026, 4, 6).expect("valid date")
+        );
+        assert_eq!(request.end_date, request.start_date);
+    }
+
+    #[test]
+    fn time_off_expansion_creates_nine_to_five_business_day_blocks() {
+        let request = ResolvedTimeOffRequest {
+            kind: TimeOffKind::Vacation,
+            start_date: NaiveDate::from_ymd_opt(2026, 4, 6).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date"),
+            description: "Vacation".to_string(),
+            confidence: 0.92,
+        };
+
+        let (prepared_entries, notes, details) = prepare_time_off_entries(
+            &[request],
+            "I'm OOO next week",
+            &time_off_code_context_for_test(),
+        );
+
+        assert!(notes.is_empty());
+        assert_eq!(prepared_entries.len(), 5);
+        assert_eq!(
+            prepared_entries
+                .iter()
+                .map(|entry| entry.entry.date.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "2026-04-06",
+                "2026-04-07",
+                "2026-04-08",
+                "2026-04-09",
+                "2026-04-10",
+            ]
+        );
+        assert!(prepared_entries.iter().all(|entry| {
+            entry.entry.start_minute == 9 * 60
+                && entry.entry.end_minute == 17 * 60
+                && entry.entry.duration_minutes == 8 * 60
+                && entry.entry.engagement_ref.as_deref() == Some("eng-001")
+                && entry.entry.activity_ref.as_deref() == Some("act-001-001")
+                && entry.entry.user_submission_text == "I'm OOO next week"
+        }));
+        assert_eq!(
+            details[0]
+                .get("savedEntryCount")
+                .and_then(|value| value.as_i64()),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn time_off_expansion_skips_weekends_and_keeps_single_friday() {
+        let request = ResolvedTimeOffRequest {
+            kind: TimeOffKind::Vacation,
+            start_date: NaiveDate::from_ymd_opt(2026, 4, 3).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2026, 4, 6).expect("valid date"),
+            description: "Vacation".to_string(),
+            confidence: 0.9,
+        };
+
+        let (prepared_entries, _notes, details) = prepare_time_off_entries(
+            &[request],
+            "I'm OOO Friday through Monday",
+            &time_off_code_context_for_test(),
+        );
+
+        assert_eq!(
+            prepared_entries
+                .iter()
+                .map(|entry| entry.entry.date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-04-03", "2026-04-06"]
+        );
+        assert_eq!(
+            details[0]
+                .get("skippedWeekendCount")
+                .and_then(|value| value.as_i64()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn time_off_expansion_uses_holiday_standard_code_when_requested() {
+        let request = ResolvedTimeOffRequest {
+            kind: TimeOffKind::PublicHoliday,
+            start_date: NaiveDate::from_ymd_opt(2026, 4, 6).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2026, 4, 6).expect("valid date"),
+            description: "Public Holiday".to_string(),
+            confidence: 0.9,
+        };
+
+        let (prepared_entries, notes, _details) = prepare_time_off_entries(
+            &[request],
+            "I'm OOO next Monday for holiday",
+            &time_off_code_context_for_test(),
+        );
+
+        assert!(notes.is_empty());
+        assert_eq!(prepared_entries.len(), 1);
+        assert_eq!(
+            prepared_entries[0].entry.engagement_ref.as_deref(),
+            Some("eng-002")
+        );
+        assert_eq!(
+            prepared_entries[0].entry.activity_ref.as_deref(),
+            Some("act-002-001")
+        );
+    }
+
+    #[test]
+    fn time_off_entry_cap_truncates_long_ranges_with_note() {
+        let request = ResolvedTimeOffRequest {
+            kind: TimeOffKind::Vacation,
+            start_date: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2026, 3, 20).expect("valid date"),
+            description: "Vacation".to_string(),
+            confidence: 0.9,
+        };
+        let (mut prepared_entries, mut notes, mut details) = prepare_time_off_entries(
+            &[request],
+            "I'm OOO for a long time",
+            &time_off_code_context_for_test(),
+        );
+
+        assert!(prepared_entries.len() > 45);
+        apply_time_off_entry_cap(&mut prepared_entries, &mut notes, &mut details);
+
+        assert_eq!(prepared_entries.len(), 45);
+        assert!(notes
+            .iter()
+            .any(|note| note.contains("Time off request produced too many entries")));
+        assert!(details.iter().any(|detail| {
+            detail
+                .get("droppedEntryCount")
+                .and_then(|value| value.as_i64())
+                .is_some_and(|count| count > 0)
+        }));
+    }
+
+    #[test]
+    fn llm_time_off_request_resolves_reversed_range() {
+        let request = LlmTimeOffRequest {
+            kind: Some("vacation".to_string()),
+            start_date: Some("2026-04-10".to_string()),
+            end_date: Some("2026-04-06".to_string()),
+            description: None,
+            confidence: Some(0.9),
+        };
+
+        let resolved = resolve_time_off_request(&request).expect("request resolves");
+
+        assert_eq!(
+            resolved.start_date,
+            NaiveDate::from_ymd_opt(2026, 4, 6).expect("valid date")
+        );
+        assert_eq!(
+            resolved.end_date,
+            NaiveDate::from_ymd_opt(2026, 4, 10).expect("valid date")
         );
     }
 
@@ -9256,41 +10200,54 @@ mod tests {
     #[test]
     fn saved_openai_model_defaults_when_missing_or_invalid() {
         let (missing_model, missing_invalid_value) = resolve_saved_openai_model_value(None);
-        assert_eq!(missing_model, OpenAiModelId::Gpt5Nano);
+        assert_eq!(missing_model, OpenAiModelId::Gpt55Instant);
         assert!(missing_invalid_value.is_none());
 
-        let (invalid_model, invalid_value) =
-            resolve_saved_openai_model_value(Some("legacy-model".to_string()));
-        assert_eq!(invalid_model, OpenAiModelId::Gpt5Nano);
-        assert_eq!(invalid_value.as_deref(), Some("legacy-model"));
-    }
-
-    #[test]
-    fn saved_calendar_bulk_model_defaults_to_gpt54_when_missing_or_invalid() {
-        let (missing_model, missing_invalid_value) = resolve_saved_calendar_bulk_model_value(None);
-        assert_eq!(missing_model, OpenAiModelId::Gpt54);
-        assert!(missing_invalid_value.is_none());
+        let (legacy_gpt55_model, legacy_gpt55_invalid_value) =
+            resolve_saved_openai_model_value(Some("gpt-5.5".to_string()));
+        assert_eq!(legacy_gpt55_model, OpenAiModelId::Gpt55Instant);
+        assert!(legacy_gpt55_invalid_value.is_none());
 
         let (saved_model, saved_invalid_value) =
-            resolve_saved_calendar_bulk_model_value(Some("gpt-4.1-nano".to_string()));
-        assert_eq!(saved_model, OpenAiModelId::Gpt41Nano);
+            resolve_saved_openai_model_value(Some("gpt-5.5-high".to_string()));
+        assert_eq!(saved_model, OpenAiModelId::Gpt55High);
         assert!(saved_invalid_value.is_none());
 
         let (invalid_model, invalid_value) =
-            resolve_saved_calendar_bulk_model_value(Some("legacy-calendar-model".to_string()));
-        assert_eq!(invalid_model, OpenAiModelId::Gpt54);
-        assert_eq!(invalid_value.as_deref(), Some("legacy-calendar-model"));
+            resolve_saved_openai_model_value(Some("gpt-5-nano".to_string()));
+        assert_eq!(invalid_model, OpenAiModelId::Gpt55Instant);
+        assert_eq!(invalid_value.as_deref(), Some("gpt-5-nano"));
+    }
+
+    #[test]
+    fn saved_calendar_bulk_model_defaults_to_gpt55_instant_when_missing_or_invalid() {
+        let (missing_model, missing_invalid_value) = resolve_saved_calendar_bulk_model_value(None);
+        assert_eq!(missing_model, OpenAiModelId::Gpt55Instant);
+        assert!(missing_invalid_value.is_none());
+
+        let (saved_model, saved_invalid_value) =
+            resolve_saved_calendar_bulk_model_value(Some("gpt-5.5-medium".to_string()));
+        assert_eq!(saved_model, OpenAiModelId::Gpt55Medium);
+        assert!(saved_invalid_value.is_none());
+
+        let (invalid_model, invalid_value) =
+            resolve_saved_calendar_bulk_model_value(Some("gpt-5.4".to_string()));
+        assert_eq!(invalid_model, OpenAiModelId::Gpt55Instant);
+        assert_eq!(invalid_value.as_deref(), Some("gpt-5.4"));
     }
 
     #[test]
     fn requested_openai_model_override_takes_precedence() {
         assert_eq!(
-            resolve_requested_openai_model(Some(OpenAiModelId::Gpt41Nano), OpenAiModelId::Gpt5Nano),
-            OpenAiModelId::Gpt41Nano
+            resolve_requested_openai_model(
+                Some(OpenAiModelId::Gpt55High),
+                OpenAiModelId::Gpt55Instant
+            ),
+            OpenAiModelId::Gpt55High
         );
         assert_eq!(
-            resolve_requested_openai_model(None, OpenAiModelId::Gpt41Nano),
-            OpenAiModelId::Gpt41Nano
+            resolve_requested_openai_model(None, OpenAiModelId::Gpt55Low),
+            OpenAiModelId::Gpt55Low
         );
     }
 
