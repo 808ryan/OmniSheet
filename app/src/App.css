@@ -1186,6 +1186,17 @@ button.danger:hover:not(:disabled) {
   transform: rotate(90deg);
 }
 
+.minus-icon::before {
+  content: '';
+  position: absolute;
+  left: 0.18rem;
+  right: 0.18rem;
+  top: 0.43rem;
+  height: 2.4px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
 .close-icon::before {
   transform: translate(-50%, -50%) rotate(45deg);
 }
@@ -5091,13 +5102,13 @@ button.danger:hover:not(:disabled) {
 .reporting-v2-preset-editor {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(18rem, 0.9fr) minmax(22rem, 1.1fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 0.72rem;
   overflow: hidden;
 }
 
 .reporting-v2-settings-panel,
+.reporting-v2-available-panel,
 .reporting-v2-column-panel,
 .reporting-v2-preview-panel {
   min-width: 0;
@@ -5107,10 +5118,30 @@ button.danger:hover:not(:disabled) {
   box-shadow: var(--glass-inset);
 }
 
-.reporting-v2-settings-panel,
-.reporting-v2-column-panel {
-  align-self: start;
+.reporting-v2-settings-panel {
+  padding: 0.72rem;
+}
+
+.reporting-v2-preset-strip {
   display: grid;
+  grid-template-columns: minmax(12rem, 0.44fr) minmax(18rem, 1fr);
+  align-items: end;
+  gap: 0.72rem;
+}
+
+.reporting-v2-builder {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(20rem, 0.95fr) minmax(22rem, 1.05fr);
+  gap: 0.72rem;
+}
+
+.reporting-v2-available-panel,
+.reporting-v2-column-panel {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0.62rem;
   padding: 0.72rem;
 }
@@ -5132,9 +5163,9 @@ button.danger:hover:not(:disabled) {
 }
 
 .reporting-v2-field > span,
-.reporting-v2-column-panel-header h4,
+.reporting-v2-panel-header h4,
 .reporting-v2-preview-header h4,
-.reporting-v2-column-picker-group > span {
+.reporting-v2-available-column-group > span {
   margin: 0;
   color: var(--ink-soft);
   font-size: 0.72rem;
@@ -5152,7 +5183,7 @@ button.danger:hover:not(:disabled) {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.reporting-v2-column-panel-header,
+.reporting-v2-panel-header,
 .reporting-v2-preview-header {
   min-width: 0;
   display: flex;
@@ -5161,15 +5192,14 @@ button.danger:hover:not(:disabled) {
   gap: 0.6rem;
 }
 
-.reporting-v2-add-column {
-  min-height: 2rem;
-  padding: 0.36rem 0.62rem;
-}
-
 .reporting-v2-column-list {
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
   display: grid;
+  align-content: start;
   gap: 0.42rem;
+  padding-right: 0.12rem;
 }
 
 .reporting-v2-column-row {
@@ -5228,39 +5258,102 @@ button.danger:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.78);
 }
 
-.reporting-v2-column-picker {
-  max-height: 15rem;
-  overflow: auto;
-  border: 1px solid rgba(170, 188, 218, 0.38);
-  border-radius: 10px;
-  background: rgba(250, 253, 255, 0.92);
-  padding: 0.58rem;
-  display: grid;
-  gap: 0.58rem;
+.reporting-v2-column-row .summary-layout-editor-remove {
+  border: 1.5px solid rgba(180, 35, 24, 0.34);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--danger);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
-.reporting-v2-column-picker-group {
+.reporting-v2-column-row .summary-layout-editor-remove .control-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.reporting-v2-column-row .summary-layout-editor-remove:hover:not(:disabled),
+.reporting-v2-column-row .summary-layout-editor-remove:focus-visible {
+  border-color: rgba(180, 35, 24, 0.74);
+  background: rgba(180, 35, 24, 0.1);
+  box-shadow:
+    0 0 0 3px rgba(180, 35, 24, 0.1),
+    0 6px 14px rgba(180, 35, 24, 0.14);
+}
+
+.reporting-v2-available-column-groups {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 0.68rem;
+  padding-right: 0.12rem;
+}
+
+.reporting-v2-available-column-group {
   display: grid;
   gap: 0.34rem;
 }
 
-.reporting-v2-column-picker-group > div {
+.reporting-v2-available-column-group > div {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.34rem;
+  gap: 0.38rem;
 }
 
-.reporting-v2-column-picker button {
-  min-height: 1.84rem;
+.reporting-v2-available-column {
+  max-width: 100%;
+  min-height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
   border-radius: 8px;
-  padding: 0.32rem 0.52rem;
+  padding: 0.34rem 0.58rem 0.34rem 0.48rem;
   color: var(--ink);
   font-size: 0.74rem;
   font-weight: 700;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
 }
 
-.reporting-v2-column-picker button:disabled {
-  opacity: 0.44;
+.reporting-v2-available-column:hover:not(:disabled),
+.reporting-v2-available-column:focus-visible {
+  border-color: rgba(31, 122, 255, 0.38);
+  background: rgba(31, 122, 255, 0.12);
+  box-shadow: 0 4px 10px rgba(31, 122, 255, 0.1);
+}
+
+.reporting-v2-available-column.is-selected {
+  border-color: rgba(170, 188, 218, 0.46);
+  background: rgba(236, 242, 250, 0.74);
+  color: var(--ink-soft);
+}
+
+.reporting-v2-available-column.is-selected:hover,
+.reporting-v2-available-column.is-selected:focus-visible {
+  border-color: rgba(180, 35, 24, 0.56);
+  background: rgba(180, 35, 24, 0.1);
+  color: var(--danger);
+  box-shadow:
+    0 0 0 3px rgba(180, 35, 24, 0.08),
+    0 5px 12px rgba(180, 35, 24, 0.1);
+}
+
+.reporting-v2-available-column > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reporting-v2-available-column:disabled {
+  border-color: rgba(170, 188, 218, 0.38);
+  background: rgba(236, 242, 250, 0.74);
+  color: var(--ink-soft);
+  cursor: default;
+  opacity: 1;
 }
 
 .reporting-v2-preset-actions {
@@ -5894,6 +5987,10 @@ button.danger:hover:not(:disabled) {
     width: 100%;
   }
 
+  .reporting-v2-builder {
+    grid-template-columns: 1fr;
+  }
+
   .codes-create-body {
     grid-template-columns: 1fr;
     overflow: auto;
@@ -6095,6 +6192,11 @@ button.danger:hover:not(:disabled) {
   .reporting-display-preset-form .code-editor-field {
     grid-template-columns: 1fr;
     gap: 0.24rem;
+  }
+
+  .reporting-v2-preset-strip {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
   }
 
   .reporting-display-options {

@@ -861,10 +861,9 @@ const REPORTING_DISPLAY_FIELD_GROUPS: Array<{
   label: string
   keys: ReportingDisplayFieldKey[]
 }> = [
-  { label: 'Core', keys: ['details', 'engagement', 'activity', 'client'] },
+  { label: 'Primary', keys: ['details', 'engagement', 'activity', 'client'] },
   { label: 'Codes', keys: ['engagementCode', 'activityCode'] },
   { label: 'Classification', keys: ['engagementType', 'engagementTags', 'activityTags'] },
-  { label: 'Guidance', keys: ['engagementUsage', 'activityUsage'] },
 ]
 const SUMMARY_LAYOUT_DAY_COLUMN_WIDTH = '8.5rem'
 const SUMMARY_LAYOUT_ROW_TOTAL_WIDTH = '8.5rem'
@@ -1218,7 +1217,6 @@ function App() {
   const [reportingDisplayPresetDraftName, setReportingDisplayPresetDraftName] = useState('')
   const [reportingDisplayPresetDraftError, setReportingDisplayPresetDraftError] =
     useState<string | null>(null)
-  const [isReportingDisplayColumnPickerOpen, setIsReportingDisplayColumnPickerOpen] = useState(false)
   const [reportingDisplayDraggedColumnId, setReportingDisplayDraggedColumnId] =
     useState<string | null>(null)
   const [reportingDisplayDragPreview, setReportingDisplayDragPreview] =
@@ -1405,7 +1403,6 @@ function App() {
     setReportingDisplayPresetDraft(null)
     setReportingDisplayPresetDraftName('')
     setReportingDisplayPresetDraftError(null)
-    setIsReportingDisplayColumnPickerOpen(false)
     setReportingDisplayDraggedColumnId(null)
     setReportingDisplayDragPreview(null)
     reportingDisplayDragCleanupRef.current?.()
@@ -1905,12 +1902,6 @@ function App() {
   )
   const reportingDisplayDraftFieldCount = useMemo(
     () => reportingDisplayDraftColumns.filter((column) => column.kind === 'field').length,
-    [reportingDisplayDraftColumns],
-  )
-  const reportingDisplayDraftFieldKeys = useMemo(
-    () => new Set(reportingDisplayDraftColumns
-      .filter((column): column is Extract<ReportingDisplayColumn, { kind: 'field' }> => column.kind === 'field')
-      .map((column) => column.fieldKey)),
     [reportingDisplayDraftColumns],
   )
   useLayoutEffect(() => {
@@ -6954,7 +6945,6 @@ function App() {
     }
 
     setReportingDisplayPresetDraftError(null)
-    setIsReportingDisplayColumnPickerOpen(false)
     setReportingDisplayDraggedColumnId(null)
     setReportingDisplayDragPreview(null)
   }, [resolvedReportingState.displayPresets, selectedReportingDisplayPreset])
@@ -7096,7 +7086,6 @@ function App() {
       ]
     })
     setReportingDisplayPresetDraftError(null)
-    setIsReportingDisplayColumnPickerOpen(false)
   }
 
   const onRemoveReportingDisplayColumn = (columnId: string) => {
@@ -7158,7 +7147,6 @@ function App() {
       presetId: nextPreset.id,
     })
     setReportingDisplayPresetDraftError(null)
-    setIsReportingDisplayColumnPickerOpen(false)
     setReportingDisplayDraggedColumnId(null)
     setReportingDisplayDragPreview(null)
     reportingDisplayDragCleanupRef.current?.()
@@ -11714,7 +11702,7 @@ function App() {
               </header>
 
               <div className="reporting-v2-preset-editor">
-                <section className="reporting-v2-settings-panel" aria-label="Preset settings">
+                <section className="reporting-v2-settings-panel reporting-v2-preset-strip" aria-label="Preset settings">
                   <label className="reporting-v2-field">
                     <span>Preset</span>
                     <select
@@ -11744,83 +11732,45 @@ function App() {
                   </label>
                 </section>
 
-                <section className="reporting-v2-column-panel" aria-label="Preset columns">
-                  <div className="reporting-v2-column-panel-header">
-                    <h4>Columns</h4>
-                    <button
-                      type="button"
-                      className="button-soft-primary reporting-v2-add-column"
-                      onClick={() => setIsReportingDisplayColumnPickerOpen((previous) => !previous)}
-                    >
-                      <span className="control-icon plus-icon" aria-hidden="true" />
-                      Add Column
-                    </button>
-                  </div>
+                <div className="reporting-v2-builder">
+                  <section className="reporting-v2-available-panel" aria-label="Available columns">
+                    <div className="reporting-v2-panel-header">
+                      <h4>Available Columns</h4>
+                    </div>
 
-                  <div className="reporting-v2-column-list">
-                    {reportingDisplayDraftColumns.map((column) => {
-                      const columnLabel = getReportingDisplayColumnLabel(column)
-                      const isRequiredColumn = column.kind !== 'field'
-                      const isDragged = reportingDisplayDraggedColumnId === column.id
-                      const dragStyle = isDragged && reportingDisplayDragPreview?.surface === 'list'
-                        ? ({
-                          transform: `translate3d(0, ${reportingDisplayDragPreview.offsetY}px, 0)`,
-                          zIndex: 6,
-                        } as CSSProperties)
-                        : undefined
-
-                      return (
-                        <div
-                          key={column.id}
-                          data-reporting-display-column-id={column.id}
-                          className={`reporting-v2-column-row ${isDragged ? 'is-dragging' : ''}`}
-                          style={dragStyle}
-                        >
-                          <button
-                            type="button"
-                            className="reporting-v2-column-handle"
-                            aria-label={`Reorder ${columnLabel}`}
-                            onPointerDown={(event) => onStartReportingDisplayColumnPointerDrag(event, column.id)}
-                          >
-                            <ReportingColumnReorderIcon />
-                          </button>
-                          <span>{columnLabel}</span>
-                          {isRequiredColumn ? (
-                            <strong>Required</strong>
-                          ) : (
-                            <button
-                              type="button"
-                              className="summary-layout-editor-remove"
-                              onClick={() => onRemoveReportingDisplayColumn(column.id)}
-                              aria-label={`Remove ${columnLabel}`}
-                              disabled={reportingDisplayDraftFieldCount <= 1}
-                            >
-                              -
-                            </button>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-
-                  {isReportingDisplayColumnPickerOpen ? (
-                    <div className="reporting-v2-column-picker">
+                    <div className="reporting-v2-available-column-groups">
                       {REPORTING_DISPLAY_FIELD_GROUPS.map((group) => (
-                        <div key={group.label} className="reporting-v2-column-picker-group">
+                        <div key={group.label} className="reporting-v2-available-column-group">
                           <span>{group.label}</span>
                           <div>
                             {group.keys.map((fieldKey) => {
                               const option = REPORTING_DISPLAY_FIELD_OPTIONS.find((candidate) => candidate.key === fieldKey)
-                              const isEnabled = reportingDisplayDraftFieldKeys.has(fieldKey)
+                              const label = option?.label ?? fieldKey
+                              const selectedColumn = reportingDisplayDraftColumns.find((candidate) => (
+                                candidate.kind === 'field' && candidate.fieldKey === fieldKey
+                              ))
+                              const isSelected = Boolean(selectedColumn)
 
                               return (
                                 <button
                                   key={fieldKey}
                                   type="button"
-                                  onClick={() => onAddReportingDisplayColumn(fieldKey)}
-                                  disabled={isEnabled}
+                                  className={`reporting-v2-available-column ${isSelected ? 'is-selected' : ''}`}
+                                  onClick={() => {
+                                    if (selectedColumn) {
+                                      onRemoveReportingDisplayColumn(selectedColumn.id)
+                                    } else {
+                                      onAddReportingDisplayColumn(fieldKey)
+                                    }
+                                  }}
+                                  aria-label={isSelected ? `Remove ${label}` : `Add ${label}`}
+                                  title={isSelected ? `Remove ${label}` : `Add ${label}`}
                                 >
-                                  {option?.label ?? fieldKey}
+                                  <span
+                                    className={`control-icon ${isSelected ? 'minus-icon' : 'plus-icon'}`}
+                                    aria-hidden="true"
+                                  />
+                                  <span>{label}</span>
                                 </button>
                               )
                             })}
@@ -11828,8 +11778,60 @@ function App() {
                         </div>
                       ))}
                     </div>
-                  ) : null}
-                </section>
+                  </section>
+
+                  <section className="reporting-v2-column-panel" aria-label="Preset columns">
+                    <div className="reporting-v2-panel-header">
+                      <h4>Preset Columns</h4>
+                    </div>
+
+                    <div className="reporting-v2-column-list">
+                      {reportingDisplayDraftColumns.map((column) => {
+                        const columnLabel = getReportingDisplayColumnLabel(column)
+                        const isRequiredColumn = column.kind !== 'field'
+                        const isDragged = reportingDisplayDraggedColumnId === column.id
+                        const dragStyle = isDragged && reportingDisplayDragPreview?.surface === 'list'
+                          ? ({
+                            transform: `translate3d(0, ${reportingDisplayDragPreview.offsetY}px, 0)`,
+                            zIndex: 6,
+                          } as CSSProperties)
+                          : undefined
+
+                        return (
+                          <div
+                            key={column.id}
+                            data-reporting-display-column-id={column.id}
+                            className={`reporting-v2-column-row ${isDragged ? 'is-dragging' : ''}`}
+                            style={dragStyle}
+                          >
+                            <button
+                              type="button"
+                              className="reporting-v2-column-handle"
+                              aria-label={`Reorder ${columnLabel}`}
+                              onPointerDown={(event) => onStartReportingDisplayColumnPointerDrag(event, column.id)}
+                            >
+                              <ReportingColumnReorderIcon />
+                            </button>
+                            <span>{columnLabel}</span>
+                            {isRequiredColumn ? (
+                              <strong>Required</strong>
+                            ) : (
+                              <button
+                                type="button"
+                                className="summary-layout-editor-remove"
+                                onClick={() => onRemoveReportingDisplayColumn(column.id)}
+                                aria-label={`Remove ${columnLabel}`}
+                                disabled={reportingDisplayDraftFieldCount <= 1}
+                              >
+                                <span className="control-icon minus-icon" aria-hidden="true" />
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </section>
+                </div>
 
                 <section className="reporting-v2-preview-panel" aria-label="Preset preview">
                   <div className="reporting-v2-preview-header">

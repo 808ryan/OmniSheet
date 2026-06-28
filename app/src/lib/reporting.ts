@@ -22,7 +22,7 @@ export interface ReportingDisplayFieldOption {
 export const REPORTING_DISPLAY_FIELD_OPTIONS: ReportingDisplayFieldOption[] = [
   {
     key: 'details',
-    label: 'Activity over Engagement',
+    label: 'Activity + Engagement',
     group: 'core',
     width: '17rem',
     wraps: true,
