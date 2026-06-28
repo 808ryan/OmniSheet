@@ -22,11 +22,11 @@ use crate::models::{
     CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, DateInput, DiagnosticsBundle,
     DiagnosticsEvent, DiagnosticsListInput, DiagnosticsRecordInput, Engagement, EngagementType,
     EngagementUpsertInput, IdInput, IdResult, InterpretResult, InterpretTextInput, KeySource,
-    LlmAlternativeActivity, LlmEntry, MicrophonePermissionResult, MicrophonePermissionStatus,
-    NormalizedEntry, OpenAiModelId, QuickAddPreferences, QuickAddSuggestionInput,
-    QuickAddSuggestionResult, ReportingDisplayColumn, ReportingDisplayDensity,
-    ReportingDisplayPreset, ReportingRowLabelMode, ReportingState, ReportingViewMode,
-    SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
+    LlmAlternativeActivity, LlmEntry, LlmGapFillActivity, LlmGapFillRequest,
+    MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
+    QuickAddPreferences, QuickAddSuggestionInput, QuickAddSuggestionResult, ReportingDisplayColumn,
+    ReportingDisplayDensity, ReportingDisplayPreset, ReportingRowLabelMode, ReportingState,
+    ReportingViewMode, SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
     SettingsSetInterfacePreferencesInput, SettingsSetOpenAiModelInput,
     SettingsSetQuickAddPreferencesInput, SettingsSetTimelinePreferencesInput,
     SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
@@ -48,6 +48,9 @@ const ACTIVITY_MATCH_SCORE_EPSILON: f64 = 1e-6;
 const GLOBAL_ACTIVITY_FALLBACK_MIN_SCORE: f64 = 2.5;
 const GLOBAL_ACTIVITY_FALLBACK_MIN_MARGIN: f64 = 0.75;
 const MAX_SAVED_ENTRIES_PER_MESSAGE: usize = 8;
+const MAX_GAP_FILL_SAVED_ENTRIES_PER_MESSAGE: usize = 24;
+const DEFAULT_GAP_FILL_START_MINUTE: i64 = 9 * 60;
+const DEFAULT_GAP_FILL_END_MINUTE: i64 = 18 * 60;
 const APP_SETTING_OPENAI_KEY_CONFIGURED: &str = "openai_key_configured";
 const APP_SETTING_OPENAI_MODEL: &str = "openai_model";
 const APP_SETTING_CALENDAR_BULK_OPENAI_MODEL: &str = "calendar_bulk_openai_model";
@@ -1754,6 +1757,29 @@ struct PreparedEntry {
     fallback_summary: Option<String>,
 }
 
+struct InterpretWriteMetadata<'a> {
+    raw_message_id: &'a str,
+    raw_text: &'a str,
+    interpreted_entries_json: &'a str,
+    selected_openai_model: OpenAiModelId,
+    capture_source: CaptureSourceId,
+    transcription_model: Option<TranscriptionModelId>,
+    transcription_duration_ms: Option<i64>,
+    confidence_average: f64,
+    raw_message_timestamp: i64,
+    interpreted_entry_count: i64,
+    unique_entry_count: i64,
+    saved_entry_count: i64,
+    truncated_entry_count: i64,
+    contains_multiple_events: bool,
+}
+
+struct InterpretWriteOutcome {
+    created_entry_ids: Vec<String>,
+    touched_month_keys: Vec<String>,
+    warnings: Vec<Warning>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreparedCalendarImportEntry {
@@ -1766,6 +1792,39 @@ struct PreparedCalendarImportEntry {
     engagement_id: Option<String>,
     activity_id: Option<String>,
     confidence: f64,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MinuteInterval {
+    start_minute: i64,
+    end_minute: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedGapFillRequest {
+    date: String,
+    window: MinuteInterval,
+    activities: Vec<ResolvedGapFillActivity>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedGapFillActivity {
+    engagement_ref: Option<String>,
+    activity_ref: Option<String>,
+    label: String,
+    description: String,
+    matching_text: String,
+    activity_reason: Option<String>,
+    alternative_activities: Option<Vec<LlmAlternativeActivity>>,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone)]
+struct GapFillSpan {
+    activity_index: usize,
+    start_minute: i64,
+    end_minute: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1895,6 +1954,551 @@ fn dedupe_prepared_entries(entries: Vec<PreparedEntry>) -> Vec<PreparedEntry> {
     }
 
     deduped
+}
+
+fn write_interpreted_prepared_entries(
+    connection: &Connection,
+    metadata: InterpretWriteMetadata<'_>,
+    prepared_entries: Vec<PreparedEntry>,
+    code_context: &CodeContext,
+) -> Result<InterpretWriteOutcome, String> {
+    db::insert_raw_message(
+        connection,
+        metadata.raw_message_id,
+        metadata.raw_text,
+        metadata.interpreted_entries_json,
+        metadata.selected_openai_model.api_name(),
+        capture_source_label(metadata.capture_source),
+        metadata.transcription_model.map(|model| model.api_name()),
+        metadata.transcription_duration_ms,
+        metadata.confidence_average,
+        metadata.raw_message_timestamp,
+        metadata.interpreted_entry_count,
+        metadata.unique_entry_count,
+        metadata.saved_entry_count,
+        metadata.truncated_entry_count,
+        metadata.contains_multiple_events,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let mut created_entry_ids = Vec::new();
+    let mut warnings = Vec::new();
+    let mut touched_dates = HashSet::<String>::new();
+
+    for (index, prepared_entry) in prepared_entries.into_iter().enumerate() {
+        let normalized_entry = prepared_entry.entry;
+        let (engagement_id, activity_id) = resolve_ref_ids(&normalized_entry, code_context);
+
+        let entry_id = db::insert_timesheet_entry(
+            connection,
+            metadata.raw_message_id,
+            &normalized_entry,
+            engagement_id.as_deref(),
+            activity_id.as_deref(),
+            prepared_entry.used_activity_fallback,
+            prepared_entry.used_temporal_fallback,
+            prepared_entry.duration_defaulted,
+            prepared_entry.fallback_summary.as_deref(),
+            Some(index as i64 + 1),
+            Some(metadata.saved_entry_count),
+            capture_source_label(metadata.capture_source),
+        )
+        .map_err(|error| error.to_string())?;
+
+        touched_dates.insert(normalized_entry.date.clone());
+        created_entry_ids.push(entry_id.clone());
+
+        if normalized_entry.confidence < db::LOW_CONFIDENCE_THRESHOLD {
+            warnings.push(
+                db::add_warning(
+                    connection,
+                    &entry_id,
+                    WarningType::LowConfidence,
+                    Some("AI confidence is below review threshold".to_string()),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
+
+        if engagement_id.is_none() || activity_id.is_none() {
+            warnings.push(
+                db::add_warning(
+                    connection,
+                    &entry_id,
+                    WarningType::Unmatched,
+                    Some("Entry is uncategorized".to_string()),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
+    }
+
+    let mut touched_month_keys = touched_dates
+        .iter()
+        .filter_map(|date| month_key_from_iso_date(date))
+        .collect::<Vec<_>>();
+    touched_month_keys.sort();
+    touched_month_keys.dedup();
+
+    for date in &touched_dates {
+        let overlap_warnings =
+            db::recompute_overlap_warnings(connection, date).map_err(|error| error.to_string())?;
+        warnings.extend(overlap_warnings);
+    }
+
+    Ok(InterpretWriteOutcome {
+        created_entry_ids,
+        touched_month_keys,
+        warnings,
+    })
+}
+
+fn resolve_gap_fill_request(
+    request: &LlmGapFillRequest,
+    input: &InterpretTextInput,
+    reference: &TemporalReference,
+    fallback_description: &str,
+) -> Option<ResolvedGapFillRequest> {
+    let activities = request
+        .activities
+        .iter()
+        .filter_map(|activity| resolve_gap_fill_activity(activity, fallback_description))
+        .collect::<Vec<_>>();
+
+    if activities.is_empty() {
+        return None;
+    }
+
+    let date = request
+        .date
+        .as_deref()
+        .and_then(parse_date)
+        .or_else(|| input.selected_date.as_deref().and_then(parse_date))
+        .unwrap_or(reference.local_date)
+        .format("%Y-%m-%d")
+        .to_string();
+
+    Some(ResolvedGapFillRequest {
+        date,
+        window: resolve_gap_fill_window(request),
+        activities,
+    })
+}
+
+fn resolve_gap_fill_activity(
+    activity: &LlmGapFillActivity,
+    fallback_description: &str,
+) -> Option<ResolvedGapFillActivity> {
+    let engagement_ref = trim_optional_text(activity.engagement_ref.as_deref());
+    let activity_ref = trim_optional_text(activity.activity_ref.as_deref());
+    let label = trim_optional_text(activity.label.as_deref());
+    let description = trim_optional_text(activity.description.as_deref());
+
+    if engagement_ref.is_none()
+        && activity_ref.is_none()
+        && label.is_none()
+        && description.is_none()
+    {
+        return None;
+    }
+
+    let label = label
+        .or_else(|| description.clone())
+        .unwrap_or_else(|| "Gap fill activity".to_string());
+    let description = description.clone().unwrap_or_else(|| label.clone());
+    let matching_text = [Some(label.as_str()), Some(description.as_str())]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let matching_text = if matching_text.trim().is_empty() {
+        fallback_description.to_string()
+    } else {
+        matching_text
+    };
+    let alternative_activities = activity.alternative_activities.as_ref().map(|activities| {
+        activities
+            .iter()
+            .filter_map(|activity| {
+                let activity_ref = activity.activity_ref.trim();
+                let reason = activity.reason.trim();
+                if activity_ref.is_empty() || reason.is_empty() {
+                    return None;
+                }
+
+                Some(LlmAlternativeActivity {
+                    activity_ref: activity_ref.to_string(),
+                    reason: reason.to_string(),
+                })
+            })
+            .take(3)
+            .collect::<Vec<_>>()
+    });
+
+    Some(ResolvedGapFillActivity {
+        engagement_ref,
+        activity_ref,
+        label,
+        description,
+        matching_text,
+        activity_reason: trim_optional_text(activity.activity_reason.as_deref()),
+        alternative_activities: alternative_activities
+            .and_then(|activities| (!activities.is_empty()).then_some(activities)),
+        confidence: normalize_confidence(activity.confidence),
+    })
+}
+
+fn trim_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn resolve_gap_fill_window(request: &LlmGapFillRequest) -> MinuteInterval {
+    let start_minute = request
+        .start_time
+        .as_deref()
+        .and_then(parse_time_to_minutes)
+        .unwrap_or(DEFAULT_GAP_FILL_START_MINUTE);
+    let end_minute = request
+        .end_time
+        .as_deref()
+        .and_then(parse_time_to_minutes)
+        .unwrap_or(DEFAULT_GAP_FILL_END_MINUTE);
+
+    normalize_gap_fill_window(start_minute, end_minute).unwrap_or(MinuteInterval {
+        start_minute: DEFAULT_GAP_FILL_START_MINUTE,
+        end_minute: DEFAULT_GAP_FILL_END_MINUTE,
+    })
+}
+
+fn normalize_gap_fill_window(start_minute: i64, end_minute: i64) -> Option<MinuteInterval> {
+    let start_minute = round_to_nearest_15(start_minute).clamp(0, MINUTES_IN_DAY);
+    let end_minute = round_to_nearest_15(end_minute).clamp(0, MINUTES_IN_DAY);
+
+    (end_minute > start_minute).then_some(MinuteInterval {
+        start_minute,
+        end_minute,
+    })
+}
+
+fn prepare_gap_fill_entries(
+    request: &ResolvedGapFillRequest,
+    existing_entries: &[TimelineEntry],
+    raw_text: &str,
+    code_context: &CodeContext,
+) -> (Vec<PreparedEntry>, Vec<String>, Vec<Value>) {
+    let free_intervals = compute_gap_fill_free_intervals(request.window, existing_entries);
+    let total_free_minutes = total_interval_minutes(&free_intervals);
+    let mut notes = Vec::new();
+    let mut details = Vec::new();
+
+    if total_free_minutes <= 0 {
+        notes.push(format!(
+            "No available gaps between {} and {}.",
+            minute_to_hhmm(request.window.start_minute),
+            minute_to_hhmm(request.window.end_minute)
+        ));
+        details.push(json!({
+          "gapFill": true,
+          "savedEntryCount": 0,
+          "savedDate": request.date,
+          "windowStartMinute": request.window.start_minute,
+          "windowEndMinute": request.window.end_minute,
+          "freeIntervals": free_intervals,
+          "reason": "no_available_gaps",
+        }));
+        return (Vec::new(), notes, details);
+    }
+
+    let allocations = distribute_gap_fill_minutes(total_free_minutes, request.activities.len());
+    let spans = place_gap_fill_spans(&free_intervals, &allocations);
+    if spans.is_empty() {
+        notes.push(format!(
+            "No available 15-minute gaps between {} and {}.",
+            minute_to_hhmm(request.window.start_minute),
+            minute_to_hhmm(request.window.end_minute)
+        ));
+        details.push(json!({
+          "gapFill": true,
+          "savedEntryCount": 0,
+          "savedDate": request.date,
+          "windowStartMinute": request.window.start_minute,
+          "windowEndMinute": request.window.end_minute,
+          "freeIntervals": free_intervals,
+          "allocations": allocations,
+          "reason": "no_usable_snapped_gaps",
+        }));
+        return (Vec::new(), notes, details);
+    }
+
+    let mut prepared_entries = Vec::new();
+    for span in spans {
+        let Some(activity) = request.activities.get(span.activity_index) else {
+            continue;
+        };
+        let duration_minutes = span.end_minute - span.start_minute;
+        if duration_minutes <= 0 {
+            continue;
+        }
+
+        let mut entry = NormalizedEntry {
+            date: request.date.clone(),
+            start_minute: span.start_minute,
+            end_minute: span.end_minute,
+            duration_minutes,
+            description: activity.description.clone(),
+            user_submission_text: raw_text.to_string(),
+            confidence: activity.confidence,
+            engagement_ref: activity.engagement_ref.clone(),
+            activity_ref: activity.activity_ref.clone(),
+        };
+
+        let ref_resolution = reconcile_context_refs(&mut entry, code_context);
+        let activity_fallback =
+            apply_activity_fallback_if_needed(&mut entry, &activity.matching_text, code_context);
+        let global_activity_fallback = apply_global_activity_fallback_if_needed(
+            &mut entry,
+            &activity.matching_text,
+            code_context,
+        );
+        let prompt_activity_fallback =
+            apply_activity_fallback_if_needed(&mut entry, raw_text, code_context);
+        let prompt_global_activity_fallback =
+            apply_global_activity_fallback_if_needed(&mut entry, raw_text, code_context);
+
+        for note in [
+            activity_fallback.note.clone(),
+            global_activity_fallback.note.clone(),
+            prompt_activity_fallback.note.clone(),
+            prompt_global_activity_fallback.note.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            notes.push(note);
+        }
+
+        if ref_resolution.applied {
+            notes.push(format!(
+                "Reference resolution applied ({})",
+                ref_resolution.reason
+            ));
+        }
+
+        let used_activity_fallback = activity_fallback.applied
+            || global_activity_fallback.applied
+            || prompt_activity_fallback.applied
+            || prompt_global_activity_fallback.applied;
+        let fallback_summary = Some(if used_activity_fallback {
+            "Gap fill allocation + activity fallback applied".to_string()
+        } else {
+            "Gap fill allocation applied".to_string()
+        });
+
+        details.push(json!({
+          "gapFill": true,
+          "activityIndex": span.activity_index + 1,
+          "activityLabel": activity.label,
+          "activityDescription": activity.description,
+          "savedDate": entry.date,
+          "savedStartMinute": entry.start_minute,
+          "savedEndMinute": entry.end_minute,
+          "durationMinutes": entry.duration_minutes,
+          "durationDefaulted": true,
+          "llmChosenActivityRef": activity.activity_ref,
+          "llmActivityReason": activity.activity_reason,
+          "llmAlternativeActivities": activity.alternative_activities,
+          "originalEngagementRef": ref_resolution.original_engagement_ref,
+          "originalActivityRef": ref_resolution.original_activity_ref,
+          "savedEngagementRef": entry.engagement_ref,
+          "savedActivityRef": entry.activity_ref,
+          "savedConfidence": entry.confidence,
+          "refResolutionApplied": ref_resolution.applied,
+          "refResolutionReason": ref_resolution.reason,
+          "resolvedEngagementRef": ref_resolution.resolved_engagement_ref,
+          "resolvedActivityRef": ref_resolution.resolved_activity_ref,
+          "usedActivityFallback": used_activity_fallback,
+          "activityFallbackReason": activity_fallback.reason,
+          "globalActivityFallbackReason": global_activity_fallback.reason,
+          "promptActivityFallbackReason": prompt_activity_fallback.reason,
+          "promptGlobalActivityFallbackReason": prompt_global_activity_fallback.reason,
+          "fallbackSummary": fallback_summary,
+        }));
+
+        prepared_entries.push(PreparedEntry {
+            entry,
+            used_activity_fallback,
+            used_temporal_fallback: false,
+            duration_defaulted: true,
+            fallback_summary,
+        });
+    }
+
+    notes.push(format!(
+        "Gap fill applied: distributed {} across {} activit{} between {} and {}.",
+        format_minutes_as_duration(total_free_minutes),
+        request.activities.len(),
+        if request.activities.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        minute_to_hhmm(request.window.start_minute),
+        minute_to_hhmm(request.window.end_minute),
+    ));
+
+    (prepared_entries, notes, details)
+}
+
+fn compute_gap_fill_free_intervals(
+    window: MinuteInterval,
+    existing_entries: &[TimelineEntry],
+) -> Vec<MinuteInterval> {
+    let mut occupied = existing_entries
+        .iter()
+        .filter_map(|entry| {
+            let start_minute = entry.start_minute.max(window.start_minute);
+            let end_minute = entry.end_minute.min(window.end_minute);
+            (end_minute > start_minute).then_some(MinuteInterval {
+                start_minute,
+                end_minute,
+            })
+        })
+        .collect::<Vec<_>>();
+    occupied.sort_by_key(|interval| (interval.start_minute, interval.end_minute));
+
+    let mut merged = Vec::<MinuteInterval>::new();
+    for interval in occupied {
+        if let Some(last) = merged.last_mut() {
+            if interval.start_minute <= last.end_minute {
+                last.end_minute = last.end_minute.max(interval.end_minute);
+                continue;
+            }
+        }
+        merged.push(interval);
+    }
+
+    let mut free_intervals = Vec::new();
+    let mut cursor = window.start_minute;
+    for interval in merged {
+        if interval.start_minute > cursor {
+            if let Some(free_interval) = snap_free_interval(cursor, interval.start_minute) {
+                free_intervals.push(free_interval);
+            }
+        }
+        cursor = cursor.max(interval.end_minute);
+    }
+
+    if cursor < window.end_minute {
+        if let Some(free_interval) = snap_free_interval(cursor, window.end_minute) {
+            free_intervals.push(free_interval);
+        }
+    }
+
+    free_intervals
+}
+
+fn snap_free_interval(start_minute: i64, end_minute: i64) -> Option<MinuteInterval> {
+    let start_minute = round_up_to_increment(start_minute, TIME_INCREMENT_MINUTES);
+    let end_minute = round_down_to_increment(end_minute, TIME_INCREMENT_MINUTES);
+    (end_minute > start_minute).then_some(MinuteInterval {
+        start_minute,
+        end_minute,
+    })
+}
+
+fn round_up_to_increment(value: i64, increment: i64) -> i64 {
+    value.div_euclid(increment) * increment
+        + if value.rem_euclid(increment) == 0 {
+            0
+        } else {
+            increment
+        }
+}
+
+fn round_down_to_increment(value: i64, increment: i64) -> i64 {
+    value.div_euclid(increment) * increment
+}
+
+fn total_interval_minutes(intervals: &[MinuteInterval]) -> i64 {
+    intervals
+        .iter()
+        .map(|interval| interval.end_minute - interval.start_minute)
+        .sum()
+}
+
+fn distribute_gap_fill_minutes(total_minutes: i64, activity_count: usize) -> Vec<i64> {
+    if activity_count == 0 || total_minutes < TIME_INCREMENT_MINUTES {
+        return vec![0; activity_count];
+    }
+
+    let total_units = (total_minutes / TIME_INCREMENT_MINUTES).max(0) as usize;
+    let base_units = total_units / activity_count;
+    let remainder_units = total_units % activity_count;
+
+    (0..activity_count)
+        .map(|index| {
+            let units = base_units + usize::from(index < remainder_units);
+            units as i64 * TIME_INCREMENT_MINUTES
+        })
+        .collect()
+}
+
+fn place_gap_fill_spans(
+    free_intervals: &[MinuteInterval],
+    allocations: &[i64],
+) -> Vec<GapFillSpan> {
+    let mut spans = Vec::new();
+    let mut interval_index = 0usize;
+    let mut cursor = free_intervals
+        .first()
+        .map(|interval| interval.start_minute)
+        .unwrap_or(0);
+
+    for (activity_index, allocation) in allocations.iter().enumerate() {
+        let mut remaining = *allocation;
+        while remaining > 0 && interval_index < free_intervals.len() {
+            let interval = free_intervals[interval_index];
+            if cursor >= interval.end_minute {
+                interval_index += 1;
+                if let Some(next_interval) = free_intervals.get(interval_index) {
+                    cursor = next_interval.start_minute;
+                }
+                continue;
+            }
+
+            cursor = cursor.max(interval.start_minute);
+            let chunk = remaining.min(interval.end_minute - cursor);
+            if chunk <= 0 {
+                break;
+            }
+
+            spans.push(GapFillSpan {
+                activity_index,
+                start_minute: cursor,
+                end_minute: cursor + chunk,
+            });
+            cursor += chunk;
+            remaining -= chunk;
+        }
+    }
+
+    spans
+}
+
+fn format_minutes_as_duration(minutes: i64) -> String {
+    let hours = minutes / 60;
+    let remaining_minutes = minutes % 60;
+
+    match (hours, remaining_minutes) {
+        (0, minutes) => format!("{minutes} minutes"),
+        (1, 0) => "1 hour".to_string(),
+        (hours, 0) => format!("{hours} hours"),
+        (1, minutes) => format!("1 hour {minutes} minutes"),
+        (hours, minutes) => format!("{hours} hours {minutes} minutes"),
+    }
 }
 
 fn apply_multi_event_sequence_adjustments(
@@ -4345,7 +4949,7 @@ pub async fn calendar_extract_events(
           "clientTimestampIso": input.client_timestamp_iso,
           "clientLocalDate": input.client_local_date,
           "clientLocalTime": input.client_local_time,
-          "selectedDate": input.selected_date,
+          "selectedDate": input.selected_date.clone(),
           "requestedOpenAiModel": input.open_ai_model.map(|model| model.api_name()),
           "ignoredKeywordCount": input.ignored_keywords.len(),
           "ignoreAllDayEvents": input.ignore_all_day_events,
@@ -5210,6 +5814,7 @@ pub async fn interpret_text_message(
           "clientLocalDate": input.client_local_date,
           "clientLocalTime": input.client_local_time,
           "clientUtcOffsetMinutes": input.client_utc_offset_minutes,
+          "selectedDate": input.selected_date,
           "requestedOpenAiModel": input.open_ai_model.map(|model| model.api_name()),
           "captureSource": input.capture_source.map(capture_source_label),
           "transcriptionModel": input.transcription_model.map(|model| model.api_name()),
@@ -5316,6 +5921,7 @@ pub async fn interpret_text_message(
         &input.client_local_time,
         input.client_utc_offset_minutes,
         &input.timezone,
+        input.selected_date.as_deref(),
         &code_context,
         &mut llm_attempts,
     )
@@ -5377,6 +5983,205 @@ pub async fn interpret_text_message(
 
     let interpreted_entries_json = serde_json::to_string(&llm_response)
         .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+    if let Some(gap_fill_request) = llm_response.gap_fill_requests.iter().find_map(|request| {
+        resolve_gap_fill_request(request, &input, &temporal_reference, input.raw_text.trim())
+    }) {
+        let mut normalization_notes = Vec::<String>::new();
+        if !llm_response.entries.is_empty() {
+            normalization_notes.push(
+                "Gap fill request returned with regular entries; ignored regular entries."
+                    .to_string(),
+            );
+        }
+
+        let raw_message_id = Uuid::new_v4().to_string();
+        let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+
+        connection
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+            .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+        let write_result: Result<
+            (
+                InterpretWriteOutcome,
+                i64,
+                i64,
+                i64,
+                bool,
+                usize,
+                Vec<String>,
+                Vec<Value>,
+            ),
+            String,
+        > = (|| {
+            let existing_entries = db::list_timeline_entries(&connection, &gap_fill_request.date)
+                .map_err(|error| error.to_string())?;
+            let (prepared_entries, gap_notes, mut normalization_details) = prepare_gap_fill_entries(
+                &gap_fill_request,
+                &existing_entries,
+                input.raw_text.trim(),
+                &code_context,
+            );
+            normalization_notes.extend(gap_notes);
+
+            let mut prepared_entries = dedupe_prepared_entries(prepared_entries);
+            let unique_entry_count = prepared_entries.len() as i64;
+
+            if prepared_entries.len() > MAX_GAP_FILL_SAVED_ENTRIES_PER_MESSAGE {
+                let dropped_count = prepared_entries.len() - MAX_GAP_FILL_SAVED_ENTRIES_PER_MESSAGE;
+                prepared_entries.truncate(MAX_GAP_FILL_SAVED_ENTRIES_PER_MESSAGE);
+                normalization_notes.push(format!(
+                    "Gap fill produced too many entries; kept the first {} and dropped {}.",
+                    MAX_GAP_FILL_SAVED_ENTRIES_PER_MESSAGE, dropped_count
+                ));
+            }
+
+            let saved_entry_count = prepared_entries.len() as i64;
+            let truncated_entry_count = (unique_entry_count - saved_entry_count).max(0);
+            let contains_multiple_events = unique_entry_count > 1;
+            let fallback_count = prepared_entries
+                .iter()
+                .filter(|entry| entry.used_temporal_fallback)
+                .count();
+            let confidence_average = if prepared_entries.is_empty() {
+                0.5
+            } else {
+                prepared_entries
+                    .iter()
+                    .map(|prepared| prepared.entry.confidence)
+                    .sum::<f64>()
+                    / prepared_entries.len() as f64
+            };
+
+            normalization_details.push(json!({
+              "gapFill": true,
+              "selectedDate": input.selected_date.clone(),
+              "savedDate": gap_fill_request.date.clone(),
+              "windowStartMinute": gap_fill_request.window.start_minute,
+              "windowEndMinute": gap_fill_request.window.end_minute,
+              "activityCount": gap_fill_request.activities.len(),
+              "uniqueEntryCount": unique_entry_count,
+              "savedEntryCount": saved_entry_count,
+              "truncatedEntryCount": truncated_entry_count,
+            }));
+
+            let metadata = InterpretWriteMetadata {
+                raw_message_id: &raw_message_id,
+                raw_text: input.raw_text.trim(),
+                interpreted_entries_json: &interpreted_entries_json,
+                selected_openai_model,
+                capture_source: input.capture_source.unwrap_or(CaptureSourceId::Text),
+                transcription_model: input.transcription_model,
+                transcription_duration_ms: input.transcription_duration_ms,
+                confidence_average,
+                raw_message_timestamp: parsed_timestamp.timestamp(),
+                interpreted_entry_count: gap_fill_request.activities.len() as i64,
+                unique_entry_count,
+                saved_entry_count,
+                truncated_entry_count,
+                contains_multiple_events,
+            };
+            let outcome = write_interpreted_prepared_entries(
+                &connection,
+                metadata,
+                prepared_entries,
+                &code_context,
+            )?;
+
+            Ok((
+                outcome,
+                unique_entry_count,
+                saved_entry_count,
+                truncated_entry_count,
+                contains_multiple_events,
+                fallback_count,
+                normalization_notes,
+                normalization_details,
+            ))
+        })();
+
+        let (
+            write_outcome,
+            unique_entry_count,
+            saved_entry_count,
+            truncated_entry_count,
+            contains_multiple_events,
+            fallback_count,
+            normalization_notes,
+            normalization_details,
+        ) = match write_result {
+            Ok(value) => value,
+            Err(message) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                record_backend_event(
+                    &connection,
+                    state.inner(),
+                    &correlation_id,
+                    "command_error",
+                    command,
+                    "error",
+                    Some(duration_ms(started_at)),
+                    Some(input.raw_text.trim()),
+                    json!({ "message": message }),
+                );
+                return Err(format_command_error(&correlation_id, message));
+            }
+        };
+
+        connection
+            .execute_batch("COMMIT")
+            .map_err(|error| format_command_error(&correlation_id, error.to_string()))?;
+
+        record_backend_event(
+            &connection,
+            state.inner(),
+            &correlation_id,
+            "command_success",
+            command,
+            "ok",
+            Some(duration_ms(started_at)),
+            Some(input.raw_text.trim()),
+            json!({
+              "rawMessageId": raw_message_id,
+              "createdEntryCount": write_outcome.created_entry_ids.len(),
+              "interpretedEntryCount": gap_fill_request.activities.len(),
+              "uniqueEntryCount": unique_entry_count,
+              "savedEntryCount": saved_entry_count,
+              "truncatedEntryCount": truncated_entry_count,
+              "containsMultipleEvents": contains_multiple_events,
+              "touchedMonthKeys": write_outcome.touched_month_keys.clone(),
+              "warningCount": write_outcome.warnings.len(),
+              "normalizationFallbackCount": fallback_count,
+              "normalizationNotes": normalization_notes.clone(),
+              "normalizationDetails": normalization_details.clone(),
+              "model": selected_openai_model.api_name(),
+              "modelLabel": selected_openai_model.display_label(),
+              "captureSource": capture_source_label(input.capture_source.unwrap_or(CaptureSourceId::Text)),
+              "transcriptionModel": input.transcription_model.map(|model| model.api_name()),
+              "transcriptionDurationMs": input.transcription_duration_ms,
+              "llmDurationMs": llm_duration_ms,
+              "gapFill": true,
+            }),
+        );
+
+        return Ok(InterpretResult {
+            correlation_id,
+            raw_message_id,
+            created_entry_ids: write_outcome.created_entry_ids,
+            interpreted_entry_count: gap_fill_request.activities.len() as i64,
+            unique_entry_count,
+            saved_entry_count,
+            truncated_entry_count,
+            contains_multiple_events,
+            touched_month_keys: write_outcome.touched_month_keys,
+            warnings: write_outcome.warnings,
+            normalization_notes,
+            model_used: selected_openai_model,
+            model_used_label: selected_openai_model.display_label().to_string(),
+            llm_duration_ms,
+        });
+    }
 
     let normalization_results = llm_response
         .entries
@@ -7656,9 +8461,10 @@ mod tests {
     use crate::models::{
         Activity, ActivityUpsertInput, CalendarImportEntryInput, CalendarVisionEvent,
         CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, Engagement,
-        EngagementType, EngagementUpsertInput, KeySource, LlmEntry, NormalizedEntry, OpenAiModelId,
-        StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset,
-        SummaryLayoutState, TimelineCreateInput, TimelineTotalBreakdown, TimelineWeekStartDay,
+        EngagementType, EngagementUpsertInput, InterpretTextInput, KeySource, LlmEntry,
+        LlmGapFillActivity, LlmGapFillRequest, NormalizedEntry, OpenAiModelId, StatusLevel,
+        SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
+        TimelineCreateInput, TimelineEntry, TimelineTotalBreakdown, TimelineWeekStartDay,
         TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
         TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, TranscriptionModelId, WarningType,
     };
@@ -7669,23 +8475,25 @@ mod tests {
         apply_multi_event_sequence_adjustments, apply_timeline_preferences_to_weekly_summary,
         build_export_metadata_maps, build_summary_export_hours_and_notes_sheet_columns,
         build_summary_export_hours_sheet_columns, capture_source_label,
-        create_manual_timeline_entry, dedupe_prepared_entries, default_summary_layout_state,
-        derive_key_status_level, llm_attempt_event_status, message_has_contextual_day_or_date_cue,
+        compute_gap_fill_free_intervals, create_manual_timeline_entry, dedupe_prepared_entries,
+        default_summary_layout_state, derive_key_status_level, distribute_gap_fill_minutes,
+        llm_attempt_event_status, message_has_contextual_day_or_date_cue,
         message_has_explicit_clock_time_cue, message_has_implicit_recent_duration_cue,
         message_has_relative_duration_cue, normalize_calendar_bulk_ignored_keywords,
         normalize_confidence, normalize_llm_entry, normalize_snapped_update_window,
         normalize_summary_layout_preset_for_export, normalize_summary_layout_state,
-        read_saved_openai_key_configured, read_saved_openai_key_configured_marker,
-        reconcile_context_refs, resolve_calendar_candidate_ignored_state,
-        resolve_calendar_event_date, resolve_calendar_event_time, resolve_requested_openai_model,
+        prepare_gap_fill_entries, read_saved_openai_key_configured,
+        read_saved_openai_key_configured_marker, reconcile_context_refs,
+        resolve_calendar_candidate_ignored_state, resolve_calendar_event_date,
+        resolve_calendar_event_time, resolve_gap_fill_request, resolve_requested_openai_model,
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
         resolve_summary_export_free_text_value, round_to_nearest_15, summary_day_notes_header,
         timeline_week_bounds, timeline_week_view_bounds, validate_calendar_import_entry,
         validate_manual_create_refs, validate_manual_update_window, validate_timeline_preferences,
-        PreparedEntry, SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType,
-        TemporalReference, TimelinePreferenceValues, APP_SETTING_OPENAI_KEY_CONFIGURED,
-        MINUTES_IN_DAY,
+        MinuteInterval, PreparedEntry, ResolvedGapFillActivity, ResolvedGapFillRequest,
+        SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType, TemporalReference,
+        TimelinePreferenceValues, APP_SETTING_OPENAI_KEY_CONFIGURED, MINUTES_IN_DAY,
     };
 
     fn test_connection() -> Connection {
@@ -7763,6 +8571,58 @@ mod tests {
         }
     }
 
+    fn timeline_entry_for_test(
+        id: &str,
+        date: &str,
+        start_minute: i64,
+        end_minute: i64,
+    ) -> TimelineEntry {
+        TimelineEntry {
+            id: id.to_string(),
+            date: date.to_string(),
+            start_minute,
+            end_minute,
+            duration_minutes: end_minute - start_minute,
+            description: "Existing entry".to_string(),
+            user_submission_text: "Existing entry".to_string(),
+            source: "manual".to_string(),
+            confidence: 1.0,
+            engagement_id: None,
+            activity_id: None,
+            engagement_code: None,
+            engagement_name: None,
+            engagement_type: None,
+            activity_code: None,
+            activity_name: None,
+            used_activity_fallback: false,
+            used_temporal_fallback: false,
+            duration_defaulted: false,
+            fallback_summary: None,
+            source_message_entry_index: None,
+            source_message_entry_count: None,
+            model_used: None,
+            model_used_label: None,
+            transcription_model_used: None,
+            transcription_model_used_label: None,
+            warning_flags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn gap_fill_activity_for_test(label: &str) -> ResolvedGapFillActivity {
+        ResolvedGapFillActivity {
+            engagement_ref: None,
+            activity_ref: None,
+            label: label.to_string(),
+            description: label.to_string(),
+            matching_text: label.to_string(),
+            activity_reason: None,
+            alternative_activities: None,
+            confidence: 0.9,
+        }
+    }
+
     fn calendar_event_for_test() -> CalendarVisionEvent {
         CalendarVisionEvent {
             title: "Client planning".to_string(),
@@ -7780,6 +8640,202 @@ mod tests {
             confidence: Some(0.9),
             visual_notes: None,
         }
+    }
+
+    #[test]
+    fn gap_fill_free_intervals_subtract_clamp_and_merge_existing_entries() {
+        let window = MinuteInterval {
+            start_minute: 9 * 60,
+            end_minute: 18 * 60,
+        };
+        let existing_entries = vec![
+            timeline_entry_for_test("before", "2026-04-15", 8 * 60 + 30, 9 * 60 + 30),
+            timeline_entry_for_test("overlap-1", "2026-04-15", 10 * 60, 11 * 60),
+            timeline_entry_for_test("overlap-2", "2026-04-15", 10 * 60 + 30, 12 * 60),
+            timeline_entry_for_test("after", "2026-04-15", 17 * 60 + 30, 19 * 60),
+        ];
+
+        let free_intervals = compute_gap_fill_free_intervals(window, &existing_entries);
+
+        assert_eq!(
+            free_intervals,
+            vec![
+                MinuteInterval {
+                    start_minute: 9 * 60 + 30,
+                    end_minute: 10 * 60,
+                },
+                MinuteInterval {
+                    start_minute: 12 * 60,
+                    end_minute: 17 * 60 + 30,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn gap_fill_free_intervals_snap_inward_to_quarter_hours() {
+        let window = MinuteInterval {
+            start_minute: 9 * 60,
+            end_minute: 11 * 60,
+        };
+        let existing_entries = vec![timeline_entry_for_test(
+            "manual",
+            "2026-04-15",
+            9 * 60 + 7,
+            9 * 60 + 52,
+        )];
+
+        let free_intervals = compute_gap_fill_free_intervals(window, &existing_entries);
+
+        assert_eq!(
+            free_intervals,
+            vec![MinuteInterval {
+                start_minute: 10 * 60,
+                end_minute: 11 * 60,
+            }]
+        );
+    }
+
+    #[test]
+    fn gap_fill_distribution_splits_standard_workday_equally() {
+        let allocations = distribute_gap_fill_minutes(9 * 60, 3);
+
+        assert_eq!(allocations, vec![3 * 60, 3 * 60, 3 * 60]);
+    }
+
+    #[test]
+    fn gap_fill_distribution_assigns_remainder_to_earlier_activities() {
+        let allocations = distribute_gap_fill_minutes(8 * 60 + 15, 4);
+
+        assert_eq!(allocations, vec![2 * 60 + 15, 2 * 60, 2 * 60, 2 * 60]);
+    }
+
+    #[test]
+    fn gap_fill_spans_skip_existing_entries_without_overlap() {
+        let request = ResolvedGapFillRequest {
+            date: "2026-04-15".to_string(),
+            window: MinuteInterval {
+                start_minute: 9 * 60,
+                end_minute: 13 * 60,
+            },
+            activities: vec![
+                gap_fill_activity_for_test("Activity A"),
+                gap_fill_activity_for_test("Activity B"),
+            ],
+        };
+        let existing_entries = vec![timeline_entry_for_test(
+            "busy",
+            "2026-04-15",
+            10 * 60,
+            11 * 60,
+        )];
+        let code_context = CodeContext {
+            engagements: vec![],
+        };
+
+        let (prepared_entries, _notes, _details) = prepare_gap_fill_entries(
+            &request,
+            &existing_entries,
+            "Worked on Activity A and Activity B from 9 to 1",
+            &code_context,
+        );
+
+        let spans = prepared_entries
+            .iter()
+            .map(|entry| (entry.entry.start_minute, entry.entry.end_minute))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spans,
+            vec![
+                (9 * 60, 10 * 60),
+                (11 * 60, 11 * 60 + 30),
+                (11 * 60 + 30, 13 * 60),
+            ]
+        );
+        assert!(prepared_entries
+            .iter()
+            .all(|entry| entry.entry.end_minute <= 10 * 60 || entry.entry.start_minute >= 11 * 60));
+    }
+
+    #[test]
+    fn gap_fill_no_free_gaps_creates_no_fallback_entry() {
+        let request = ResolvedGapFillRequest {
+            date: "2026-04-15".to_string(),
+            window: MinuteInterval {
+                start_minute: 9 * 60,
+                end_minute: 18 * 60,
+            },
+            activities: vec![gap_fill_activity_for_test("Activity A")],
+        };
+        let existing_entries = vec![timeline_entry_for_test(
+            "full-day",
+            "2026-04-15",
+            9 * 60,
+            18 * 60,
+        )];
+        let code_context = CodeContext {
+            engagements: vec![],
+        };
+
+        let (prepared_entries, notes, _details) = prepare_gap_fill_entries(
+            &request,
+            &existing_entries,
+            "Fill out my calendar using Activity A",
+            &code_context,
+        );
+
+        assert!(prepared_entries.is_empty());
+        assert!(notes
+            .iter()
+            .any(|note| note.contains("No available gaps between 09:00 and 18:00")));
+    }
+
+    #[test]
+    fn gap_fill_request_uses_selected_date_when_llm_date_is_missing() {
+        let input = InterpretTextInput {
+            raw_text: "Fill out my calendar using Activity A".to_string(),
+            client_timestamp_iso: "2026-04-01T18:00:00-07:00".to_string(),
+            timezone: "America/Los_Angeles".to_string(),
+            client_local_date: "2026-04-01".to_string(),
+            client_local_time: "18:00".to_string(),
+            client_utc_offset_minutes: -420,
+            selected_date: Some("2026-04-15".to_string()),
+            open_ai_model: None,
+            capture_source: None,
+            transcription_model: None,
+            transcription_duration_ms: None,
+        };
+        let reference = TemporalReference {
+            local_date: NaiveDate::from_ymd_opt(2026, 4, 1).expect("valid date"),
+            rounded_end_minute: 18 * 60,
+        };
+        let request = LlmGapFillRequest {
+            date: None,
+            start_time: None,
+            end_time: None,
+            activities: vec![LlmGapFillActivity {
+                engagement_ref: None,
+                activity_ref: None,
+                label: Some("Activity A".to_string()),
+                description: None,
+                activity_reason: None,
+                alternative_activities: None,
+                confidence: Some(0.9),
+            }],
+        };
+
+        let resolved =
+            resolve_gap_fill_request(&request, &input, &reference, input.raw_text.as_str())
+                .expect("gap fill request should resolve");
+
+        assert_eq!(resolved.date, "2026-04-15");
+        assert_eq!(
+            resolved.window,
+            MinuteInterval {
+                start_minute: 9 * 60,
+                end_minute: 18 * 60,
+            }
+        );
     }
 
     #[test]

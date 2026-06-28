@@ -390,6 +390,7 @@ pub struct InterpretTextInput {
     pub client_local_date: String,
     pub client_local_time: String,
     pub client_utc_offset_minutes: i64,
+    pub selected_date: Option<String>,
     pub open_ai_model: Option<OpenAiModelId>,
     pub capture_source: Option<CaptureSourceId>,
     pub transcription_model: Option<TranscriptionModelId>,
@@ -998,7 +999,10 @@ pub struct ContextActivity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmResponse {
+    #[serde(default)]
     pub entries: Vec<LlmEntry>,
+    #[serde(default)]
+    pub gap_fill_requests: Vec<LlmGapFillRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1023,6 +1027,28 @@ pub struct LlmEntry {
 pub struct LlmAlternativeActivity {
     pub activity_ref: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmGapFillRequest {
+    pub date: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    #[serde(default)]
+    pub activities: Vec<LlmGapFillActivity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmGapFillActivity {
+    pub engagement_ref: Option<String>,
+    pub activity_ref: Option<String>,
+    pub label: Option<String>,
+    pub description: Option<String>,
+    pub activity_reason: Option<String>,
+    pub alternative_activities: Option<Vec<LlmAlternativeActivity>>,
+    pub confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

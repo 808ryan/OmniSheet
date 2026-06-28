@@ -155,6 +155,7 @@ interface SubmissionQueueItem {
   clientLocalDate: string
   clientLocalTime: string
   clientUtcOffsetMinutes: number
+  selectedDate?: string
   timezone: string
   state: SubmissionQueueItemState
   createdEntryCount?: number
@@ -2021,10 +2022,22 @@ function App() {
     const createdCount = submissionQueue
       .filter((item) => item.state === 'success')
       .reduce((total, item) => total + (item.createdEntryCount ?? 0), 0)
+    const zeroEntrySuccessCount = submissionQueue.filter((item) =>
+      item.state === 'success' && item.createdEntryCount === 0
+    ).length
     if (createdCount > 0) {
       return {
         kind: 'success',
         message: formatLlmSubmissionStatusMessage(createdCount, 'created'),
+      }
+    }
+
+    if (zeroEntrySuccessCount > 0) {
+      return {
+        kind: 'success',
+        message: zeroEntrySuccessCount === 1
+          ? 'No open gaps found.'
+          : `${zeroEntrySuccessCount} submissions completed with no open gaps found.`,
       }
     }
 
@@ -2079,6 +2092,7 @@ function App() {
     clientLocalDate,
     clientLocalTime,
     clientUtcOffsetMinutes,
+    selectedDate,
     timezone,
     captureSource,
     transcriptionModelUsed,
@@ -2090,6 +2104,7 @@ function App() {
     clientLocalDate: string
     clientLocalTime: string
     clientUtcOffsetMinutes: number
+    selectedDate?: string
     timezone: string
     captureSource: CaptureSourceId
     transcriptionModelUsed?: TranscriptionModelId
@@ -2105,6 +2120,7 @@ function App() {
       clientLocalDate,
       clientLocalTime,
       clientUtcOffsetMinutes,
+      selectedDate,
       timezone,
       state: 'pending',
       transcriptionModelUsed,
@@ -4039,6 +4055,7 @@ function App() {
           clientLocalDate: item.clientLocalDate,
           clientLocalTime: item.clientLocalTime,
           clientUtcOffsetMinutes: item.clientUtcOffsetMinutes,
+          selectedDate: item.selectedDate,
           timezone: item.timezone,
           captureSource: item.captureSource,
           transcriptionModel: item.transcriptionModelUsed,
@@ -4387,6 +4404,7 @@ function App() {
         clientLocalDate: formatDate(submittedAt),
         clientLocalTime: formatLocalTime(submittedAt),
         clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+        selectedDate: selectedDateRef.current,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         state: 'running',
       }
@@ -5488,6 +5506,7 @@ function App() {
       clientLocalDate: formatDate(submittedAt),
       clientLocalTime: formatLocalTime(submittedAt),
       clientUtcOffsetMinutes: -submittedAt.getTimezoneOffset(),
+      selectedDate: selectedDateRef.current,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
       captureSource: captureDraftMetadata?.captureSource ?? 'text',
       transcriptionModelUsed: captureDraftMetadata?.transcriptionModelUsed,

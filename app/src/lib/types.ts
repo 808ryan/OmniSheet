@@ -86,6 +86,7 @@ export interface InterpretTextInput {
   clientLocalDate: string
   clientLocalTime: string
   clientUtcOffsetMinutes: number
+  selectedDate?: string
   openAiModel?: OpenAiModelId
   captureSource?: CaptureSourceId
   transcriptionModel?: TranscriptionModelId
