@@ -1054,7 +1054,7 @@ function App() {
   const timelineExcludeUncategorizedFromDailyTotals =
     settingsStatus?.timelineExcludeUncategorizedFromDailyTotals ?? true
   const timelineShowUncategorizedDailyTotal =
-    settingsStatus?.timelineShowUncategorizedDailyTotal ?? true
+    settingsStatus?.timelineShowUncategorizedDailyTotal ?? false
   const timelineIncludeExternalInTotals =
     settingsStatus?.timelineIncludeExternalInTotals ?? true
   const timelineIncludeInternalInTotals =
@@ -1070,7 +1070,7 @@ function App() {
     timelineSeparateEngagementTypeTotals,
     timelineWeekStartDay,
   }
-  const showDiagnosticsTab = settingsStatus?.showDiagnosticsTab ?? true
+  const showDiagnosticsTab = settingsStatus?.showDiagnosticsTab ?? false
   const mainViewTabs = useMemo(
     () => SEGMENTED_VIEWS.filter((view) => showDiagnosticsTab || view.id !== 'diagnostics'),
     [showDiagnosticsTab],
@@ -1132,7 +1132,7 @@ function App() {
   const [calendarIsImporting, setCalendarIsImporting] = useState(false)
   const [calendarReviewCandidates, setCalendarReviewCandidates] = useState<CalendarReviewCandidate[]>([])
   const [selectedCalendarCandidateId, setSelectedCalendarCandidateId] = useState<string | null>(null)
-  const [calendarIgnoredKeywordDraft, setCalendarIgnoredKeywordDraft] = useState('lunch')
+  const [calendarIgnoredKeywordDraft, setCalendarIgnoredKeywordDraft] = useState('lunch\nfocus\nblock')
 
   const [selectedDate, setSelectedDate] = useState(todayDate)
   const [visibleMonth, setVisibleMonth] = useState(() => monthKeyFromDate(todayDate))
@@ -11176,7 +11176,7 @@ function App() {
                       value={calendarIgnoredKeywordDraft}
                       onChange={(event) => setCalendarIgnoredKeywordDraft(event.target.value)}
                       rows={4}
-                      placeholder="lunch"
+                      placeholder={'lunch\nfocus\nblock'}
                       disabled={isBusy || settingsStatus === null}
                     />
                     <button

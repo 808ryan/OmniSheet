@@ -272,7 +272,7 @@ fn read_saved_timeline_preferences(connection: &Connection) -> AppResult<Timelin
             connection,
             APP_SETTING_TIMELINE_SHOW_UNCATEGORIZED_DAILY_TOTAL,
         )?,
-        true,
+        false,
     );
     let include_external_in_totals = resolve_saved_bool_setting_value(
         db::get_app_setting(connection, APP_SETTING_TIMELINE_INCLUDE_EXTERNAL_IN_TOTALS)?,
@@ -363,7 +363,13 @@ fn read_saved_calendar_bulk_preferences(connection: &Connection) -> AppResult<(V
     let parsed_keywords = saved_keywords
         .as_deref()
         .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
-        .unwrap_or_else(|| vec!["lunch".to_string()]);
+        .unwrap_or_else(|| {
+            vec![
+                "lunch".to_string(),
+                "focus".to_string(),
+                "block".to_string(),
+            ]
+        });
     let ignored_keywords = normalize_calendar_bulk_ignored_keywords(&parsed_keywords);
     let ignore_all_day_events = resolve_saved_bool_setting_value(
         db::get_app_setting(connection, APP_SETTING_CALENDAR_BULK_IGNORE_ALL_DAY_EVENTS)?,
@@ -434,7 +440,7 @@ fn read_saved_quick_add_preferences(connection: &Connection) -> AppResult<QuickA
 fn read_saved_show_diagnostics_tab(connection: &Connection) -> AppResult<bool> {
     Ok(resolve_saved_bool_setting_value(
         db::get_app_setting(connection, APP_SETTING_SHOW_DIAGNOSTICS_TAB)?,
-        true,
+        false,
     ))
 }
 
@@ -9126,8 +9132,9 @@ mod tests {
         message_has_relative_duration_cue, normalize_calendar_bulk_ignored_keywords,
         normalize_confidence, normalize_llm_entry, normalize_snapped_update_window,
         normalize_summary_layout_preset_for_export, normalize_summary_layout_state,
-        prepare_gap_fill_entries, prepare_time_off_entries, read_saved_openai_key_configured,
-        read_saved_openai_key_configured_marker, reconcile_context_refs,
+        prepare_gap_fill_entries, prepare_time_off_entries, read_saved_calendar_bulk_preferences,
+        read_saved_openai_key_configured, read_saved_openai_key_configured_marker,
+        read_saved_show_diagnostics_tab, read_saved_timeline_preferences, reconcile_context_refs,
         resolve_calendar_candidate_ignored_state, resolve_calendar_event_date,
         resolve_calendar_event_time, resolve_gap_fill_request, resolve_requested_openai_model,
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
@@ -9145,6 +9152,33 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory db should open");
         db::run_migrations(&connection).expect("migrations should run");
         connection
+    }
+
+    #[test]
+    fn settings_defaults_apply_when_no_saved_preferences_exist() {
+        let connection = test_connection();
+
+        let timeline_preferences =
+            read_saved_timeline_preferences(&connection).expect("timeline defaults should read");
+        assert!(timeline_preferences.exclude_uncategorized_from_totals);
+        assert!(!timeline_preferences.show_uncategorized_total);
+        assert!(timeline_preferences.include_external_in_totals);
+        assert!(!timeline_preferences.include_internal_in_totals);
+        assert!(timeline_preferences.separate_engagement_type_totals);
+        assert_eq!(
+            timeline_preferences.week_start_day,
+            TimelineWeekStartDay::Saturday
+        );
+
+        let (ignored_keywords, ignore_all_day_events) =
+            read_saved_calendar_bulk_preferences(&connection)
+                .expect("calendar bulk defaults should read");
+        assert_eq!(ignored_keywords, vec!["lunch", "focus", "block"]);
+        assert!(ignore_all_day_events);
+
+        let show_diagnostics_tab =
+            read_saved_show_diagnostics_tab(&connection).expect("interface defaults should read");
+        assert!(!show_diagnostics_tab);
     }
 
     fn test_free_text_column(id: &str, label: &str) -> SummaryLayoutColumn {
