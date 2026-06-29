@@ -35,7 +35,7 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
     let tray_menu = build_tray_menu(&app_handle)?;
 
     let tray_icon = TrayIconBuilder::with_id(QUICK_ADD_TRAY_ID)
-        .icon(build_circle_plus_icon())
+        .icon(build_omnisheet_tray_icon())
         .icon_as_template(true)
         .tooltip("Add timesheet entry")
         .menu(&tray_menu)
@@ -531,35 +531,48 @@ fn clamp_to_window_bounds(value: f64, min: f64, max: f64) -> f64 {
     value.clamp(min, max.max(min))
 }
 
-fn build_circle_plus_icon() -> Image<'static> {
+fn build_omnisheet_tray_icon() -> Image<'static> {
     const SIZE: u32 = 64;
     const CENTER: f32 = 31.5;
-    const RADIUS: f32 = 24.0;
-    const CIRCLE_STROKE: f32 = 6.5;
-    const PLUS_HALF_LENGTH: f32 = 14.0;
-    const PLUS_STROKE: f32 = 7.0;
+    const RING_RADIUS: f32 = 24.0;
+    const RING_STROKE: f32 = 10.0;
+    const HAND_ANGLE_DEGREES: f32 = 42.0;
+    const HAND_LENGTH: f32 = 18.0;
+    const HAND_STROKE: f32 = 6.4;
+    const HUB_RADIUS: f32 = 5.0;
+    const RING_SEGMENTS: [(f32, f32); 3] = [(292.0, 50.0), (78.0, 142.0), (162.0, 236.0)];
 
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    let hand_angle = HAND_ANGLE_DEGREES.to_radians();
+    let hand_end_x = hand_angle.sin() * HAND_LENGTH;
+    let hand_end_y = -hand_angle.cos() * HAND_LENGTH;
 
     for y in 0..SIZE {
         for x in 0..SIZE {
             let dx = x as f32 - CENTER;
             let dy = y as f32 - CENTER;
             let distance = (dx * dx + dy * dy).sqrt();
-            let circle_alpha = antialias(CIRCLE_STROKE / 2.0 - (distance - RADIUS).abs());
-            let horizontal_alpha = antialias(rect_signed_distance(
-                dx,
-                dy,
-                PLUS_HALF_LENGTH,
-                PLUS_STROKE / 2.0,
-            ));
-            let vertical_alpha = antialias(rect_signed_distance(
-                dx,
-                dy,
-                PLUS_STROKE / 2.0,
-                PLUS_HALF_LENGTH,
-            ));
-            let alpha = circle_alpha.max(horizontal_alpha).max(vertical_alpha);
+
+            let mut alpha: f32 = 0.0;
+
+            for (start_angle, end_angle) in RING_SEGMENTS {
+                alpha = alpha.max(arc_segment_alpha(
+                    dx,
+                    dy,
+                    distance,
+                    RING_RADIUS,
+                    RING_STROKE,
+                    start_angle,
+                    end_angle,
+                ));
+            }
+
+            let hand_alpha = antialias(
+                HAND_STROKE / 2.0
+                    - distance_to_segment(dx, dy, 0.0, 0.0, hand_end_x, hand_end_y),
+            );
+            let hub_alpha = antialias(HUB_RADIUS - distance);
+            alpha = alpha.max(hand_alpha).max(hub_alpha);
 
             rgba.extend_from_slice(&[0, 0, 0, (alpha * 255.0).round() as u8]);
         }
@@ -568,12 +581,87 @@ fn build_circle_plus_icon() -> Image<'static> {
     Image::new_owned(rgba, SIZE, SIZE)
 }
 
+fn arc_segment_alpha(
+    dx: f32,
+    dy: f32,
+    distance: f32,
+    radius: f32,
+    stroke: f32,
+    start_angle: f32,
+    end_angle: f32,
+) -> f32 {
+    let angle = clockwise_angle_from_top(dx, dy);
+    let body_alpha = if angle_in_clockwise_arc(angle, start_angle, end_angle) {
+        antialias(stroke / 2.0 - (distance - radius).abs())
+    } else {
+        0.0
+    };
+
+    let (start_x, start_y) = circle_point(start_angle, radius);
+    let (end_x, end_y) = circle_point(end_angle, radius);
+    let cap_radius = stroke / 2.0;
+    let start_cap_alpha = antialias(cap_radius - point_distance(dx, dy, start_x, start_y));
+    let end_cap_alpha = antialias(cap_radius - point_distance(dx, dy, end_x, end_y));
+
+    body_alpha.max(start_cap_alpha).max(end_cap_alpha)
+}
+
+fn clockwise_angle_from_top(dx: f32, dy: f32) -> f32 {
+    let angle = dx.atan2(-dy).to_degrees();
+
+    if angle < 0.0 {
+        angle + 360.0
+    } else {
+        angle
+    }
+}
+
+fn angle_in_clockwise_arc(angle: f32, start_angle: f32, end_angle: f32) -> bool {
+    if start_angle <= end_angle {
+        angle >= start_angle && angle <= end_angle
+    } else {
+        angle >= start_angle || angle <= end_angle
+    }
+}
+
+fn circle_point(angle: f32, radius: f32) -> (f32, f32) {
+    let radians = angle.to_radians();
+
+    (radians.sin() * radius, -radians.cos() * radius)
+}
+
+fn point_distance(x: f32, y: f32, target_x: f32, target_y: f32) -> f32 {
+    let dx = x - target_x;
+    let dy = y - target_y;
+
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn distance_to_segment(
+    px: f32,
+    py: f32,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+) -> f32 {
+    let vx = end_x - start_x;
+    let vy = end_y - start_y;
+    let length_squared = vx * vx + vy * vy;
+
+    if length_squared == 0.0 {
+        return point_distance(px, py, start_x, start_y);
+    }
+
+    let t = (((px - start_x) * vx + (py - start_y) * vy) / length_squared).clamp(0.0, 1.0);
+    let nearest_x = start_x + t * vx;
+    let nearest_y = start_y + t * vy;
+
+    point_distance(px, py, nearest_x, nearest_y)
+}
+
 fn antialias(signed_distance: f32) -> f32 {
     const EDGE_WIDTH: f32 = 1.25;
 
     ((signed_distance + EDGE_WIDTH) / (EDGE_WIDTH * 2.0)).clamp(0.0, 1.0)
-}
-
-fn rect_signed_distance(dx: f32, dy: f32, half_width: f32, half_height: f32) -> f32 {
-    (half_width - dx.abs()).min(half_height - dy.abs())
 }
