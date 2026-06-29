@@ -24,6 +24,7 @@ pub struct QuickAddTrayState {
 
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let app_handle = app.handle().clone();
+    ensure_macos_regular_activation_policy(&app_handle)?;
     create_quick_add_window(&app_handle)?;
     install_main_window_close_to_tray(&app_handle);
 
@@ -66,6 +67,16 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
 
     app.manage(QuickAddTrayState { tray_icon });
 
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_regular_activation_policy(app: &AppHandle) -> tauri::Result<()> {
+    app.set_activation_policy(tauri::ActivationPolicy::Regular)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_macos_regular_activation_policy(_app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
@@ -233,14 +244,16 @@ fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::
         .unwrap_or(fallback_scale_factor);
     let rect_position = tray_rect.position.to_logical::<f64>(scale_factor);
     let rect_size = tray_rect.size.to_logical::<f64>(scale_factor);
-    let preferred_x = rect_position.x + rect_size.width + QUICK_ADD_TRAY_GAP;
-    let preferred_y = rect_position.y + rect_size.height + QUICK_ADD_TRAY_GAP;
-    let (min_x, max_x, min_y, max_y) = monitor
+    let tray_center_x = rect_position.x + rect_size.width / 2.0;
+    let tray_center_y = rect_position.y + rect_size.height / 2.0;
+    let preferred_x = tray_center_x - QUICK_ADD_WIDTH / 2.0;
+    let (min_x, max_x, min_y, max_y, work_area_center_y) = monitor
         .as_ref()
         .map(|monitor| {
             let work_area = monitor.work_area();
             let work_area_position = work_area.position.to_logical::<f64>(scale_factor);
             let work_area_size = work_area.size.to_logical::<f64>(scale_factor);
+            let work_area_center_y = work_area_position.y + work_area_size.height / 2.0;
 
             (
                 work_area_position.x + QUICK_ADD_SCREEN_MARGIN,
@@ -251,6 +264,7 @@ fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::
                 work_area_position.y + work_area_size.height
                     - QUICK_ADD_HEIGHT
                     - QUICK_ADD_SCREEN_MARGIN,
+                work_area_center_y,
             )
         })
         .unwrap_or((
@@ -258,7 +272,13 @@ fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::
             f64::INFINITY,
             QUICK_ADD_SCREEN_MARGIN,
             f64::INFINITY,
+            f64::INFINITY,
         ));
+    let preferred_y = if tray_center_y <= work_area_center_y {
+        rect_position.y + rect_size.height + QUICK_ADD_TRAY_GAP
+    } else {
+        rect_position.y - QUICK_ADD_HEIGHT - QUICK_ADD_TRAY_GAP
+    };
     let position = LogicalPosition::new(
         clamp_to_window_bounds(preferred_x, min_x, max_x),
         clamp_to_window_bounds(preferred_y, min_y, max_y),
