@@ -17,7 +17,7 @@ const TRAY_MENU_SHOW_QUICK_ADD_ID: &str = "show-quick-add";
 const TRAY_MENU_EXIT_ID: &str = "exit-app";
 const QUICK_ADD_WIDTH: f64 = 420.0;
 const QUICK_ADD_MIN_HEIGHT: f64 = 260.0;
-const QUICK_ADD_MAX_HEIGHT: f64 = 612.0;
+const QUICK_ADD_MAX_HEIGHT: f64 = 680.0;
 const QUICK_ADD_TRAY_GAP: f64 = 8.0;
 const QUICK_ADD_SCREEN_MARGIN: f64 = 8.0;
 
@@ -197,19 +197,7 @@ fn install_main_window_close_to_tray(app: &AppHandle) {
 }
 
 fn handle_tray_icon_left_click(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()> {
-    if should_restore_main_window_from_tray_click(app)? {
-        return show_main_window(app);
-    }
-
     toggle_quick_add_window(app, tray_rect)
-}
-
-fn should_restore_main_window_from_tray_click(app: &AppHandle) -> tauri::Result<bool> {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        return Ok(false);
-    };
-
-    Ok(!window.is_visible()? || window.is_minimized()?)
 }
 
 fn hide_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
