@@ -49,7 +49,7 @@ import {
   voiceRequestMicrophonePermission,
 } from './lib/api'
 import { isAppRuntime, isTauriRuntime } from './lib/runtime'
-import { QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
+import { QUICK_ADD_OPEN_TIMELINE_EVENT, QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
 import { SegmentedControl } from './SegmentedControl'
 import {
   buildDefaultSummaryLayoutState,
@@ -3480,6 +3480,40 @@ function App() {
     pendingAutoCenterDateRef.current = date
     setTimelineAutoCenterRequestKey((previous) => previous + 1)
   }, [])
+
+  useEffect(() => {
+    if (!tauriRuntime) {
+      return
+    }
+
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+
+    void listen(
+      QUICK_ADD_OPEN_TIMELINE_EVENT,
+      () => {
+        clearTimelineSelection()
+        requestTimelineAutoCenter(selectedDateRef.current)
+        setActiveView('timeline')
+      },
+    ).then((nextUnlisten) => {
+      if (cancelled) {
+        nextUnlisten()
+        return
+      }
+
+      unlisten = nextUnlisten
+    })
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [
+    clearTimelineSelection,
+    requestTimelineAutoCenter,
+    tauriRuntime,
+  ])
 
   const updateSelectedDate = useCallback((
     nextDate: string,

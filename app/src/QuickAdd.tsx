@@ -10,11 +10,12 @@ import {
   engagementList,
   interpretTextMessage,
   quickAddHideWindow,
+  quickAddShowMainWindow,
   quickAddSuggestions,
   settingsGetStatus,
   timelineCreateEntry,
 } from './lib/api'
-import { QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
+import { QUICK_ADD_OPEN_TIMELINE_EVENT, QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
 import {
   buildQuickEntryModel,
   QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
@@ -460,6 +461,20 @@ function QuickAdd() {
     void submitCurrentMessage()
   }
 
+  const openMainTimeline = useCallback(async () => {
+    if (statusRef.current === 'submitting') {
+      return
+    }
+
+    try {
+      await quickAddShowMainWindow()
+      await emit(QUICK_ADD_OPEN_TIMELINE_EVENT)
+    } catch (error) {
+      setStatus('error')
+      setStatusMessage(extractErrorMessage(error))
+    }
+  }, [])
+
   const onMessageKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (
       event.key !== 'Enter'
@@ -494,7 +509,28 @@ function QuickAdd() {
       <h1 className="sr-only">Quick Add</h1>
 
       <section className="quick-add-llm-panel" aria-labelledby="quick-add-llm-title">
-        <h2 id="quick-add-llm-title" className="quick-add-section-title">LLM Entry</h2>
+        <div className="quick-add-llm-header">
+          <h2 id="quick-add-llm-title" className="quick-add-section-title">LLM Entry</h2>
+          <button
+            type="button"
+            className="quick-add-home-button"
+            onClick={() => void openMainTimeline()}
+            disabled={status === 'submitting'}
+            aria-label="Open OmniSheet timeline"
+            title="Open OmniSheet timeline"
+          >
+            <svg
+              className="quick-add-home-icon"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M4.75 10.75 12 4.5l7.25 6.25" />
+              <path d="M6.5 9.5v9.25h11V9.5" />
+              <path d="M9.75 18.75v-5h4.5v5" />
+            </svg>
+          </button>
+        </div>
         <form className="quick-add-command" onSubmit={onSubmit}>
           <label className="quick-add-entry-bar">
             <span className="sr-only">Describe a timesheet entry</span>
