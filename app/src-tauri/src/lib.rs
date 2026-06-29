@@ -26,7 +26,7 @@ pub fn run() {
             .build(),
     );
 
-    builder
+    let app = builder
         .setup(|app| {
             let connection = db::init_database(&app.handle())?;
             let session_id = Uuid::new_v4().to_string();
@@ -87,6 +87,17 @@ pub fn run() {
             commands::diagnostics_list,
             commands::diagnostics_copy_bundle,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|_app, _event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } = _event
+        {
+            quick_add::handle_app_reopen(_app, has_visible_windows);
+        }
+    });
 }

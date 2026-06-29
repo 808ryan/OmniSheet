@@ -211,6 +211,15 @@
   align-items: center;
 }
 
+.capture-submit-hint {
+  min-width: 0;
+  display: grid;
+}
+
+.capture-submit-hint > button {
+  width: 100%;
+}
+
 .capture-mic-button,
 .capture-calendar-button {
   width: 2.7rem;
@@ -442,9 +451,9 @@
   left: 0;
   top: 0.1rem;
   bottom: 0.1rem;
-  width: 2px;
+  width: 2.5px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--quick-add-color) 46%, rgba(158, 176, 205, 0.28));
+  background: color-mix(in srgb, var(--quick-add-color) 56%, rgba(158, 176, 205, 0.3));
 }
 
 .quick-add-group-header {
@@ -480,7 +489,7 @@
   height: 2.62rem;
   min-width: 0;
   border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--quick-add-color) 24%, rgba(158, 176, 205, 0.58));
+  border: 1.25px solid color-mix(in srgb, var(--quick-add-color) 34%, rgba(158, 176, 205, 0.58));
   padding: 0 0.55rem;
   display: flex;
   align-items: center;
@@ -499,7 +508,7 @@
 
 .quick-add-tile:hover:not(:disabled),
 .quick-add-tile.dragging {
-  border-color: color-mix(in srgb, var(--quick-add-color) 46%, rgba(158, 176, 205, 0.58));
+  border-color: color-mix(in srgb, var(--quick-add-color) 56%, rgba(158, 176, 205, 0.58));
   background: color-mix(in srgb, var(--quick-add-color) 8%, rgba(255, 255, 255, 0.9));
   box-shadow:
     0 6px 14px rgba(16, 24, 40, 0.06),
@@ -971,6 +980,43 @@
 .settings-radio-option input[type='radio']:focus-visible {
   outline: 2px solid rgba(31, 122, 255, 0.58);
   outline-offset: 2px;
+}
+
+.settings-shortcut-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.settings-shortcut-label {
+  min-width: 0;
+  display: grid;
+  gap: 0.22rem;
+}
+
+.settings-shortcut-value {
+  display: inline-flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.32rem;
+  min-width: max-content;
+}
+
+.settings-keycap {
+  min-width: 1.78rem;
+  height: 1.72rem;
+  padding: 0 0.48rem;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(138, 158, 191, 0.44);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--ink);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.86),
+    0 1px 2px rgba(16, 24, 40, 0.08);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .settings-save-button {
@@ -6227,6 +6273,10 @@ button.danger:hover:not(:disabled) {
   }
 
   .settings-radio-group {
+    justify-content: flex-start;
+  }
+
+  .settings-shortcut-value {
     justify-content: flex-start;
   }
 

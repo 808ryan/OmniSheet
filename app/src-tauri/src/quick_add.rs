@@ -3,17 +3,20 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{Color, Effect, EffectState, EffectsBuilder};
 use tauri::{
-    App, AppHandle, LogicalPosition, Manager, Rect, WebviewUrl, WebviewWindow,
+    App, AppHandle, LogicalPosition, Manager, Monitor, Rect, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
 };
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 const QUICK_ADD_LABEL: &str = "quick-add";
 const MAIN_WINDOW_LABEL: &str = "main";
+const QUICK_ADD_TRAY_ID: &str = "quick-add-tray";
 const TRAY_MENU_SHOW_MAIN_ID: &str = "show-main";
 const TRAY_MENU_SHOW_QUICK_ADD_ID: &str = "show-quick-add";
 const TRAY_MENU_EXIT_ID: &str = "exit-app";
-const QUICK_ADD_WIDTH: f64 = 340.0;
-const QUICK_ADD_HEIGHT: f64 = 228.0;
+const QUICK_ADD_WIDTH: f64 = 420.0;
+const QUICK_ADD_HEIGHT: f64 = 560.0;
 const QUICK_ADD_TRAY_GAP: f64 = 8.0;
 const QUICK_ADD_SCREEN_MARGIN: f64 = 8.0;
 
@@ -24,12 +27,13 @@ pub struct QuickAddTrayState {
 
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let app_handle = app.handle().clone();
+    ensure_macos_regular_activation_policy(&app_handle)?;
     create_quick_add_window(&app_handle)?;
     install_main_window_close_to_tray(&app_handle);
 
     let tray_menu = build_tray_menu(&app_handle)?;
 
-    let tray_icon = TrayIconBuilder::with_id("quick-add-tray")
+    let tray_icon = TrayIconBuilder::with_id(QUICK_ADD_TRAY_ID)
         .icon(build_circle_plus_icon())
         .icon_as_template(true)
         .tooltip("Add timesheet entry")
@@ -57,15 +61,68 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                if let Err(error) = toggle_quick_add_window(tray.app_handle(), rect) {
-                    log::error!("failed to toggle quick entry window: {error}");
+                if let Err(error) = handle_tray_icon_left_click(tray.app_handle(), rect) {
+                    log::error!("failed to handle quick add tray icon click: {error}");
                 }
             }
         })
         .build(app.handle())?;
 
     app.manage(QuickAddTrayState { tray_icon });
+    register_quick_add_global_shortcut(&app_handle);
 
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn register_quick_add_global_shortcut(app: &AppHandle) {
+    let shortcut = quick_add_global_shortcut();
+    let shortcut_for_handler = shortcut.clone();
+    let plugin = tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(move |app, pressed_shortcut, event| {
+            if pressed_shortcut != &shortcut_for_handler || event.state() != ShortcutState::Pressed
+            {
+                return;
+            }
+
+            log::info!("quick add global shortcut triggered");
+            if let Err(error) = toggle_quick_add_window_from_shortcut(app) {
+                log::error!("failed to toggle quick entry window from shortcut: {error}");
+            }
+        })
+        .build();
+
+    if let Err(error) = app.plugin(plugin) {
+        log::warn!("failed to initialize quick add global shortcut plugin: {error}");
+        return;
+    }
+
+    if let Err(error) = app.global_shortcut().register(shortcut) {
+        log::warn!("failed to register quick add global shortcut: {error}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn register_quick_add_global_shortcut(_app: &AppHandle) {}
+
+#[cfg(target_os = "macos")]
+fn quick_add_global_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::SUPER | Modifiers::ALT), Code::KeyO)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn quick_add_global_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyO)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_regular_activation_policy(app: &AppHandle) -> tauri::Result<()> {
+    app.set_activation_policy(tauri::ActivationPolicy::Regular)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_macos_regular_activation_policy(_app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
@@ -77,6 +134,17 @@ pub fn quick_add_hide_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn quick_add_show_main_window(app: AppHandle) -> Result<(), String> {
     show_main_window(&app).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub fn handle_app_reopen(app: &AppHandle, has_visible_windows: bool) {
+    if has_visible_windows {
+        return;
+    }
+
+    if let Err(error) = show_main_window(app) {
+        log::error!("failed to show main window from macOS app reopen: {error}");
+    }
 }
 
 fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -117,6 +185,22 @@ fn install_main_window_close_to_tray(app: &AppHandle) {
     });
 }
 
+fn handle_tray_icon_left_click(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()> {
+    if should_restore_main_window_from_tray_click(app)? {
+        return show_main_window(app);
+    }
+
+    toggle_quick_add_window(app, tray_rect)
+}
+
+fn should_restore_main_window_from_tray_click(app: &AppHandle) -> tauri::Result<bool> {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        return Ok(false);
+    };
+
+    Ok(!window.is_visible()? || window.is_minimized()?)
+}
+
 fn hide_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(QUICK_ADD_LABEL) {
         window.hide()?;
@@ -126,6 +210,9 @@ fn hide_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn show_main_window(app: &AppHandle) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    app.show()?;
+
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         window.show()?;
         window.unminimize()?;
@@ -154,9 +241,10 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .shadow(true)
     .effects(
         EffectsBuilder::new()
-            .effect(Effect::HudWindow)
+            .effects([Effect::Popover, Effect::Acrylic, Effect::Mica, Effect::Blur])
             .state(EffectState::Active)
-            .radius(14.0)
+            .radius(18.0)
+            .color(Color(245, 248, 252, 128))
             .build(),
     )
     .always_on_top(true)
@@ -178,11 +266,24 @@ fn toggle_quick_add_window(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()
         return Ok(());
     }
 
-    position_quick_add_window(&window, tray_rect)?;
-    window.show()?;
-    window.set_focus()?;
+    if !position_quick_add_window(&window, tray_rect)? {
+        position_quick_add_window_at_platform_fallback(app, &window)?;
+    }
+
+    show_and_focus_quick_add_window(&window)?;
 
     Ok(())
+}
+
+fn toggle_quick_add_window_from_shortcut(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(QUICK_ADD_LABEL) {
+        if window.is_visible()? {
+            window.hide()?;
+            return Ok(());
+        }
+    }
+
+    show_quick_add_window(app)
 }
 
 fn show_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
@@ -192,16 +293,76 @@ fn show_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
     };
 
     if !window.is_visible()? {
-        position_quick_add_window_without_tray_rect(&window)?;
-        window.show()?;
+        let anchored_to_tray = if let Some(rect) = quick_add_tray_rect(app) {
+            position_quick_add_window(&window, rect)?
+        } else {
+            false
+        };
+
+        if !anchored_to_tray {
+            position_quick_add_window_at_platform_fallback(app, &window)?;
+        }
     }
 
-    window.set_focus()?;
+    show_and_focus_quick_add_window(&window)?;
 
     Ok(())
 }
 
-fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::Result<()> {
+fn show_and_focus_quick_add_window(window: &WebviewWindow) -> tauri::Result<()> {
+    window.show()?;
+    window.unminimize()?;
+
+    #[cfg(target_os = "windows")]
+    {
+        window.set_always_on_top(false)?;
+        window.set_always_on_top(true)?;
+    }
+
+    window.set_focus()
+}
+
+fn quick_add_tray_rect(app: &AppHandle) -> Option<Rect> {
+    let tray_icon = app.tray_by_id(QUICK_ADD_TRAY_ID)?;
+
+    match tray_icon.rect() {
+        Ok(Some(rect)) if is_usable_tray_rect(&rect) => Some(rect),
+        Ok(Some(rect)) => {
+            let rect_position = rect.position.to_physical::<f64>(1.0);
+            let rect_size = rect.size.to_physical::<f64>(1.0);
+            log::info!(
+                "quick add tray icon rect was not usable; using platform fallback: position=({}, {}), size=({}, {})",
+                rect_position.x,
+                rect_position.y,
+                rect_size.width,
+                rect_size.height
+            );
+            None
+        }
+        Ok(None) => {
+            log::info!("quick add tray icon rect unavailable; using platform fallback");
+            None
+        }
+        Err(error) => {
+            log::warn!("failed to read quick add tray icon rect: {error}");
+            None
+        }
+    }
+}
+
+fn is_usable_tray_rect(rect: &Rect) -> bool {
+    let rect_position = rect.position.to_physical::<f64>(1.0);
+    let rect_size = rect.size.to_physical::<f64>(1.0);
+
+    rect_position.x.is_finite()
+        && rect_position.y.is_finite()
+        && rect_size.width.is_finite()
+        && rect_size.height.is_finite()
+        && rect_size.width > 1.0
+        && rect_size.height > 1.0
+}
+
+fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::Result<bool> {
     let fallback_scale_factor = window.scale_factor().unwrap_or(1.0);
     let tray_physical_position = tray_rect.position.to_physical::<f64>(fallback_scale_factor);
     let tray_physical_size = tray_rect.size.to_physical::<f64>(fallback_scale_factor);
@@ -221,51 +382,50 @@ fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::
                 && tray_center_y <= bottom
         })
     });
-    let scale_factor = monitor
-        .as_ref()
-        .map(|monitor| monitor.scale_factor())
-        .unwrap_or(fallback_scale_factor);
+
+    let Some(monitor) = monitor else {
+        log::info!(
+            "quick add tray icon rect did not resolve to a monitor; using platform fallback"
+        );
+        return Ok(false);
+    };
+
+    let scale_factor = monitor.scale_factor();
     let rect_position = tray_rect.position.to_logical::<f64>(scale_factor);
     let rect_size = tray_rect.size.to_logical::<f64>(scale_factor);
-    let preferred_x = rect_position.x + rect_size.width + QUICK_ADD_TRAY_GAP;
-    let preferred_y = rect_position.y + rect_size.height + QUICK_ADD_TRAY_GAP;
-    let (min_x, max_x, min_y, max_y) = monitor
-        .as_ref()
-        .map(|monitor| {
-            let work_area = monitor.work_area();
-            let work_area_position = work_area.position.to_logical::<f64>(scale_factor);
-            let work_area_size = work_area.size.to_logical::<f64>(scale_factor);
-
-            (
-                work_area_position.x + QUICK_ADD_SCREEN_MARGIN,
-                work_area_position.x + work_area_size.width
-                    - QUICK_ADD_WIDTH
-                    - QUICK_ADD_SCREEN_MARGIN,
-                work_area_position.y + QUICK_ADD_SCREEN_MARGIN,
-                work_area_position.y + work_area_size.height
-                    - QUICK_ADD_HEIGHT
-                    - QUICK_ADD_SCREEN_MARGIN,
-            )
-        })
-        .unwrap_or((
-            QUICK_ADD_SCREEN_MARGIN,
-            f64::INFINITY,
-            QUICK_ADD_SCREEN_MARGIN,
-            f64::INFINITY,
-        ));
+    let tray_center_x = rect_position.x + rect_size.width / 2.0;
+    let tray_center_y = rect_position.y + rect_size.height / 2.0;
+    let preferred_x = tray_center_x - QUICK_ADD_WIDTH / 2.0;
+    let work_area = monitor.work_area();
+    let work_area_position = work_area.position.to_logical::<f64>(scale_factor);
+    let work_area_size = work_area.size.to_logical::<f64>(scale_factor);
+    let work_area_center_y = work_area_position.y + work_area_size.height / 2.0;
+    let min_x = work_area_position.x + QUICK_ADD_SCREEN_MARGIN;
+    let max_x =
+        work_area_position.x + work_area_size.width - QUICK_ADD_WIDTH - QUICK_ADD_SCREEN_MARGIN;
+    let min_y = work_area_position.y + QUICK_ADD_SCREEN_MARGIN;
+    let max_y =
+        work_area_position.y + work_area_size.height - QUICK_ADD_HEIGHT - QUICK_ADD_SCREEN_MARGIN;
+    let preferred_y = if tray_center_y <= work_area_center_y {
+        rect_position.y + rect_size.height + QUICK_ADD_TRAY_GAP
+    } else {
+        rect_position.y - QUICK_ADD_HEIGHT - QUICK_ADD_TRAY_GAP
+    };
     let position = LogicalPosition::new(
         clamp_to_window_bounds(preferred_x, min_x, max_x),
         clamp_to_window_bounds(preferred_y, min_y, max_y),
     );
 
-    window.set_position(position)
+    window.set_position(position)?;
+
+    Ok(true)
 }
 
-fn position_quick_add_window_without_tray_rect(window: &WebviewWindow) -> tauri::Result<()> {
-    let monitor = match window.current_monitor()? {
-        Some(monitor) => Some(monitor),
-        None => window.primary_monitor()?,
-    };
+fn position_quick_add_window_at_platform_fallback(
+    app: &AppHandle,
+    window: &WebviewWindow,
+) -> tauri::Result<()> {
+    let monitor = quick_add_fallback_monitor(app, window)?;
 
     let Some(monitor) = monitor else {
         return window.center();
@@ -281,12 +441,42 @@ fn position_quick_add_window_without_tray_rect(window: &WebviewWindow) -> tauri:
     let min_y = work_area_position.y + QUICK_ADD_SCREEN_MARGIN;
     let max_y =
         work_area_position.y + work_area_size.height - QUICK_ADD_HEIGHT - QUICK_ADD_SCREEN_MARGIN;
+    #[cfg(target_os = "macos")]
+    let (preferred_x, preferred_y) = {
+        log::info!("positioning quick add at macOS menu-bar center fallback");
+        (
+            work_area_position.x + (work_area_size.width - QUICK_ADD_WIDTH) / 2.0,
+            min_y,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (preferred_x, preferred_y) = {
+        log::info!("positioning quick add at taskbar-corner fallback");
+        (max_x, max_y)
+    };
     let position = LogicalPosition::new(
-        clamp_to_window_bounds(max_x, min_x, max_x),
-        clamp_to_window_bounds(max_y, min_y, max_y),
+        clamp_to_window_bounds(preferred_x, min_x, max_x),
+        clamp_to_window_bounds(preferred_y, min_y, max_y),
     );
 
     window.set_position(position)
+}
+
+fn quick_add_fallback_monitor(
+    app: &AppHandle,
+    window: &WebviewWindow,
+) -> tauri::Result<Option<Monitor>> {
+    if let Ok(cursor_position) = app.cursor_position() {
+        if let Some(monitor) = app.monitor_from_point(cursor_position.x, cursor_position.y)? {
+            return Ok(Some(monitor));
+        }
+    }
+
+    if let Some(monitor) = window.current_monitor()? {
+        return Ok(Some(monitor));
+    }
+
+    app.primary_monitor()
 }
 
 fn clamp_to_window_bounds(value: f64, min: f64, max: f64) -> f64 {
