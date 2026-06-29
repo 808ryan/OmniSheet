@@ -165,6 +165,10 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
       );
 
       CREATE INDEX IF NOT EXISTS idx_timesheet_entries_date ON timesheet_entries(date);
+      CREATE INDEX IF NOT EXISTS idx_timesheet_entries_engagement_activity_created_at
+      ON timesheet_entries(engagement_id, activity_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_timesheet_entries_date_start_created
+      ON timesheet_entries(date, start_minute, created_at);
 
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
@@ -393,9 +397,6 @@ fn migrate_optional_user_code_schema(conn: &Connection) -> AppResult<()> {
 fn ensure_optional_code_indexes(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         r#"
-      DROP INDEX IF EXISTS idx_engagements_unique_code;
-      DROP INDEX IF EXISTS idx_activities_unique_code;
-
       CREATE UNIQUE INDEX IF NOT EXISTS idx_engagements_unique_code
       ON engagements(code)
       WHERE code IS NOT NULL AND length(trim(code)) > 0;

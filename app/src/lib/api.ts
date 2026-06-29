@@ -70,6 +70,16 @@ interface InvokeCommandOptions {
   messageText?: string
 }
 
+const SLOW_FRONTEND_COMMAND_THRESHOLD_MS = 1000
+const ALWAYS_LOG_FRONTEND_SUCCESS_COMMANDS = new Set([
+  'interpret_text_message',
+  'transcribe_audio_clip',
+  'calendar_extract_events',
+  'calendar_import_entries',
+  'summary_export_weekly_excel',
+  'diagnostics_copy_bundle',
+])
+
 function generateCorrelationId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID()
@@ -119,6 +129,17 @@ export function diagnosticsRecordFrontendEvent(input: DiagnosticsRecordInput): P
   return recordFrontendDiagnostic(input)
 }
 
+function shouldLogFrontendCommandSuccess(command: string, durationMs: number): boolean {
+  return (
+    durationMs >= SLOW_FRONTEND_COMMAND_THRESHOLD_MS
+    || ALWAYS_LOG_FRONTEND_SUCCESS_COMMANDS.has(command)
+  )
+}
+
+function recordFrontendDiagnosticInBackground(input: DiagnosticsRecordInput): void {
+  void recordFrontendDiagnostic(input)
+}
+
 async function invokeCommand<T>(
   command: string,
   args?: Record<string, unknown>,
@@ -131,30 +152,26 @@ async function invokeCommand<T>(
   const correlationId = generateCorrelationId()
   const startedAt = performance.now()
 
-  await recordFrontendDiagnostic({
-    correlationId,
-    layer: 'frontend',
-    eventType: 'command_start',
-    command,
-    status: 'ok',
-    messageText: options?.messageText,
-    detailsJson: JSON.stringify({ args: args ? Object.keys(args) : [] }),
-  })
-
   try {
     const result = await invoke<T>(command, args)
     const durationMs = Math.round(performance.now() - startedAt)
 
-    await recordFrontendDiagnostic({
-      correlationId,
-      layer: 'frontend',
-      eventType: 'command_success',
-      command,
-      status: 'ok',
-      durationMs,
-      messageText: options?.messageText,
-      detailsJson: JSON.stringify({ durationMs }),
-    })
+    if (shouldLogFrontendCommandSuccess(command, durationMs)) {
+      recordFrontendDiagnosticInBackground({
+        correlationId,
+        layer: 'frontend',
+        eventType: 'command_success',
+        command,
+        status: 'ok',
+        durationMs,
+        messageText: options?.messageText,
+        detailsJson: JSON.stringify({
+          durationMs,
+          slowThresholdMs: SLOW_FRONTEND_COMMAND_THRESHOLD_MS,
+          alwaysLogged: ALWAYS_LOG_FRONTEND_SUCCESS_COMMANDS.has(command),
+        }),
+      })
+    }
 
     return result
   } catch (error) {
