@@ -34,9 +34,14 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
 
     let tray_menu = build_tray_menu(&app_handle)?;
 
-    let tray_icon = TrayIconBuilder::with_id(QUICK_ADD_TRAY_ID)
-        .icon(build_omnisheet_tray_icon())
-        .icon_as_template(true)
+    let tray_icon_builder =
+        TrayIconBuilder::with_id(QUICK_ADD_TRAY_ID).icon(build_quick_add_tray_icon()?);
+    #[cfg(target_os = "macos")]
+    let tray_icon_builder = tray_icon_builder.icon_as_template(true);
+    #[cfg(not(target_os = "macos"))]
+    let tray_icon_builder = tray_icon_builder.icon_as_template(false);
+
+    let tray_icon = tray_icon_builder
         .tooltip("Add timesheet entry")
         .menu(&tray_menu)
         .show_menu_on_left_click(false)
@@ -531,137 +536,70 @@ fn clamp_to_window_bounds(value: f64, min: f64, max: f64) -> f64 {
     value.clamp(min, max.max(min))
 }
 
-fn build_omnisheet_tray_icon() -> Image<'static> {
-    const SIZE: u32 = 64;
-    const CENTER: f32 = 31.5;
-    const RING_RADIUS: f32 = 24.0;
-    const RING_STROKE: f32 = 10.0;
-    const HAND_ANGLE_DEGREES: f32 = 42.0;
-    const HAND_LENGTH: f32 = 18.0;
-    const HAND_STROKE: f32 = 6.4;
-    const HUB_RADIUS: f32 = 5.0;
-    const RING_SEGMENTS: [(f32, f32); 3] = [(292.0, 50.0), (78.0, 142.0), (162.0, 236.0)];
+fn build_quick_add_tray_icon() -> tauri::Result<Image<'static>> {
+    #[cfg(target_os = "macos")]
+    {
+        let source = Image::from_bytes(include_bytes!("../icons/icon.png"))?.to_owned();
 
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    let hand_angle = HAND_ANGLE_DEGREES.to_radians();
-    let hand_end_x = hand_angle.sin() * HAND_LENGTH;
-    let hand_end_y = -hand_angle.cos() * HAND_LENGTH;
-
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as f32 - CENTER;
-            let dy = y as f32 - CENTER;
-            let distance = (dx * dx + dy * dy).sqrt();
-
-            let mut alpha: f32 = 0.0;
-
-            for (start_angle, end_angle) in RING_SEGMENTS {
-                alpha = alpha.max(arc_segment_alpha(
-                    dx,
-                    dy,
-                    distance,
-                    RING_RADIUS,
-                    RING_STROKE,
-                    start_angle,
-                    end_angle,
-                ));
-            }
-
-            let hand_alpha = antialias(
-                HAND_STROKE / 2.0
-                    - distance_to_segment(dx, dy, 0.0, 0.0, hand_end_x, hand_end_y),
-            );
-            let hub_alpha = antialias(HUB_RADIUS - distance);
-            alpha = alpha.max(hand_alpha).max(hub_alpha);
-
-            rgba.extend_from_slice(&[0, 0, 0, (alpha * 255.0).round() as u8]);
-        }
+        Ok(build_macos_template_tray_icon(source))
     }
 
-    Image::new_owned(rgba, SIZE, SIZE)
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(Image::from_bytes(include_bytes!("../icons/32x32.png"))?.to_owned())
+    }
 }
 
-fn arc_segment_alpha(
-    dx: f32,
-    dy: f32,
-    distance: f32,
-    radius: f32,
-    stroke: f32,
-    start_angle: f32,
-    end_angle: f32,
-) -> f32 {
-    let angle = clockwise_angle_from_top(dx, dy);
-    let body_alpha = if angle_in_clockwise_arc(angle, start_angle, end_angle) {
-        antialias(stroke / 2.0 - (distance - radius).abs())
+#[cfg(target_os = "macos")]
+fn build_macos_template_tray_icon(source: Image<'static>) -> Image<'static> {
+    let width = source.width();
+    let height = source.height();
+    let center_x = (width as f32 - 1.0) / 2.0;
+    let center_y = (height as f32 - 1.0) / 2.0;
+    let center_cutout_radius = width.min(height) as f32 * 0.245;
+    let mut rgba = Vec::with_capacity(source.rgba().len());
+
+    for (index, pixel) in source.rgba().chunks_exact(4).enumerate() {
+        let x = (index as u32 % width) as f32;
+        let y = (index as u32 / width) as f32;
+        let dx = x - center_x;
+        let dy = y - center_y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let red = pixel[0];
+        let green = pixel[1];
+        let blue = pixel[2];
+        let alpha = pixel[3];
+        let keep_outer_logo = distance > center_cutout_radius;
+        let keep_clock_hand = is_dark_teal_pixel(red, green, blue, alpha);
+        let template_alpha = if keep_outer_logo || keep_clock_hand {
+            normalize_template_alpha(alpha)
+        } else {
+            0
+        };
+
+        rgba.extend_from_slice(&[0, 0, 0, template_alpha]);
+    }
+
+    Image::new_owned(rgba, width, height)
+}
+
+#[cfg(target_os = "macos")]
+fn is_dark_teal_pixel(red: u8, green: u8, blue: u8, alpha: u8) -> bool {
+    alpha > 40
+        && red < 120
+        && green > 45
+        && blue > 55
+        && green.saturating_sub(red) > 20
+        && blue.saturating_sub(red) > 20
+        && green < 185
+        && blue < 200
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_template_alpha(alpha: u8) -> u8 {
+    if alpha < 64 {
+        alpha
     } else {
-        0.0
-    };
-
-    let (start_x, start_y) = circle_point(start_angle, radius);
-    let (end_x, end_y) = circle_point(end_angle, radius);
-    let cap_radius = stroke / 2.0;
-    let start_cap_alpha = antialias(cap_radius - point_distance(dx, dy, start_x, start_y));
-    let end_cap_alpha = antialias(cap_radius - point_distance(dx, dy, end_x, end_y));
-
-    body_alpha.max(start_cap_alpha).max(end_cap_alpha)
-}
-
-fn clockwise_angle_from_top(dx: f32, dy: f32) -> f32 {
-    let angle = dx.atan2(-dy).to_degrees();
-
-    if angle < 0.0 {
-        angle + 360.0
-    } else {
-        angle
+        255
     }
-}
-
-fn angle_in_clockwise_arc(angle: f32, start_angle: f32, end_angle: f32) -> bool {
-    if start_angle <= end_angle {
-        angle >= start_angle && angle <= end_angle
-    } else {
-        angle >= start_angle || angle <= end_angle
-    }
-}
-
-fn circle_point(angle: f32, radius: f32) -> (f32, f32) {
-    let radians = angle.to_radians();
-
-    (radians.sin() * radius, -radians.cos() * radius)
-}
-
-fn point_distance(x: f32, y: f32, target_x: f32, target_y: f32) -> f32 {
-    let dx = x - target_x;
-    let dy = y - target_y;
-
-    (dx * dx + dy * dy).sqrt()
-}
-
-fn distance_to_segment(
-    px: f32,
-    py: f32,
-    start_x: f32,
-    start_y: f32,
-    end_x: f32,
-    end_y: f32,
-) -> f32 {
-    let vx = end_x - start_x;
-    let vy = end_y - start_y;
-    let length_squared = vx * vx + vy * vy;
-
-    if length_squared == 0.0 {
-        return point_distance(px, py, start_x, start_y);
-    }
-
-    let t = (((px - start_x) * vx + (py - start_y) * vy) / length_squared).clamp(0.0, 1.0);
-    let nearest_x = start_x + t * vx;
-    let nearest_y = start_y + t * vy;
-
-    point_distance(px, py, nearest_x, nearest_y)
-}
-
-fn antialias(signed_distance: f32) -> f32 {
-    const EDGE_WIDTH: f32 = 1.25;
-
-    ((signed_distance + EDGE_WIDTH) / (EDGE_WIDTH * 2.0)).clamp(0.0, 1.0)
 }
