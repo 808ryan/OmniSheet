@@ -311,6 +311,10 @@ interface PositionedTimelineEntry extends ClippedTimelineEntry {
 type TimelineLabelTier = 1 | 2 | 3
 type VoiceCaptureState = 'idle' | 'recording' | 'transcribing'
 type VoicePlatform = 'macos' | 'windows' | 'linux' | 'unknown'
+interface ShortcutPresentation {
+  keycaps: string[]
+  accessibleLabel: string
+}
 type VoiceSupportFailureReasonCode =
   | 'missing_navigator'
   | 'missing_media_devices'
@@ -894,7 +898,9 @@ function ResponsiveCodeTagList({ tags, itemKeyPrefix }: ResponsiveCodeTagListPro
 function App() {
   const tauriRuntime = isTauriRuntime()
   const appRuntime = isAppRuntime()
-  const credentialStoreName = formatCredentialStoreName(detectVoicePlatform())
+  const detectedPlatform = detectVoicePlatform()
+  const credentialStoreName = formatCredentialStoreName(detectedPlatform)
+  const quickAddShortcut = formatQuickAddShortcut(detectedPlatform)
   const credentialHelpText = 'An API key is required for LLM based timesheet entries.'
   const [timelineClock, setTimelineClock] = useState(() => new Date())
   const todayDate = useMemo(() => formatDate(timelineClock), [timelineClock])
@@ -10920,6 +10926,29 @@ function App() {
 
               <section className="settings-card">
                 <div className="settings-card-header">
+                  <h3>Shortcuts</h3>
+                </div>
+                <div className="settings-preference-row settings-shortcut-row">
+                  <div className="settings-shortcut-label">
+                    <span className="settings-preference-label">Open Quick Add</span>
+                    <span className="field-helper">Opens or closes the tray Quick Add palette.</span>
+                  </div>
+                  <div
+                    className="settings-shortcut-value"
+                    role="text"
+                    aria-label={quickAddShortcut.accessibleLabel}
+                  >
+                    {quickAddShortcut.keycaps.map((keycap, index) => (
+                      <kbd key={`${keycap}-${index}`} className="settings-keycap">
+                        {keycap}
+                      </kbd>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-header">
                   <h3>Interface</h3>
                 </div>
                 <div className="settings-preference-row settings-toggle-row">
@@ -12647,6 +12676,20 @@ function formatCredentialStoreName(platform: VoicePlatform): string {
   }
 
   return 'the system credential store'
+}
+
+function formatQuickAddShortcut(platform: VoicePlatform): ShortcutPresentation {
+  if (platform === 'macos') {
+    return {
+      keycaps: ['⌥', '⌘', 'O'],
+      accessibleLabel: 'Option + Command + O',
+    }
+  }
+
+  return {
+    keycaps: ['Ctrl', 'Alt', 'O'],
+    accessibleLabel: 'Ctrl + Alt + O',
+  }
 }
 
 function getVoiceErrorName(error: unknown): string | null {

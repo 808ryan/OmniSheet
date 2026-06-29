@@ -6,6 +6,8 @@ use tauri::{
     App, AppHandle, LogicalPosition, Manager, Rect, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
 };
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 const QUICK_ADD_LABEL: &str = "quick-add";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -67,8 +69,50 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
         .build(app.handle())?;
 
     app.manage(QuickAddTrayState { tray_icon });
+    register_quick_add_global_shortcut(&app_handle);
 
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn register_quick_add_global_shortcut(app: &AppHandle) {
+    let shortcut = quick_add_global_shortcut();
+    let shortcut_for_handler = shortcut.clone();
+    let plugin = tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(move |app, pressed_shortcut, event| {
+            if pressed_shortcut != &shortcut_for_handler || event.state() != ShortcutState::Pressed
+            {
+                return;
+            }
+
+            if let Err(error) = toggle_quick_add_window_from_shortcut(app) {
+                log::error!("failed to toggle quick entry window from shortcut: {error}");
+            }
+        })
+        .build();
+
+    if let Err(error) = app.plugin(plugin) {
+        log::warn!("failed to initialize quick add global shortcut plugin: {error}");
+        return;
+    }
+
+    if let Err(error) = app.global_shortcut().register(shortcut) {
+        log::warn!("failed to register quick add global shortcut: {error}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn register_quick_add_global_shortcut(_app: &AppHandle) {}
+
+#[cfg(target_os = "macos")]
+fn quick_add_global_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::SUPER | Modifiers::ALT), Code::KeyO)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn quick_add_global_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyO)
 }
 
 #[cfg(target_os = "macos")]
@@ -166,12 +210,7 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .shadow(true)
     .effects(
         EffectsBuilder::new()
-            .effects([
-                Effect::Popover,
-                Effect::Acrylic,
-                Effect::Mica,
-                Effect::Blur,
-            ])
+            .effects([Effect::Popover, Effect::Acrylic, Effect::Mica, Effect::Blur])
             .state(EffectState::Active)
             .radius(18.0)
             .color(Color(245, 248, 252, 128))
@@ -201,6 +240,17 @@ fn toggle_quick_add_window(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()
     window.set_focus()?;
 
     Ok(())
+}
+
+fn toggle_quick_add_window_from_shortcut(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(QUICK_ADD_LABEL) {
+        if window.is_visible()? {
+            window.hide()?;
+            return Ok(());
+        }
+    }
+
+    show_quick_add_window(app)
 }
 
 fn show_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
