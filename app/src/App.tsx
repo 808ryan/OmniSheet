@@ -80,6 +80,22 @@ import {
   shiftDate,
   timeInputToMinute,
 } from './lib/time'
+import {
+  buildQuickAddSettingsDraft,
+  buildQuickEntryModel,
+  QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
+  QUICK_ENTRY_DRAG_ACTIVATION_PX,
+  quickEntryActivityKey as quickAddActivityKey,
+  quickEntryDurationProgress,
+  quickEntryDurationFromDrag,
+  resolveQuickEntryCreateWindow,
+  sanitizeQuickAddPreferences,
+  uniqueIds,
+} from './lib/quickEntry'
+import type {
+  QuickEntryActivityGroup,
+  QuickEntryDragState,
+} from './lib/quickEntry'
 import type {
   Activity,
   CalendarExtractCandidate,
@@ -163,29 +179,6 @@ interface SubmissionQueueItem {
   completedAtMs?: number
   transcriptionModelUsed?: TranscriptionModelId
   transcriptionDurationMs?: number
-}
-
-interface QuickBlockDragState {
-  engagementId: string
-  activityId: string
-  activityName: string
-  pointerId: number
-  originClientX: number
-  currentClientX: number
-  durationMinutes: number
-  isDragging: boolean
-}
-
-interface QuickAddActivityView {
-  engagement: Engagement
-  activity: Activity
-  usageCount: number
-  lastUsedAt: number | null
-}
-
-interface QuickAddActivityGroup {
-  engagement: Engagement
-  activities: QuickAddActivityView[]
 }
 
 interface QuickAddScrollMetrics {
@@ -544,13 +537,6 @@ const EMPTY_ACTIVITY_FORM: ActivityFormState = {
   isActive: true,
 }
 
-const EMPTY_QUICK_ADD_PREFERENCES: QuickAddPreferences = {
-  engagementOrder: [],
-  hiddenEngagementIds: [],
-  activityOrder: {},
-  hiddenActivityIds: [],
-}
-
 function getDefaultActivityEngagementId(engagements: Engagement[]): string {
   return engagements[0]?.id ?? ''
 }
@@ -585,9 +571,6 @@ const TIMELINE_DURATION_RESIZE_ACTIVATION_PX = 12
 const TIMELINE_DURATION_RESIZE_DOMINANCE_RATIO = 1.5
 const TIMELINE_DURATION_RESIZE_STEP_PX = 28
 const TIMELINE_DURATION_RESIZE_STEP_MINUTES = 30
-const QUICK_BLOCK_DURATION_STEP_MINUTES = 30
-const QUICK_BLOCK_MAX_DURATION_MINUTES = 8 * HOUR_IN_MINUTES
-const QUICK_BLOCK_DRAG_STEP_PX = 22
 const WEEK_TIMELINE_HEADER_HEIGHT = 64
 const WEEK_TIMELINE_GUTTER_LEFT = 60
 const WEEK_TIMELINE_DAY_WIDTH = 176
@@ -616,116 +599,6 @@ const PREFERRED_VOICE_MIME_TYPES = [
   'audio/ogg',
   'audio/wav',
 ] as const
-
-function quickAddActivityKey(engagementId: string, activityId: string): string {
-  return `${engagementId}:${activityId}`
-}
-
-function uniqueIds(values: string[]): string[] {
-  const seen = new Set<string>()
-  const next: string[] = []
-
-  for (const value of values) {
-    if (!value || seen.has(value)) {
-      continue
-    }
-
-    seen.add(value)
-    next.push(value)
-  }
-
-  return next
-}
-
-function sanitizeQuickAddPreferences(
-  preferences: QuickAddPreferences | null | undefined,
-  engagements: Engagement[],
-): QuickAddPreferences {
-  const source = preferences ?? EMPTY_QUICK_ADD_PREFERENCES
-  const activeEngagementIds = new Set(engagements.filter((engagement) => engagement.isActive).map((engagement) => engagement.id))
-  const activeActivityIds = new Set<string>()
-  const activityIdsByEngagement = new Map<string, Set<string>>()
-
-  for (const engagement of engagements) {
-    if (!engagement.isActive) {
-      continue
-    }
-
-    const activeActivities = engagement.activities.filter((activity) => activity.isActive)
-    const activeIds = new Set(activeActivities.map((activity) => activity.id))
-    activityIdsByEngagement.set(engagement.id, activeIds)
-
-    for (const activity of activeActivities) {
-      activeActivityIds.add(activity.id)
-    }
-  }
-
-  const activityOrder: Record<string, string[]> = {}
-  for (const [engagementId, activityIds] of Object.entries(source.activityOrder ?? {})) {
-    const activeIds = activityIdsByEngagement.get(engagementId)
-    if (!activeIds) {
-      continue
-    }
-
-    const orderedActivityIds = uniqueIds(activityIds).filter((activityId) => activeIds.has(activityId))
-    if (orderedActivityIds.length > 0) {
-      activityOrder[engagementId] = orderedActivityIds
-    }
-  }
-
-  return {
-    engagementOrder: uniqueIds(source.engagementOrder).filter((engagementId) =>
-      activeEngagementIds.has(engagementId),
-    ),
-    hiddenEngagementIds: uniqueIds(source.hiddenEngagementIds).filter((engagementId) =>
-      activeEngagementIds.has(engagementId),
-    ),
-    activityOrder,
-    hiddenActivityIds: uniqueIds(source.hiddenActivityIds).filter((activityId) =>
-      activeActivityIds.has(activityId),
-    ),
-  }
-}
-
-function buildQuickAddSettingsDraft(
-  preferences: QuickAddPreferences | null | undefined,
-  engagements: Engagement[],
-): QuickAddPreferences {
-  const sanitized = sanitizeQuickAddPreferences(preferences, engagements)
-  const engagementOrder = sanitized.engagementOrder.slice()
-  const engagementSeen = new Set(engagementOrder)
-  const activityOrder: Record<string, string[]> = { ...sanitized.activityOrder }
-
-  for (const engagement of engagements) {
-    if (!engagement.isActive) {
-      continue
-    }
-
-    if (!engagementSeen.has(engagement.id)) {
-      engagementOrder.push(engagement.id)
-      engagementSeen.add(engagement.id)
-    }
-
-    const orderedActivityIds = activityOrder[engagement.id]?.slice() ?? []
-    const activitySeen = new Set(orderedActivityIds)
-    for (const activity of engagement.activities) {
-      if (!activity.isActive || activitySeen.has(activity.id)) {
-        continue
-      }
-
-      orderedActivityIds.push(activity.id)
-      activitySeen.add(activity.id)
-    }
-
-    activityOrder[engagement.id] = orderedActivityIds
-  }
-
-  return {
-    ...sanitized,
-    engagementOrder,
-    activityOrder,
-  }
-}
 
 function moveId(values: string[], id: string, direction: -1 | 1): string[] {
   const index = values.indexOf(id)
@@ -1115,7 +988,7 @@ function App() {
   const [quickAddSettingsDragState, setQuickAddSettingsDragState] =
     useState<QuickAddSettingsDragState | null>(null)
   const [quickAddSettingsDropCommitKeys, setQuickAddSettingsDropCommitKeys] = useState<string[]>([])
-  const [quickBlockDragState, setQuickBlockDragState] = useState<QuickBlockDragState | null>(null)
+  const [quickBlockDragState, setQuickBlockDragState] = useState<QuickEntryDragState | null>(null)
   const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickAddScrollMetrics>({
     canScroll: false,
     thumbTopPct: 0,
@@ -1173,7 +1046,7 @@ function App() {
   const entryDraftLastSavedKeyRef = useRef<string | null>(null)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
   const timelineMutationInFlightRef = useRef(false)
-  const quickBlockDragStateRef = useRef<QuickBlockDragState | null>(null)
+  const quickBlockDragStateRef = useRef<QuickEntryDragState | null>(null)
   const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
   const quickAddSettingsDraftRef = useRef<QuickAddPreferences | null>(null)
   const quickAddSettingsDragStateRef = useRef<QuickAddSettingsDragState | null>(null)
@@ -1562,252 +1435,36 @@ function App() {
     () => sanitizeQuickAddPreferences(settingsStatus?.quickAddPreferences, engagements),
     [engagements, settingsStatus?.quickAddPreferences],
   )
-  const quickAddSuggestionByKey = useMemo(() => {
-    const values = new Map<string, QuickAddSuggestion>()
-    for (const suggestion of quickAddSuggestionItems) {
-      values.set(quickAddActivityKey(suggestion.engagementId, suggestion.activityId), suggestion)
-    }
-
-    return values
-  }, [quickAddSuggestionItems])
-  const allQuickAddActivities = useMemo<QuickAddActivityView[]>(() => {
-    const values: QuickAddActivityView[] = []
-    for (const engagement of engagements) {
-      if (!engagement.isActive) {
-        continue
-      }
-
-      for (const activity of engagement.activities) {
-        if (!activity.isActive) {
-          continue
-        }
-
-        const suggestion = quickAddSuggestionByKey.get(quickAddActivityKey(engagement.id, activity.id))
-        values.push({
-          engagement,
-          activity,
-          usageCount: suggestion?.usageCount ?? 0,
-          lastUsedAt: suggestion?.lastUsedAt ?? null,
-        })
-      }
-    }
-
-    return values
-  }, [engagements, quickAddSuggestionByKey])
-  const quickAddActivityByKey = useMemo(() => {
-    const values = new Map<string, QuickAddActivityView>()
-    for (const item of allQuickAddActivities) {
-      values.set(quickAddActivityKey(item.engagement.id, item.activity.id), item)
-    }
-
-    return values
-  }, [allQuickAddActivities])
+  const quickEntryModel = useMemo(
+    () => buildQuickEntryModel({
+      engagements,
+      preferences: quickAddPreferences,
+      suggestions: quickAddSuggestionItems,
+      suggestedKeys: quickAddSuggestedKeys,
+      search: quickAddSearch,
+    }),
+    [
+      engagements,
+      quickAddPreferences,
+      quickAddSearch,
+      quickAddSuggestedKeys,
+      quickAddSuggestionItems,
+    ],
+  )
+  const allQuickAddActivities = quickEntryModel.allActivities
+  const orderedQuickAddActivities = quickEntryModel.orderedActivities
+  const quickAddActivityGroups = quickEntryModel.groups
   useEffect(() => {
     setQuickAddSuggestedKeys((previous) => {
       if (previous.length === 0) {
         return previous
       }
 
-      const next = previous.filter((key) => quickAddActivityByKey.has(key))
+      const next = previous.filter((key) => quickEntryModel.activityByKey.has(key))
 
       return next.length === previous.length ? previous : next
     })
-  }, [quickAddActivityByKey])
-  const suggestedQuickAddActivities = useMemo(() => {
-    const values: QuickAddActivityView[] = []
-    const seenKeys = new Set<string>()
-
-    for (const key of quickAddSuggestedKeys) {
-      const item = quickAddActivityByKey.get(key)
-      if (!item || seenKeys.has(key)) {
-        continue
-      }
-
-      values.push(item)
-      seenKeys.add(key)
-    }
-
-    for (const item of allQuickAddActivities) {
-      const key = quickAddActivityKey(item.engagement.id, item.activity.id)
-      if (seenKeys.has(key)) {
-        continue
-      }
-
-      values.push(item)
-      seenKeys.add(key)
-    }
-
-    return values
-  }, [allQuickAddActivities, quickAddActivityByKey, quickAddSuggestedKeys])
-  const orderedQuickAddActivities = useMemo(() => {
-    const hiddenEngagementIds = new Set(quickAddPreferences.hiddenEngagementIds)
-    const hiddenActivityIds = new Set(quickAddPreferences.hiddenActivityIds)
-    const engagementOrderIndex = new Map(
-      quickAddPreferences.engagementOrder.map((engagementId, index) => [engagementId, index]),
-    )
-    const hasCustomEngagementOrder = engagementOrderIndex.size > 0
-    const suggestedActivityIndex = new Map(
-      suggestedQuickAddActivities.map((item, index) => [
-        quickAddActivityKey(item.engagement.id, item.activity.id),
-        index,
-      ]),
-    )
-    const engagementIndex = new Map(engagements.map((engagement, index) => [engagement.id, index]))
-    const activityIndex = new Map<string, number>()
-
-    for (const engagement of engagements) {
-      engagement.activities.forEach((activity, index) => {
-        activityIndex.set(activity.id, index)
-      })
-    }
-
-    const groups = new Map<string, QuickAddActivityGroup>()
-    for (const item of allQuickAddActivities) {
-      if (
-        hiddenEngagementIds.has(item.engagement.id)
-        || hiddenActivityIds.has(item.activity.id)
-      ) {
-        continue
-      }
-
-      const existing = groups.get(item.engagement.id)
-      if (existing) {
-        existing.activities.push(item)
-        continue
-      }
-
-      groups.set(item.engagement.id, {
-        engagement: item.engagement,
-        activities: [item],
-      })
-    }
-
-    const orderedGroups = [...groups.values()].sort((left, right) => {
-      if (hasCustomEngagementOrder) {
-        const leftCustomIndex = engagementOrderIndex.get(left.engagement.id)
-        const rightCustomIndex = engagementOrderIndex.get(right.engagement.id)
-        if (leftCustomIndex !== undefined || rightCustomIndex !== undefined) {
-          return (
-            leftCustomIndex ?? Number.MAX_SAFE_INTEGER
-          ) - (
-            rightCustomIndex ?? Number.MAX_SAFE_INTEGER
-          )
-        }
-      }
-
-      const leftSuggestionIndex = Math.min(
-        ...left.activities.map((item) =>
-          suggestedActivityIndex.get(quickAddActivityKey(item.engagement.id, item.activity.id))
-          ?? Number.MAX_SAFE_INTEGER,
-        ),
-      )
-      const rightSuggestionIndex = Math.min(
-        ...right.activities.map((item) =>
-          suggestedActivityIndex.get(quickAddActivityKey(item.engagement.id, item.activity.id))
-          ?? Number.MAX_SAFE_INTEGER,
-        ),
-      )
-
-      if (leftSuggestionIndex !== rightSuggestionIndex) {
-        return leftSuggestionIndex - rightSuggestionIndex
-      }
-
-      return (
-        engagementIndex.get(left.engagement.id) ?? Number.MAX_SAFE_INTEGER
-      ) - (
-        engagementIndex.get(right.engagement.id) ?? Number.MAX_SAFE_INTEGER
-      )
-    })
-
-    return orderedGroups.flatMap((group) => {
-      const customActivityOrder = quickAddPreferences.activityOrder[group.engagement.id] ?? []
-      const customActivityOrderIndex = new Map(
-        customActivityOrder.map((activityId, index) => [activityId, index]),
-      )
-      const hasCustomActivityOrder = customActivityOrderIndex.size > 0
-
-      return group.activities.slice().sort((left, right) => {
-        if (hasCustomActivityOrder) {
-          const leftCustomIndex = customActivityOrderIndex.get(left.activity.id)
-          const rightCustomIndex = customActivityOrderIndex.get(right.activity.id)
-          if (leftCustomIndex !== undefined || rightCustomIndex !== undefined) {
-            return (
-              leftCustomIndex ?? Number.MAX_SAFE_INTEGER
-            ) - (
-              rightCustomIndex ?? Number.MAX_SAFE_INTEGER
-            )
-          }
-        }
-
-        const leftSuggestionIndex =
-          suggestedActivityIndex.get(quickAddActivityKey(left.engagement.id, left.activity.id))
-          ?? Number.MAX_SAFE_INTEGER
-        const rightSuggestionIndex =
-          suggestedActivityIndex.get(quickAddActivityKey(right.engagement.id, right.activity.id))
-          ?? Number.MAX_SAFE_INTEGER
-
-        if (leftSuggestionIndex !== rightSuggestionIndex) {
-          return leftSuggestionIndex - rightSuggestionIndex
-        }
-
-        return (
-          activityIndex.get(left.activity.id) ?? Number.MAX_SAFE_INTEGER
-        ) - (
-          activityIndex.get(right.activity.id) ?? Number.MAX_SAFE_INTEGER
-        )
-      })
-    })
-  }, [
-    allQuickAddActivities,
-    engagements,
-    quickAddPreferences,
-    suggestedQuickAddActivities,
-  ])
-  const visibleQuickAddActivities = useMemo(() => {
-    const searchTerms = quickAddSearch
-      .trim()
-      .toLocaleLowerCase()
-      .split(/\s+/)
-      .filter(Boolean)
-
-    if (searchTerms.length === 0) {
-      return orderedQuickAddActivities
-    }
-
-    return orderedQuickAddActivities.filter(({ engagement, activity }) => {
-      const haystack = [
-        engagement.code,
-        engagement.name,
-        activity.code,
-        activity.name,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLocaleLowerCase()
-
-      return searchTerms.every((term) => haystack.includes(term))
-    })
-  }, [orderedQuickAddActivities, quickAddSearch])
-  const quickAddActivityGroups = useMemo<QuickAddActivityGroup[]>(() => {
-    const groups: QuickAddActivityGroup[] = []
-    const groupByEngagementId = new Map<string, QuickAddActivityGroup>()
-
-    for (const item of visibleQuickAddActivities) {
-      let group = groupByEngagementId.get(item.engagement.id)
-      if (!group) {
-        group = {
-          engagement: item.engagement,
-          activities: [],
-        }
-        groupByEngagementId.set(item.engagement.id, group)
-        groups.push(group)
-      }
-
-      group.activities.push(item)
-    }
-
-    return groups
-  }, [visibleQuickAddActivities])
+  }, [quickEntryModel.activityByKey])
   const updateQuickAddScrollMetrics = useCallback(() => {
     const node = quickAddScrollRef.current
 
@@ -1843,7 +1500,11 @@ function App() {
     scrollFrame?.style.setProperty('--quick-add-scroll-thumb-height', `${thumbHeightPct}%`)
 
     setQuickAddScrollMetrics((previous) => {
-      if (previous.canScroll === canScroll) {
+      if (
+        previous.canScroll === canScroll
+        && previous.thumbTopPct === thumbTopPct
+        && previous.thumbHeightPct === thumbHeightPct
+      ) {
         return previous
       }
 
@@ -3791,7 +3452,7 @@ function App() {
   )
 
   const setQuickBlockDragStateWithRef = useCallback(
-    (updater: (previous: QuickBlockDragState | null) => QuickBlockDragState | null) => {
+    (updater: (previous: QuickEntryDragState | null) => QuickEntryDragState | null) => {
       setQuickBlockDragState((previous) => {
         const next = updater(previous)
         quickBlockDragStateRef.current = next
@@ -6038,7 +5699,7 @@ function App() {
         return
       }
 
-      const { startMinute, endMinute } = resolveQuickBlockCreateWindow(durationMinutes)
+      const { startMinute, endMinute } = resolveQuickEntryCreateWindow(durationMinutes)
       const date = formatDate(new Date())
       const monthKey = monthKeyFromDate(date)
 
@@ -6104,7 +5765,7 @@ function App() {
       pointerId: event.pointerId,
       originClientX: event.clientX,
       currentClientX: event.clientX,
-      durationMinutes: TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
+      durationMinutes: QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
       isDragging: false,
     }))
   }
@@ -6117,13 +5778,13 @@ function App() {
       return
     }
 
-    const nextDuration = quickBlockDurationFromDrag(
+    const nextDuration = quickEntryDurationFromDrag(
       current.originClientX,
       event.clientX,
     )
     const nextIsDragging =
       current.isDragging
-      || Math.abs(event.clientX - current.originClientX) >= TIMELINE_DRAG_ACTIVATION_PX
+      || Math.abs(event.clientX - current.originClientX) >= QUICK_ENTRY_DRAG_ACTIVATION_PX
 
     setQuickBlockDragStateWithRef(() => ({
       ...current,
@@ -8288,7 +7949,7 @@ function App() {
   const quickAddSettingsDropCommitKeySet = new Set(quickAddSettingsDropCommitKeys)
   const quickAddSettingsPreviewGroups = quickAddSettingsEngagements
     .filter((engagement) => !quickAddSettingsHiddenEngagementIds.has(engagement.id))
-    .map<QuickAddActivityGroup | null>((engagement) => {
+    .map<QuickEntryActivityGroup | null>((engagement) => {
       const activeActivitiesById = new Map(
         engagement.activities
           .filter((activity) => activity.isActive)
@@ -8304,7 +7965,7 @@ function App() {
           return !quickAddSettingsHiddenActivityIds.has(activity.id)
         })
         .map((activity) => {
-          const suggestion = quickAddSuggestionByKey.get(quickAddActivityKey(engagement.id, activity.id))
+          const suggestion = quickEntryModel.activityByKey.get(quickAddActivityKey(engagement.id, activity.id))
           return {
             engagement,
             activity,
@@ -8315,7 +7976,7 @@ function App() {
 
       return activities.length > 0 ? { engagement, activities } : null
     })
-    .filter((group): group is QuickAddActivityGroup => Boolean(group))
+    .filter((group): group is QuickEntryActivityGroup => Boolean(group))
   const quickAddShownActivityCount = quickAddSettingsPreviewGroups.reduce(
     (total, group) => total + group.activities.length,
     0,
@@ -9615,7 +9276,7 @@ function App() {
                                     title={fullActivityLabel}
                                     style={{
                                       '--quick-add-color': activityColor,
-                                      '--quick-add-duration-progress': `${quickBlockDurationProgress(durationMinutes)}%`,
+                                      '--quick-add-duration-progress': `${quickEntryDurationProgress(durationMinutes)}%`,
                                     } as CSSProperties}
                                   >
                                     <span className="quick-add-tile-main">
@@ -13073,17 +12734,6 @@ function formatQuickBlockDuration(minutes: number): string {
   return formatTimelineHoursCompact(minutes)
 }
 
-function quickBlockDurationProgress(minutes: number): number {
-  const minDuration = TIMELINE_MANUAL_CREATE_DURATION_MINUTES
-  const span = QUICK_BLOCK_MAX_DURATION_MINUTES - minDuration
-
-  if (span <= 0) {
-    return 0
-  }
-
-  return ((clampQuickBlockDuration(minutes) - minDuration) / span) * 100
-}
-
 function formatMonthDay(date: string): string {
   const [yearToken, monthToken, dayToken] = date.split('-')
   const year = Number(yearToken)
@@ -13629,23 +13279,6 @@ function snapMinute(value: number, increment: number): number {
   return Math.round(value / increment) * increment
 }
 
-function clampQuickBlockDuration(durationMinutes: number): number {
-  const rounded = snapMinute(durationMinutes, QUICK_BLOCK_DURATION_STEP_MINUTES)
-  return Math.min(
-    QUICK_BLOCK_MAX_DURATION_MINUTES,
-    Math.max(TIMELINE_MANUAL_CREATE_DURATION_MINUTES, rounded),
-  )
-}
-
-function quickBlockDurationFromDrag(originClientX: number, currentClientX: number): number {
-  const dragDistance = Math.max(0, currentClientX - originClientX)
-  const durationSteps = Math.round(dragDistance / QUICK_BLOCK_DRAG_STEP_PX)
-  return clampQuickBlockDuration(
-    TIMELINE_MANUAL_CREATE_DURATION_MINUTES
-    + durationSteps * QUICK_BLOCK_DURATION_STEP_MINUTES,
-  )
-}
-
 function dragStepFromDelta(deltaPixels: number, stepPixels: number): number {
   if (stepPixels <= 0 || deltaPixels === 0) {
     return 0
@@ -13671,27 +13304,6 @@ function timelineDurationFromHorizontalDrag(
     maxDuration,
     Math.max(minDuration, requestedDuration),
   )
-}
-
-function currentRoundedTimelineStartMinute(): number {
-  const now = new Date()
-  const currentMinute = now.getHours() * HOUR_IN_MINUTES + now.getMinutes()
-  return Math.min(
-    MINUTES_IN_DAY,
-    Math.max(
-      0,
-      snapMinute(currentMinute, TIMELINE_DRAG_SNAP_MINUTES),
-    ),
-  )
-}
-
-function resolveQuickBlockCreateWindow(durationMinutes: number): { startMinute: number; endMinute: number } {
-  const safeDuration = clampQuickBlockDuration(durationMinutes)
-  const snappedStartMinute = currentRoundedTimelineStartMinute()
-  const endMinute = Math.min(MINUTES_IN_DAY, snappedStartMinute + safeDuration)
-  const startMinute = Math.max(0, endMinute - safeDuration)
-
-  return { startMinute, endMinute }
 }
 
 function clampTimelineScrollTop(grid: HTMLDivElement, targetTop: number): number {

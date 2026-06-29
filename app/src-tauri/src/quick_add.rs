@@ -12,8 +12,8 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_MENU_SHOW_MAIN_ID: &str = "show-main";
 const TRAY_MENU_SHOW_QUICK_ADD_ID: &str = "show-quick-add";
 const TRAY_MENU_EXIT_ID: &str = "exit-app";
-const QUICK_ADD_WIDTH: f64 = 340.0;
-const QUICK_ADD_HEIGHT: f64 = 228.0;
+const QUICK_ADD_WIDTH: f64 = 420.0;
+const QUICK_ADD_HEIGHT: f64 = 560.0;
 const QUICK_ADD_TRAY_GAP: f64 = 8.0;
 const QUICK_ADD_SCREEN_MARGIN: f64 = 8.0;
 
@@ -154,9 +154,15 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .shadow(true)
     .effects(
         EffectsBuilder::new()
-            .effect(Effect::HudWindow)
+            .effects([
+                Effect::Popover,
+                Effect::Acrylic,
+                Effect::Mica,
+                Effect::Blur,
+            ])
             .state(EffectState::Active)
-            .radius(14.0)
+            .radius(18.0)
+            .color(Color(245, 248, 252, 128))
             .build(),
     )
     .always_on_top(true)
