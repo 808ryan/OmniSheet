@@ -558,7 +558,7 @@ fn build_macos_template_tray_icon(source: Image<'static>) -> Image<'static> {
         let blue = pixel[2];
         let alpha = pixel[3];
         let keep_outer_logo = distance > center_cutout_radius;
-        let keep_clock_hand = is_dark_teal_pixel(red, green, blue, alpha);
+        let keep_clock_hand = is_clock_hand_pixel(red, green, blue, alpha);
         let template_alpha = if keep_outer_logo || keep_clock_hand {
             normalize_template_alpha(alpha)
         } else {
@@ -571,23 +571,38 @@ fn build_macos_template_tray_icon(source: Image<'static>) -> Image<'static> {
     Image::new_owned(rgba, width, height)
 }
 
-#[cfg(target_os = "macos")]
-fn is_dark_teal_pixel(red: u8, green: u8, blue: u8, alpha: u8) -> bool {
-    alpha > 40
-        && red < 120
-        && green > 45
-        && blue > 55
-        && green.saturating_sub(red) > 20
-        && blue.saturating_sub(red) > 20
-        && green < 185
-        && blue < 200
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_clock_hand_pixel(red: u8, green: u8, blue: u8, alpha: u8) -> bool {
+    let max_channel = red.max(green).max(blue);
+    let min_channel = red.min(green).min(blue);
+    let saturation = max_channel.saturating_sub(min_channel);
+    let luminance = (red as u32 * 299 + green as u32 * 587 + blue as u32 * 114) / 1000;
+
+    alpha > 40 && saturation > 32 && luminance < 170
 }
 
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn normalize_template_alpha(alpha: u8) -> u8 {
     if alpha < 64 {
         alpha
     } else {
         255
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_clock_hand_pixel;
+
+    #[test]
+    fn clock_hand_detection_keeps_dark_teal_and_purple_hands() {
+        assert!(is_clock_hand_pixel(8, 91, 106, 255));
+        assert!(is_clock_hand_pixel(91, 50, 145, 255));
+    }
+
+    #[test]
+    fn clock_hand_detection_drops_light_center_disk_pixels() {
+        assert!(!is_clock_hand_pixel(230, 234, 250, 255));
+        assert!(!is_clock_hand_pixel(91, 50, 145, 20));
     }
 }
