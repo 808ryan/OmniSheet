@@ -10931,7 +10931,7 @@ function App() {
                 <div className="settings-preference-row settings-shortcut-row">
                   <div className="settings-shortcut-label">
                     <span className="settings-preference-label">Open Quick Add</span>
-                    <span className="field-helper">Opens or closes the tray Quick Add palette.</span>
+                    <span className="field-helper">Opens or closes the Quick Add pop-up tray</span>
                   </div>
                   <div
                     className="settings-shortcut-value"
