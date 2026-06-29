@@ -982,6 +982,43 @@
   outline-offset: 2px;
 }
 
+.settings-shortcut-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.settings-shortcut-label {
+  min-width: 0;
+  display: grid;
+  gap: 0.22rem;
+}
+
+.settings-shortcut-value {
+  display: inline-flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.32rem;
+  min-width: max-content;
+}
+
+.settings-keycap {
+  min-width: 1.78rem;
+  height: 1.72rem;
+  padding: 0 0.48rem;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(138, 158, 191, 0.44);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--ink);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.86),
+    0 1px 2px rgba(16, 24, 40, 0.08);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .settings-save-button {
   flex: 0 0 auto;
   min-width: 5.5rem;
@@ -6236,6 +6273,10 @@ button.danger:hover:not(:disabled) {
   }
 
   .settings-radio-group {
+    justify-content: flex-start;
+  }
+
+  .settings-shortcut-value {
     justify-content: flex-start;
   }
 
