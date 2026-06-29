@@ -590,6 +590,8 @@ const CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD = 0.75
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
 const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-5.5-instant'
 const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-4o-mini-transcribe'
+const LLM_ENTRY_EXAMPLE_TEXT = 'Spent an hour on Non-Rev ITACs...'
+const MISSING_OPENAI_KEY_HINT = 'No API key is configured in settings'
 const MAX_VOICE_RECORDING_DURATION_MS = 120_000
 const PREFERRED_VOICE_MIME_TYPES = [
   'audio/webm;codecs=opus',
@@ -1704,6 +1706,18 @@ function App() {
 
     return null
   }, [submissionQueue])
+  const hasConfiguredOpenAiKey = settingsStatus?.hasOpenAiKey === true
+  const llmEntrySendButtonTitle = settingsStatus === null
+    ? 'Checking API key status'
+    : hasConfiguredOpenAiKey
+      ? voiceCaptureState === 'recording'
+        ? 'Stop and send entry'
+        : 'Send entry'
+      : MISSING_OPENAI_KEY_HINT
+  const isLlmEntrySendDisabled =
+    voiceCaptureState === 'transcribing'
+    || !hasConfiguredOpenAiKey
+    || (voiceCaptureState !== 'recording' && captureMessage.trim().length === 0)
 
   const recordVoiceDiagnostic = useCallback((
     eventType: string,
@@ -5174,6 +5188,10 @@ function App() {
 
   const onSubmitCapture = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (settingsStatus?.hasOpenAiKey !== true) {
+      return
+    }
+
     if (voiceCaptureState === 'recording') {
       void stopVoiceRecordingAndSubmit()
       return
@@ -9147,7 +9165,7 @@ function App() {
                       }
                     }
                   }}
-                  placeholder="Example: Just finished a 30 minute SAP ITGC meeting with the Apple team"
+                  placeholder={LLM_ENTRY_EXAMPLE_TEXT}
                   rows={4}
                   required={voiceCaptureState !== 'recording'}
                 />
@@ -9184,15 +9202,14 @@ function App() {
                   >
                     <img src={calendarIcon} alt="" aria-hidden="true" />
                   </button>
-                  <button
-                    type="submit"
-                    disabled={
-                      voiceCaptureState === 'transcribing'
-                      || (voiceCaptureState !== 'recording' && captureMessage.trim().length === 0)
-                    }
-                  >
-                    {voiceCaptureState === 'recording' ? 'Stop & Send' : 'Send'}
-                  </button>
+                  <span className="capture-submit-hint" title={llmEntrySendButtonTitle}>
+                    <button
+                      type="submit"
+                      disabled={isLlmEntrySendDisabled}
+                    >
+                      {voiceCaptureState === 'recording' ? 'Stop & Send' : 'Send'}
+                    </button>
+                  </span>
                 </div>
                 {llmSubmissionStatus ? (
                   <p
