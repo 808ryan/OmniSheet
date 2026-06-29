@@ -47,6 +47,8 @@ interface QuickEntryScrollMetrics {
 }
 
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
+const LLM_ENTRY_EXAMPLE_TEXT = 'Spent an hour on Non-Rev ITACs...'
+const MISSING_OPENAI_KEY_HINT = 'No API key is configured in settings'
 
 function QuickAdd() {
   const tauriRuntime = isTauriRuntime()
@@ -122,14 +124,8 @@ function QuickAdd() {
       setQuickAddSuggestionItems(nextSuggestions.suggestions)
       updateSuggestedKeys(nextSuggestions.suggestions)
 
-      if (!nextSettingsStatus.hasOpenAiKey) {
-        setStatus('error')
-        setStatusMessage('Add your OpenAI key in OmniSheet settings to send text entries.')
-        return
-      }
-
       setStatus((previous) => previous === 'submitting' ? previous : 'idle')
-      setStatusMessage((previous) => statusRef.current === 'submitting' ? previous : 'Ready.')
+      setStatusMessage((previous) => statusRef.current === 'submitting' ? previous : '')
     } catch (error) {
       const messageText = extractErrorMessage(error)
       setDataError(messageText)
@@ -298,9 +294,9 @@ function QuickAdd() {
       return
     }
 
-    if (!settingsStatus?.hasOpenAiKey) {
-      setStatus('error')
-      setStatusMessage('Add your OpenAI key in OmniSheet settings to send text entries.')
+    if (settingsStatus?.hasOpenAiKey !== true) {
+      setStatus('idle')
+      setStatusMessage('')
       return
     }
 
@@ -495,6 +491,11 @@ function QuickAdd() {
     status !== 'submitting'
     && settingsStatus?.hasOpenAiKey === true
     && message.trim().length > 0
+  const sendButtonTitle = settingsStatus === null
+    ? 'Checking API key status'
+    : settingsStatus.hasOpenAiKey
+      ? 'Send entry'
+      : MISSING_OPENAI_KEY_HINT
   const emptyMessage = status === 'loading'
     ? 'Loading activities...'
     : quickEntryModel.allActivities.length === 0
@@ -525,9 +526,7 @@ function QuickAdd() {
               aria-hidden="true"
               focusable="false"
             >
-              <path d="M4.75 10.75 12 4.5l7.25 6.25" />
-              <path d="M6.5 9.5v9.25h11V9.5" />
-              <path d="M9.75 18.75v-5h4.5v5" />
+              <path d="M4.25 10.75 12 4.25l7.75 6.5v8.75H4.25z" />
             </svg>
           </button>
         </div>
@@ -543,37 +542,32 @@ function QuickAdd() {
                   return
                 }
 
-                if (settingsStatus?.hasOpenAiKey === false) {
-                  setStatus('error')
-                  setStatusMessage('Add your OpenAI key in OmniSheet settings to send text entries.')
-                  return
-                }
-
                 setStatus('idle')
                 setStatusMessage('')
               }}
-              placeholder="Summarize work for the LLM..."
+              placeholder={LLM_ENTRY_EXAMPLE_TEXT}
               rows={1}
               disabled={status === 'submitting'}
               autoFocus
             />
-            <button
-              type="submit"
-              className="quick-add-send-button"
-              disabled={!canSubmitText}
-              aria-label="Send entry"
-              title="Send entry"
-            >
-              <svg
-                className="quick-add-send-icon"
-                viewBox="0 0 16 16"
-                aria-hidden="true"
-                focusable="false"
+            <span className="quick-add-send-hint" title={sendButtonTitle}>
+              <button
+                type="submit"
+                className="quick-add-send-button"
+                disabled={!canSubmitText}
+                aria-label="Send entry"
               >
-                <path d="M8 13V3.75" />
-                <path d="M4.25 7.5 8 3.75 11.75 7.5" />
-              </svg>
-            </button>
+                <svg
+                  className="quick-add-send-icon"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M8 13V3.75" />
+                  <path d="M4.25 7.5 8 3.75 11.75 7.5" />
+                </svg>
+              </button>
+            </span>
           </label>
         </form>
       </section>

@@ -211,6 +211,15 @@
   align-items: center;
 }
 
+.capture-submit-hint {
+  min-width: 0;
+  display: grid;
+}
+
+.capture-submit-hint > button {
+  width: 100%;
+}
+
 .capture-mic-button,
 .capture-calendar-button {
   width: 2.7rem;

@@ -9,6 +9,7 @@ use tauri::{
 
 const QUICK_ADD_LABEL: &str = "quick-add";
 const MAIN_WINDOW_LABEL: &str = "main";
+const QUICK_ADD_TRAY_ID: &str = "quick-add-tray";
 const TRAY_MENU_SHOW_MAIN_ID: &str = "show-main";
 const TRAY_MENU_SHOW_QUICK_ADD_ID: &str = "show-quick-add";
 const TRAY_MENU_EXIT_ID: &str = "exit-app";
@@ -30,7 +31,7 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
 
     let tray_menu = build_tray_menu(&app_handle)?;
 
-    let tray_icon = TrayIconBuilder::with_id("quick-add-tray")
+    let tray_icon = TrayIconBuilder::with_id(QUICK_ADD_TRAY_ID)
         .icon(build_circle_plus_icon())
         .icon_as_template(true)
         .tooltip("Add timesheet entry")
@@ -209,13 +210,29 @@ fn show_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
     };
 
     if !window.is_visible()? {
-        position_quick_add_window_without_tray_rect(&window)?;
+        if let Some(rect) = quick_add_tray_rect(app) {
+            position_quick_add_window(&window, rect)?;
+        } else {
+            position_quick_add_window_without_tray_rect(&window)?;
+        }
         window.show()?;
     }
 
     window.set_focus()?;
 
     Ok(())
+}
+
+fn quick_add_tray_rect(app: &AppHandle) -> Option<Rect> {
+    let tray_icon = app.tray_by_id(QUICK_ADD_TRAY_ID)?;
+
+    match tray_icon.rect() {
+        Ok(rect) => rect,
+        Err(error) => {
+            log::warn!("failed to read quick add tray icon rect: {error}");
+            None
+        }
+    }
 }
 
 fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::Result<()> {

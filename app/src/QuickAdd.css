@@ -93,27 +93,26 @@ body.quick-add-window {
 }
 
 .quick-add-home-button {
-  width: 1.65rem;
-  height: 1.65rem;
+  width: 2rem;
+  height: 2rem;
   padding: 0;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(77, 95, 128, 0.14);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.34);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   color: var(--quick-add-ink);
   cursor: pointer;
-  box-shadow: var(--quick-add-inset);
+  box-shadow: none;
   transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease,
     transform 120ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .quick-add-home-button:hover:not(:disabled),
 .quick-add-home-button:focus-visible {
-  border-color: rgba(77, 95, 128, 0.24);
-  background: rgba(255, 255, 255, 0.58);
+  color: var(--quick-add-accent);
   transform: translateY(-1px);
 }
 
@@ -129,12 +128,12 @@ body.quick-add-window {
 }
 
 .quick-add-home-icon {
-  width: 0.98rem;
-  height: 0.98rem;
+  width: 1.24rem;
+  height: 1.24rem;
   display: block;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.85;
+  stroke-width: 1.9;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -190,6 +189,13 @@ body.quick-add-window {
 
 .quick-add-entry-bar textarea::placeholder {
   color: rgba(52, 64, 84, 0.48);
+}
+
+.quick-add-send-hint {
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
 }
 
 .quick-add-send-button {
@@ -502,7 +508,6 @@ body.quick-add-window {
   }
 
   .quick-add-entry-bar,
-  .quick-add-home-button,
   .quick-add-tile,
   .quick-add-empty {
     background: var(--quick-add-control);
