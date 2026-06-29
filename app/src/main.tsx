@@ -1,8 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
-import App from './App.tsx'
-import QuickAdd from './QuickAdd.tsx'
 
 const isQuickAddWindow = new URLSearchParams(window.location.search).get('window') === 'quick-add'
 
@@ -11,8 +9,22 @@ if (isQuickAddWindow) {
   document.body.classList.add('quick-add-window')
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    {isQuickAddWindow ? <QuickAdd /> : <App />}
-  </StrictMode>,
-)
+const root = createRoot(document.getElementById('root')!)
+
+if (isQuickAddWindow) {
+  void import('./QuickAdd.tsx').then(({ default: QuickAdd }) => {
+    root.render(
+      <StrictMode>
+        <QuickAdd />
+      </StrictMode>,
+    )
+  })
+} else {
+  void import('./App.tsx').then(({ default: App }) => {
+    root.render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    )
+  })
+}
