@@ -3,8 +3,8 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{Color, Effect, EffectState, EffectsBuilder};
 use tauri::{
-    App, AppHandle, LogicalPosition, Manager, Monitor, Rect, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder, WindowEvent,
+    App, AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, Rect, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -16,7 +16,8 @@ const TRAY_MENU_SHOW_MAIN_ID: &str = "show-main";
 const TRAY_MENU_SHOW_QUICK_ADD_ID: &str = "show-quick-add";
 const TRAY_MENU_EXIT_ID: &str = "exit-app";
 const QUICK_ADD_WIDTH: f64 = 420.0;
-const QUICK_ADD_HEIGHT: f64 = 560.0;
+const QUICK_ADD_MIN_HEIGHT: f64 = 260.0;
+const QUICK_ADD_MAX_HEIGHT: f64 = 612.0;
 const QUICK_ADD_TRAY_GAP: f64 = 8.0;
 const QUICK_ADD_SCREEN_MARGIN: f64 = 8.0;
 
@@ -136,6 +137,11 @@ pub fn quick_add_show_main_window(app: AppHandle) -> Result<(), String> {
     show_main_window(&app).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub fn quick_add_resize_window(app: AppHandle, height: f64) -> Result<(), String> {
+    resize_quick_add_window(&app, height).map_err(|error| error.to_string())
+}
+
 #[cfg(target_os = "macos")]
 pub fn handle_app_reopen(app: &AppHandle, has_visible_windows: bool) {
     if has_visible_windows {
@@ -231,9 +237,9 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         WebviewUrl::App("index.html?window=quick-add".into()),
     )
     .title("Quick Entry")
-    .inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
-    .min_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
-    .max_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
+    .inner_size(QUICK_ADD_WIDTH, QUICK_ADD_MAX_HEIGHT)
+    .min_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_MIN_HEIGHT)
+    .max_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_MAX_HEIGHT)
     .resizable(false)
     .decorations(false)
     .transparent(true)
@@ -253,6 +259,31 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .focused(false);
 
     builder.build()
+}
+
+fn resize_quick_add_window(app: &AppHandle, requested_height: f64) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window(QUICK_ADD_LABEL) else {
+        return Ok(());
+    };
+
+    if !requested_height.is_finite() {
+        return Ok(());
+    }
+
+    let height = requested_height.clamp(QUICK_ADD_MIN_HEIGHT, QUICK_ADD_MAX_HEIGHT);
+    let current_height = quick_add_window_height(&window, window.scale_factor().unwrap_or(1.0));
+
+    if (current_height - height).abs() < 1.0 {
+        return Ok(());
+    }
+
+    window.set_size(LogicalSize::new(QUICK_ADD_WIDTH, height))?;
+
+    if window.is_visible()? {
+        position_quick_add_window_for_current_anchor(app, &window)?;
+    }
+
+    Ok(())
 }
 
 fn toggle_quick_add_window(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()> {
@@ -293,15 +324,7 @@ fn show_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
     };
 
     if !window.is_visible()? {
-        let anchored_to_tray = if let Some(rect) = quick_add_tray_rect(app) {
-            position_quick_add_window(&window, rect)?
-        } else {
-            false
-        };
-
-        if !anchored_to_tray {
-            position_quick_add_window_at_platform_fallback(app, &window)?;
-        }
+        position_quick_add_window_for_current_anchor(app, &window)?;
     }
 
     show_and_focus_quick_add_window(&window)?;
@@ -320,6 +343,23 @@ fn show_and_focus_quick_add_window(window: &WebviewWindow) -> tauri::Result<()> 
     }
 
     window.set_focus()
+}
+
+fn position_quick_add_window_for_current_anchor(
+    app: &AppHandle,
+    window: &WebviewWindow,
+) -> tauri::Result<()> {
+    let anchored_to_tray = if let Some(rect) = quick_add_tray_rect(app) {
+        position_quick_add_window(window, rect)?
+    } else {
+        false
+    };
+
+    if !anchored_to_tray {
+        position_quick_add_window_at_platform_fallback(app, window)?;
+    }
+
+    Ok(())
 }
 
 fn quick_add_tray_rect(app: &AppHandle) -> Option<Rect> {
@@ -404,12 +444,12 @@ fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::
     let max_x =
         work_area_position.x + work_area_size.width - QUICK_ADD_WIDTH - QUICK_ADD_SCREEN_MARGIN;
     let min_y = work_area_position.y + QUICK_ADD_SCREEN_MARGIN;
-    let max_y =
-        work_area_position.y + work_area_size.height - QUICK_ADD_HEIGHT - QUICK_ADD_SCREEN_MARGIN;
+    let height = quick_add_window_height(window, scale_factor);
+    let max_y = work_area_position.y + work_area_size.height - height - QUICK_ADD_SCREEN_MARGIN;
     let preferred_y = if tray_center_y <= work_area_center_y {
         rect_position.y + rect_size.height + QUICK_ADD_TRAY_GAP
     } else {
-        rect_position.y - QUICK_ADD_HEIGHT - QUICK_ADD_TRAY_GAP
+        rect_position.y - height - QUICK_ADD_TRAY_GAP
     };
     let position = LogicalPosition::new(
         clamp_to_window_bounds(preferred_x, min_x, max_x),
@@ -439,8 +479,8 @@ fn position_quick_add_window_at_platform_fallback(
     let max_x =
         work_area_position.x + work_area_size.width - QUICK_ADD_WIDTH - QUICK_ADD_SCREEN_MARGIN;
     let min_y = work_area_position.y + QUICK_ADD_SCREEN_MARGIN;
-    let max_y =
-        work_area_position.y + work_area_size.height - QUICK_ADD_HEIGHT - QUICK_ADD_SCREEN_MARGIN;
+    let height = quick_add_window_height(window, scale_factor);
+    let max_y = work_area_position.y + work_area_size.height - height - QUICK_ADD_SCREEN_MARGIN;
     #[cfg(target_os = "macos")]
     let (preferred_x, preferred_y) = {
         log::info!("positioning quick add at macOS menu-bar center fallback");
@@ -477,6 +517,14 @@ fn quick_add_fallback_monitor(
     }
 
     app.primary_monitor()
+}
+
+fn quick_add_window_height(window: &WebviewWindow, scale_factor: f64) -> f64 {
+    window
+        .inner_size()
+        .map(|size| size.to_logical::<f64>(scale_factor).height)
+        .unwrap_or(QUICK_ADD_MAX_HEIGHT)
+        .clamp(QUICK_ADD_MIN_HEIGHT, QUICK_ADD_MAX_HEIGHT)
 }
 
 fn clamp_to_window_bounds(value: f64, min: f64, max: f64) -> f64 {

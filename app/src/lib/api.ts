@@ -291,6 +291,10 @@ export function quickAddHideWindow(): Promise<void> {
   return invokeCommand<void>('quick_add_hide_window')
 }
 
+export function quickAddResizeWindow(height: number): Promise<void> {
+  return invokeCommand<void>('quick_add_resize_window', { height })
+}
+
 export function quickAddShowMainWindow(): Promise<void> {
   return invokeCommand<void>('quick_add_show_main_window')
 }
