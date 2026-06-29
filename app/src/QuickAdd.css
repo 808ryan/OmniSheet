@@ -353,9 +353,9 @@ body.quick-add-window {
   left: 0;
   top: 0.12rem;
   bottom: 0.12rem;
-  width: 2px;
+  width: 2.5px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--quick-add-color) 52%, rgba(77, 95, 128, 0.26));
+  background: color-mix(in srgb, var(--quick-add-color) 62%, rgba(77, 95, 128, 0.3));
 }
 
 .quick-add-group-header {
@@ -395,7 +395,7 @@ body.quick-add-window {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--quick-add-color) 25%, rgba(255, 255, 255, 0.5));
+  border: 1.25px solid color-mix(in srgb, var(--quick-add-color) 34%, rgba(255, 255, 255, 0.5));
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.42);
   color: var(--quick-add-ink);
@@ -412,7 +412,7 @@ body.quick-add-window {
 
 .quick-add-tile:hover:not(:disabled),
 .quick-add-tile.dragging {
-  border-color: color-mix(in srgb, var(--quick-add-color) 48%, rgba(255, 255, 255, 0.56));
+  border-color: color-mix(in srgb, var(--quick-add-color) 58%, rgba(255, 255, 255, 0.56));
   background: color-mix(in srgb, var(--quick-add-color) 10%, rgba(255, 255, 255, 0.58));
   transform: translateY(-1px);
 }

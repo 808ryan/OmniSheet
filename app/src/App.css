@@ -451,9 +451,9 @@
   left: 0;
   top: 0.1rem;
   bottom: 0.1rem;
-  width: 2px;
+  width: 2.5px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--quick-add-color) 46%, rgba(158, 176, 205, 0.28));
+  background: color-mix(in srgb, var(--quick-add-color) 56%, rgba(158, 176, 205, 0.3));
 }
 
 .quick-add-group-header {
@@ -489,7 +489,7 @@
   height: 2.62rem;
   min-width: 0;
   border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--quick-add-color) 24%, rgba(158, 176, 205, 0.58));
+  border: 1.25px solid color-mix(in srgb, var(--quick-add-color) 34%, rgba(158, 176, 205, 0.58));
   padding: 0 0.55rem;
   display: flex;
   align-items: center;
@@ -508,7 +508,7 @@
 
 .quick-add-tile:hover:not(:disabled),
 .quick-add-tile.dragging {
-  border-color: color-mix(in srgb, var(--quick-add-color) 46%, rgba(158, 176, 205, 0.58));
+  border-color: color-mix(in srgb, var(--quick-add-color) 56%, rgba(158, 176, 205, 0.58));
   background: color-mix(in srgb, var(--quick-add-color) 8%, rgba(255, 255, 255, 0.9));
   box-shadow:
     0 6px 14px rgba(16, 24, 40, 0.06),
