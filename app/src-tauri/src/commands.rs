@@ -197,6 +197,10 @@ fn read_saved_openai_key_configured(connection: &Connection) -> AppResult<bool> 
     Ok(read_saved_openai_key_configured_marker(connection)?.unwrap_or(false))
 }
 
+fn should_read_openai_keyring(open_ai_key_configured_marker: Option<bool>) -> bool {
+    matches!(open_ai_key_configured_marker, Some(true))
+}
+
 fn write_openai_key_configured(connection: &Connection, value: bool) -> AppResult<()> {
     db::upsert_app_setting(
         connection,
@@ -3356,7 +3360,15 @@ fn get_openai_api_key(state: &State<'_, AppState>) -> AppResult<String> {
         read_saved_openai_key_configured_marker(&connection)?
     };
 
-    if matches!(open_ai_key_configured_marker, Some(false)) {
+    if !should_read_openai_keyring(open_ai_key_configured_marker) {
+        if open_ai_key_configured_marker.is_none() {
+            let connection = state
+                .connection
+                .lock()
+                .map_err(|_| AppError::Config(state_lock_error()))?;
+            write_openai_key_configured(&connection, false)?;
+        }
+
         return Err(AppError::Config(
             "OpenAI API key is not configured".to_string(),
         ));
@@ -3824,7 +3836,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
         )
     };
 
-    let should_read_keyring = open_ai_key_configured_marker.unwrap_or(true);
+    let should_read_keyring = should_read_openai_keyring(open_ai_key_configured_marker);
     let key_status = read_key_status(&state, should_read_keyring);
     let open_ai_key_configured = open_ai_key_configured_marker.unwrap_or(
         key_status.has_open_ai_key && matches!(key_status.key_source, KeySource::Keyring),
@@ -9140,12 +9152,13 @@ mod tests {
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
         resolve_summary_export_free_text_value, resolve_time_off_request, round_to_nearest_15,
-        summary_day_notes_header, synthesize_time_off_request_from_text, timeline_week_bounds,
-        timeline_week_view_bounds, validate_calendar_import_entry, validate_manual_create_refs,
-        validate_manual_update_window, validate_timeline_preferences, MinuteInterval,
-        PreparedEntry, ResolvedGapFillActivity, ResolvedGapFillRequest, ResolvedTimeOffRequest,
-        SequencingEntryContext, SummaryExportSheetColumnKind, TemporalCueType, TemporalReference,
-        TimeOffKind, TimelinePreferenceValues, APP_SETTING_OPENAI_KEY_CONFIGURED, MINUTES_IN_DAY,
+        should_read_openai_keyring, summary_day_notes_header,
+        synthesize_time_off_request_from_text, timeline_week_bounds, timeline_week_view_bounds,
+        validate_calendar_import_entry, validate_manual_create_refs, validate_manual_update_window,
+        validate_timeline_preferences, MinuteInterval, PreparedEntry, ResolvedGapFillActivity,
+        ResolvedGapFillRequest, ResolvedTimeOffRequest, SequencingEntryContext,
+        SummaryExportSheetColumnKind, TemporalCueType, TemporalReference, TimeOffKind,
+        TimelinePreferenceValues, APP_SETTING_OPENAI_KEY_CONFIGURED, MINUTES_IN_DAY,
     };
 
     fn test_connection() -> Connection {
@@ -10229,6 +10242,13 @@ mod tests {
 
         assert!(read_saved_openai_key_configured(&connection)
             .expect("saved key setting should resolve"));
+    }
+
+    #[test]
+    fn keyring_reads_require_explicit_openai_key_configured_marker() {
+        assert!(!should_read_openai_keyring(None));
+        assert!(!should_read_openai_keyring(Some(false)));
+        assert!(should_read_openai_keyring(Some(true)));
     }
 
     #[test]
