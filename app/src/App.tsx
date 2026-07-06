@@ -10090,9 +10090,9 @@ function App() {
                                   <span className="codes-state-pill">Inactive</span>
                                 )}
                               </span>
-                              <small>
-                                {engagement.describeWhenToUse?.trim() || 'Usage guidance not added yet.'}
-                              </small>
+                              {engagement.describeWhenToUse?.trim() ? (
+                                <small>{engagement.describeWhenToUse}</small>
+                              ) : null}
                             </span>
                           </button>
                           <div className="codes-rail-actions">

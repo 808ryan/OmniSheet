@@ -22,7 +22,7 @@ pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
 pub const DIAGNOSTICS_RETENTION_DAYS: i64 = 7;
 const MAX_USAGE_DESCRIPTION_LENGTH: usize = 500;
 const STANDARD_TIME_OFF_CODES_SEEDED_SETTING: &str = "standard_time_off_codes_seeded_v2";
-const APPLE_FY26_CODES_SEEDED_SETTING: &str = "apple_fy26_codes_seeded_v1";
+const APPLE_FY26_CODES_SEEDED_SETTING: &str = "apple_fy26_codes_seeded_v2";
 const APPLE_FY26_ACTIVITIES_JSON: &str = include_str!("seed_data/apple_fy26_activities.json");
 
 #[derive(Clone, Copy)]
@@ -790,7 +790,8 @@ fn ensure_apple_fy26_engagement(conn: &Connection) -> AppResult<String> {
     const APPLE_ENGAGEMENT_NAME: &str = "Apple FY26";
     const APPLE_CLIENT: &str = "Apple";
     const APPLE_COLOR_HEX: &str = "#1F7AFF";
-    const APPLE_USAGE: &str = "Use for Apple FY26 engagement work.";
+    const OLD_APPLE_USAGE: &str = "Use for Apple FY26 engagement work.";
+    const APPLE_USAGE: &str = "Used for activities related to the Apple SOX audit.";
 
     let mut existing_id = find_engagement_id_by_code(conn, APPLE_ENGAGEMENT_CODE)?;
     if existing_id.is_none() {
@@ -822,9 +823,15 @@ fn ensure_apple_fy26_engagement(conn: &Connection) -> AppResult<String> {
                       WHEN trim(tags) = '' OR tags = '[]' THEN ?6
                       ELSE tags
                     END,
-                    describe_when_to_use = COALESCE(NULLIF(trim(describe_when_to_use), ''), ?7),
+                    describe_when_to_use = CASE
+                      WHEN describe_when_to_use IS NULL
+                        OR trim(describe_when_to_use) = ''
+                        OR trim(describe_when_to_use) = ?8
+                      THEN ?7
+                      ELSE describe_when_to_use
+                    END,
                     is_active = 1,
-                    updated_at = ?8
+                    updated_at = ?9
                 WHERE id = ?1
                 "#,
                 params![
@@ -835,6 +842,7 @@ fn ensure_apple_fy26_engagement(conn: &Connection) -> AppResult<String> {
                     APPLE_COLOR_HEX,
                     tags_json,
                     APPLE_USAGE,
+                    OLD_APPLE_USAGE,
                     now,
                 ],
             )?;
@@ -853,9 +861,15 @@ fn ensure_apple_fy26_engagement(conn: &Connection) -> AppResult<String> {
                       WHEN trim(tags) = '' OR tags = '[]' THEN ?5
                       ELSE tags
                     END,
-                    describe_when_to_use = COALESCE(NULLIF(trim(describe_when_to_use), ''), ?6),
+                    describe_when_to_use = CASE
+                      WHEN describe_when_to_use IS NULL
+                        OR trim(describe_when_to_use) = ''
+                        OR trim(describe_when_to_use) = ?7
+                      THEN ?6
+                      ELSE describe_when_to_use
+                    END,
                     is_active = 1,
-                    updated_at = ?7
+                    updated_at = ?8
                 WHERE id = ?1
                 "#,
                 params![
@@ -865,6 +879,7 @@ fn ensure_apple_fy26_engagement(conn: &Connection) -> AppResult<String> {
                     APPLE_COLOR_HEX,
                     tags_json,
                     APPLE_USAGE,
+                    OLD_APPLE_USAGE,
                     now,
                 ],
             )?;
@@ -3000,6 +3015,10 @@ mod tests {
 
         assert_eq!(apple.name, "Apple FY26");
         assert_eq!(apple.client.as_deref(), Some("Apple"));
+        assert_eq!(
+            apple.describe_when_to_use.as_deref(),
+            Some("Used for activities related to the Apple SOX audit.")
+        );
         assert_eq!(apple.engagement_type, EngagementType::External);
         assert!(apple.is_active);
         assert_eq!(apple.activities.len(), 225);
@@ -3121,6 +3140,91 @@ mod tests {
         assert_eq!(apple_count, 1);
         assert_eq!(apple_activity_count, 225);
         assert_eq!(updated_activity, ("RSK - ITGC - Non-SAP".to_string(), 1));
+    }
+
+    #[test]
+    fn migrations_upgrade_old_default_apple_usage_guidance() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE engagements (
+                  id TEXT PRIMARY KEY,
+                  code TEXT,
+                  name TEXT NOT NULL,
+                  client TEXT,
+                  engagement_type TEXT NOT NULL DEFAULT 'external',
+                  color_hex TEXT,
+                  tags TEXT NOT NULL,
+                  describe_when_to_use TEXT,
+                  is_active INTEGER NOT NULL DEFAULT 1,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE activities (
+                  id TEXT PRIMARY KEY,
+                  engagement_id TEXT NOT NULL,
+                  code TEXT,
+                  name TEXT NOT NULL,
+                  color_hex TEXT,
+                  tags TEXT NOT NULL,
+                  describe_when_to_use TEXT,
+                  is_active INTEGER NOT NULL DEFAULT 1,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL,
+                  FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE app_settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+                );
+
+                INSERT INTO engagements (
+                  id, code, name, client, engagement_type, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+                )
+                VALUES
+                  (
+                    'existing-apple-default', 'E-69306633', 'Apple FY26', 'Apple', 'external', NULL, '[]',
+                    'Use for Apple FY26 engagement work.', 1, 1, 1
+                  ),
+                  (
+                    'existing-apple-custom', 'E-CUSTOM', 'Custom Apple', 'Apple', 'external', NULL, '[]',
+                    'Keep this custom guidance.', 1, 1, 1
+                  );
+
+                INSERT INTO app_settings (key, value)
+                VALUES ('apple_fy26_codes_seeded_v1', '1');
+                "#,
+            )
+            .expect("existing tables should be created");
+
+        run_migrations(&connection).expect("migrations should run");
+
+        let upgraded_usage: String = connection
+            .query_row(
+                "SELECT describe_when_to_use FROM engagements WHERE id = 'existing-apple-default'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("upgraded Apple usage should load");
+        let custom_usage: String = connection
+            .query_row(
+                "SELECT describe_when_to_use FROM engagements WHERE id = 'existing-apple-custom'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("custom Apple usage should load");
+        let v2_setting = get_app_setting(&connection, "apple_fy26_codes_seeded_v2")
+            .expect("seed setting lookup should work");
+
+        assert_eq!(
+            upgraded_usage,
+            "Used for activities related to the Apple SOX audit."
+        );
+        assert_eq!(custom_usage, "Keep this custom guidance.");
+        assert_eq!(v2_setting.as_deref(), Some("1"));
     }
 
     #[test]
