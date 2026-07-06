@@ -50,6 +50,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             quick_add::quick_add_hide_window,
+            quick_add::quick_add_resize_window,
             quick_add::quick_add_show_main_window,
             commands::settings_get_status,
             commands::settings_set_openai_key,

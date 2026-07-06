@@ -2657,7 +2657,6 @@ function App() {
           loadSummaryLayoutState(),
           loadReportingState(),
           loadTimeline(todayDate),
-          loadDiagnostics('all'),
         ])
         hasInitializedRef.current = true
       } catch (error) {
@@ -2669,7 +2668,6 @@ function App() {
 
     void initialize()
   }, [
-    loadDiagnostics,
     loadEngagements,
     loadQuickAddSuggestions,
     loadReportingState,

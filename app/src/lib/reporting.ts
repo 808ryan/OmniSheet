@@ -7,7 +7,9 @@ import type {
 
 export const REPORTING_STATE_VERSION = 1
 export const REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH = 40
-export const DEFAULT_REPORTING_DISPLAY_PRESET_ID = 'reporting-display-compact-review'
+export const COMPACT_REPORTING_DISPLAY_PRESET_ID = 'reporting-display-compact'
+export const ENGAGEMENT_ACTIVITY_REPORTING_DISPLAY_PRESET_ID = 'reporting-display-engagement-activity'
+export const DEFAULT_REPORTING_DISPLAY_PRESET_ID = COMPACT_REPORTING_DISPLAY_PRESET_ID
 export const DEFAULT_REPORTING_DISPLAY_DAY_GROUP_COLUMN_ID = 'reporting-days'
 export const DEFAULT_REPORTING_DISPLAY_ROW_TOTAL_COLUMN_ID = 'reporting-row-total'
 
@@ -141,15 +143,42 @@ export function buildDefaultReportingDisplayColumns(): ReportingDisplayColumn[] 
 
 export function buildDefaultReportingDisplayPreset(): ReportingDisplayPreset {
   return {
-    id: DEFAULT_REPORTING_DISPLAY_PRESET_ID,
-    name: 'Compact Review',
-    density: 'compact',
+    id: COMPACT_REPORTING_DISPLAY_PRESET_ID,
+    name: 'Compact',
+    density: 'comfortable',
+    rowLabelMode: 'activityOnly',
+    showCodes: false,
+    showClient: false,
+    showEngagementType: false,
+    showEmptyDays: true,
+    columns: buildDefaultReportingDisplayColumns(),
+  }
+}
+
+export function buildEngagementActivityReportingDisplayPreset(): ReportingDisplayPreset {
+  return {
+    id: ENGAGEMENT_ACTIVITY_REPORTING_DISPLAY_PRESET_ID,
+    name: 'Engagement + Activity',
+    density: 'comfortable',
     rowLabelMode: 'combined',
     showCodes: true,
     showClient: false,
     showEngagementType: false,
     showEmptyDays: true,
-    columns: buildDefaultReportingDisplayColumns(),
+    columns: [
+      {
+        kind: 'field',
+        id: 'reporting-field-engagement',
+        fieldKey: 'engagement',
+      },
+      {
+        kind: 'field',
+        id: 'reporting-field-activity',
+        fieldKey: 'activity',
+      },
+      createReportingDisplayDayGroupColumn(),
+      createReportingDisplayRowTotalColumn(),
+    ],
   }
 }
 
@@ -158,8 +187,11 @@ export function buildDefaultReportingState(): ReportingState {
     version: REPORTING_STATE_VERSION,
     selectedViewMode: 'table',
     selectedDisplayPresetId: DEFAULT_REPORTING_DISPLAY_PRESET_ID,
-    selectedExportPresetId: null,
-    displayPresets: [buildDefaultReportingDisplayPreset()],
+    selectedExportPresetId: 'preset-billing',
+    displayPresets: [
+      buildDefaultReportingDisplayPreset(),
+      buildEngagementActivityReportingDisplayPreset(),
+    ],
   }
 }
 

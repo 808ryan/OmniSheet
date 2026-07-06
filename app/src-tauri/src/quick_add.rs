@@ -3,8 +3,8 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{Color, Effect, EffectState, EffectsBuilder};
 use tauri::{
-    App, AppHandle, LogicalPosition, Manager, Monitor, Rect, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder, WindowEvent,
+    App, AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, Rect, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -16,7 +16,8 @@ const TRAY_MENU_SHOW_MAIN_ID: &str = "show-main";
 const TRAY_MENU_SHOW_QUICK_ADD_ID: &str = "show-quick-add";
 const TRAY_MENU_EXIT_ID: &str = "exit-app";
 const QUICK_ADD_WIDTH: f64 = 420.0;
-const QUICK_ADD_HEIGHT: f64 = 560.0;
+const QUICK_ADD_MIN_HEIGHT: f64 = 260.0;
+const QUICK_ADD_MAX_HEIGHT: f64 = 680.0;
 const QUICK_ADD_TRAY_GAP: f64 = 8.0;
 const QUICK_ADD_SCREEN_MARGIN: f64 = 8.0;
 
@@ -33,9 +34,14 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
 
     let tray_menu = build_tray_menu(&app_handle)?;
 
-    let tray_icon = TrayIconBuilder::with_id(QUICK_ADD_TRAY_ID)
-        .icon(build_circle_plus_icon())
-        .icon_as_template(true)
+    let tray_icon_builder =
+        TrayIconBuilder::with_id(QUICK_ADD_TRAY_ID).icon(build_quick_add_tray_icon()?);
+    #[cfg(target_os = "macos")]
+    let tray_icon_builder = tray_icon_builder.icon_as_template(true);
+    #[cfg(not(target_os = "macos"))]
+    let tray_icon_builder = tray_icon_builder.icon_as_template(false);
+
+    let tray_icon = tray_icon_builder
         .tooltip("Add timesheet entry")
         .menu(&tray_menu)
         .show_menu_on_left_click(false)
@@ -136,6 +142,11 @@ pub fn quick_add_show_main_window(app: AppHandle) -> Result<(), String> {
     show_main_window(&app).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub fn quick_add_resize_window(app: AppHandle, height: f64) -> Result<(), String> {
+    resize_quick_add_window(&app, height).map_err(|error| error.to_string())
+}
+
 #[cfg(target_os = "macos")]
 pub fn handle_app_reopen(app: &AppHandle, has_visible_windows: bool) {
     if has_visible_windows {
@@ -186,19 +197,7 @@ fn install_main_window_close_to_tray(app: &AppHandle) {
 }
 
 fn handle_tray_icon_left_click(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()> {
-    if should_restore_main_window_from_tray_click(app)? {
-        return show_main_window(app);
-    }
-
     toggle_quick_add_window(app, tray_rect)
-}
-
-fn should_restore_main_window_from_tray_click(app: &AppHandle) -> tauri::Result<bool> {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        return Ok(false);
-    };
-
-    Ok(!window.is_visible()? || window.is_minimized()?)
 }
 
 fn hide_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
@@ -231,9 +230,9 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         WebviewUrl::App("index.html?window=quick-add".into()),
     )
     .title("Quick Entry")
-    .inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
-    .min_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
-    .max_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_HEIGHT)
+    .inner_size(QUICK_ADD_WIDTH, QUICK_ADD_MAX_HEIGHT)
+    .min_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_MIN_HEIGHT)
+    .max_inner_size(QUICK_ADD_WIDTH, QUICK_ADD_MAX_HEIGHT)
     .resizable(false)
     .decorations(false)
     .transparent(true)
@@ -253,6 +252,31 @@ fn create_quick_add_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .focused(false);
 
     builder.build()
+}
+
+fn resize_quick_add_window(app: &AppHandle, requested_height: f64) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window(QUICK_ADD_LABEL) else {
+        return Ok(());
+    };
+
+    if !requested_height.is_finite() {
+        return Ok(());
+    }
+
+    let height = requested_height.clamp(QUICK_ADD_MIN_HEIGHT, QUICK_ADD_MAX_HEIGHT);
+    let current_height = quick_add_window_height(&window, window.scale_factor().unwrap_or(1.0));
+
+    if (current_height - height).abs() < 1.0 {
+        return Ok(());
+    }
+
+    window.set_size(LogicalSize::new(QUICK_ADD_WIDTH, height))?;
+
+    if window.is_visible()? {
+        position_quick_add_window_for_current_anchor(app, &window)?;
+    }
+
+    Ok(())
 }
 
 fn toggle_quick_add_window(app: &AppHandle, tray_rect: Rect) -> tauri::Result<()> {
@@ -293,15 +317,7 @@ fn show_quick_add_window(app: &AppHandle) -> tauri::Result<()> {
     };
 
     if !window.is_visible()? {
-        let anchored_to_tray = if let Some(rect) = quick_add_tray_rect(app) {
-            position_quick_add_window(&window, rect)?
-        } else {
-            false
-        };
-
-        if !anchored_to_tray {
-            position_quick_add_window_at_platform_fallback(app, &window)?;
-        }
+        position_quick_add_window_for_current_anchor(app, &window)?;
     }
 
     show_and_focus_quick_add_window(&window)?;
@@ -320,6 +336,23 @@ fn show_and_focus_quick_add_window(window: &WebviewWindow) -> tauri::Result<()> 
     }
 
     window.set_focus()
+}
+
+fn position_quick_add_window_for_current_anchor(
+    app: &AppHandle,
+    window: &WebviewWindow,
+) -> tauri::Result<()> {
+    let anchored_to_tray = if let Some(rect) = quick_add_tray_rect(app) {
+        position_quick_add_window(window, rect)?
+    } else {
+        false
+    };
+
+    if !anchored_to_tray {
+        position_quick_add_window_at_platform_fallback(app, window)?;
+    }
+
+    Ok(())
 }
 
 fn quick_add_tray_rect(app: &AppHandle) -> Option<Rect> {
@@ -404,12 +437,12 @@ fn position_quick_add_window(window: &WebviewWindow, tray_rect: Rect) -> tauri::
     let max_x =
         work_area_position.x + work_area_size.width - QUICK_ADD_WIDTH - QUICK_ADD_SCREEN_MARGIN;
     let min_y = work_area_position.y + QUICK_ADD_SCREEN_MARGIN;
-    let max_y =
-        work_area_position.y + work_area_size.height - QUICK_ADD_HEIGHT - QUICK_ADD_SCREEN_MARGIN;
+    let height = quick_add_window_height(window, scale_factor);
+    let max_y = work_area_position.y + work_area_size.height - height - QUICK_ADD_SCREEN_MARGIN;
     let preferred_y = if tray_center_y <= work_area_center_y {
         rect_position.y + rect_size.height + QUICK_ADD_TRAY_GAP
     } else {
-        rect_position.y - QUICK_ADD_HEIGHT - QUICK_ADD_TRAY_GAP
+        rect_position.y - height - QUICK_ADD_TRAY_GAP
     };
     let position = LogicalPosition::new(
         clamp_to_window_bounds(preferred_x, min_x, max_x),
@@ -439,8 +472,8 @@ fn position_quick_add_window_at_platform_fallback(
     let max_x =
         work_area_position.x + work_area_size.width - QUICK_ADD_WIDTH - QUICK_ADD_SCREEN_MARGIN;
     let min_y = work_area_position.y + QUICK_ADD_SCREEN_MARGIN;
-    let max_y =
-        work_area_position.y + work_area_size.height - QUICK_ADD_HEIGHT - QUICK_ADD_SCREEN_MARGIN;
+    let height = quick_add_window_height(window, scale_factor);
+    let max_y = work_area_position.y + work_area_size.height - height - QUICK_ADD_SCREEN_MARGIN;
     #[cfg(target_os = "macos")]
     let (preferred_x, preferred_y) = {
         log::info!("positioning quick add at macOS menu-bar center fallback");
@@ -479,53 +512,97 @@ fn quick_add_fallback_monitor(
     app.primary_monitor()
 }
 
+fn quick_add_window_height(window: &WebviewWindow, scale_factor: f64) -> f64 {
+    window
+        .inner_size()
+        .map(|size| size.to_logical::<f64>(scale_factor).height)
+        .unwrap_or(QUICK_ADD_MAX_HEIGHT)
+        .clamp(QUICK_ADD_MIN_HEIGHT, QUICK_ADD_MAX_HEIGHT)
+}
+
 fn clamp_to_window_bounds(value: f64, min: f64, max: f64) -> f64 {
     value.clamp(min, max.max(min))
 }
 
-fn build_circle_plus_icon() -> Image<'static> {
-    const SIZE: u32 = 64;
-    const CENTER: f32 = 31.5;
-    const RADIUS: f32 = 24.0;
-    const CIRCLE_STROKE: f32 = 6.5;
-    const PLUS_HALF_LENGTH: f32 = 14.0;
-    const PLUS_STROKE: f32 = 7.0;
+fn build_quick_add_tray_icon() -> tauri::Result<Image<'static>> {
+    #[cfg(target_os = "macos")]
+    {
+        let source = Image::from_bytes(include_bytes!("../icons/icon.png"))?.to_owned();
 
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as f32 - CENTER;
-            let dy = y as f32 - CENTER;
-            let distance = (dx * dx + dy * dy).sqrt();
-            let circle_alpha = antialias(CIRCLE_STROKE / 2.0 - (distance - RADIUS).abs());
-            let horizontal_alpha = antialias(rect_signed_distance(
-                dx,
-                dy,
-                PLUS_HALF_LENGTH,
-                PLUS_STROKE / 2.0,
-            ));
-            let vertical_alpha = antialias(rect_signed_distance(
-                dx,
-                dy,
-                PLUS_STROKE / 2.0,
-                PLUS_HALF_LENGTH,
-            ));
-            let alpha = circle_alpha.max(horizontal_alpha).max(vertical_alpha);
-
-            rgba.extend_from_slice(&[0, 0, 0, (alpha * 255.0).round() as u8]);
-        }
+        Ok(build_macos_template_tray_icon(source))
     }
 
-    Image::new_owned(rgba, SIZE, SIZE)
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(Image::from_bytes(include_bytes!("../icons/32x32.png"))?.to_owned())
+    }
 }
 
-fn antialias(signed_distance: f32) -> f32 {
-    const EDGE_WIDTH: f32 = 1.25;
+#[cfg(target_os = "macos")]
+fn build_macos_template_tray_icon(source: Image<'static>) -> Image<'static> {
+    let width = source.width();
+    let height = source.height();
+    let center_x = (width as f32 - 1.0) / 2.0;
+    let center_y = (height as f32 - 1.0) / 2.0;
+    let center_cutout_radius = width.min(height) as f32 * 0.245;
+    let mut rgba = Vec::with_capacity(source.rgba().len());
 
-    ((signed_distance + EDGE_WIDTH) / (EDGE_WIDTH * 2.0)).clamp(0.0, 1.0)
+    for (index, pixel) in source.rgba().chunks_exact(4).enumerate() {
+        let x = (index as u32 % width) as f32;
+        let y = (index as u32 / width) as f32;
+        let dx = x - center_x;
+        let dy = y - center_y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let red = pixel[0];
+        let green = pixel[1];
+        let blue = pixel[2];
+        let alpha = pixel[3];
+        let keep_outer_logo = distance > center_cutout_radius;
+        let keep_clock_hand = is_clock_hand_pixel(red, green, blue, alpha);
+        let template_alpha = if keep_outer_logo || keep_clock_hand {
+            normalize_template_alpha(alpha)
+        } else {
+            0
+        };
+
+        rgba.extend_from_slice(&[0, 0, 0, template_alpha]);
+    }
+
+    Image::new_owned(rgba, width, height)
 }
 
-fn rect_signed_distance(dx: f32, dy: f32, half_width: f32, half_height: f32) -> f32 {
-    (half_width - dx.abs()).min(half_height - dy.abs())
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_clock_hand_pixel(red: u8, green: u8, blue: u8, alpha: u8) -> bool {
+    let max_channel = red.max(green).max(blue);
+    let min_channel = red.min(green).min(blue);
+    let saturation = max_channel.saturating_sub(min_channel);
+    let luminance = (red as u32 * 299 + green as u32 * 587 + blue as u32 * 114) / 1000;
+
+    alpha > 40 && saturation > 32 && luminance < 170
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn normalize_template_alpha(alpha: u8) -> u8 {
+    if alpha < 64 {
+        alpha
+    } else {
+        255
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_clock_hand_pixel;
+
+    #[test]
+    fn clock_hand_detection_keeps_dark_teal_and_purple_hands() {
+        assert!(is_clock_hand_pixel(8, 91, 106, 255));
+        assert!(is_clock_hand_pixel(91, 50, 145, 255));
+    }
+
+    #[test]
+    fn clock_hand_detection_drops_light_center_disk_pixels() {
+        assert!(!is_clock_hand_pixel(230, 234, 250, 255));
+        assert!(!is_clock_hand_pixel(91, 50, 145, 20));
+    }
 }

@@ -10,6 +10,7 @@ import {
   engagementList,
   interpretTextMessage,
   quickAddHideWindow,
+  quickAddResizeWindow,
   quickAddShowMainWindow,
   quickAddSuggestions,
   settingsGetStatus,
@@ -49,6 +50,8 @@ interface QuickEntryScrollMetrics {
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
 const LLM_ENTRY_EXAMPLE_TEXT = 'Spent an hour on Non-Rev ITACs...'
 const MISSING_OPENAI_KEY_HINT = 'No API key is configured in settings'
+const QUICK_ADD_MIN_WINDOW_HEIGHT = 260
+const QUICK_ADD_MAX_WINDOW_HEIGHT = 680
 
 function QuickAdd() {
   const tauriRuntime = isTauriRuntime()
@@ -72,7 +75,13 @@ function QuickAdd() {
   })
 
   const quickBlockDragStateRef = useRef<QuickEntryDragState | null>(null)
+  const quickAddPaletteRef = useRef<HTMLElement | null>(null)
+  const quickAddLlmPanelRef = useRef<HTMLElement | null>(null)
+  const quickAddStatusRef = useRef<HTMLParagraphElement | null>(null)
+  const quickAddTilesPanelRef = useRef<HTMLElement | null>(null)
+  const quickAddTilesHeaderRef = useRef<HTMLDivElement | null>(null)
   const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
+  const lastQuickAddWindowHeightRef = useRef<number | null>(null)
   const statusRef = useRef(status)
 
   useEffect(() => {
@@ -194,6 +203,7 @@ function QuickAdd() {
       quickAddSuggestionItems,
     ],
   )
+  const shouldShowStatus = status !== 'idle' && statusMessage.trim().length > 0
 
   const updateQuickAddScrollMetrics = useCallback(() => {
     const node = quickAddScrollRef.current
@@ -239,6 +249,75 @@ function QuickAdd() {
       }
     })
   }, [])
+
+  const resizeQuickAddWindowToContent = useCallback(() => {
+    if (!tauriRuntime) {
+      return
+    }
+
+    const palette = quickAddPaletteRef.current
+    const llmPanel = quickAddLlmPanelRef.current
+    const tilesPanel = quickAddTilesPanelRef.current
+    const tilesHeader = quickAddTilesHeaderRef.current
+
+    if (!palette || !llmPanel || !tilesPanel || !tilesHeader) {
+      return
+    }
+
+    const paletteStyles = window.getComputedStyle(palette)
+    const tilesPanelStyles = window.getComputedStyle(tilesPanel)
+    const tileList = quickAddScrollRef.current?.querySelector<HTMLElement>('.quick-add-list')
+    const tileFallback = tilesPanel.querySelector<HTMLElement>('.quick-add-empty, .quick-add-error')
+    const tileBodyHeight = tileList?.getBoundingClientRect().height
+      ?? tileFallback?.getBoundingClientRect().height
+      ?? 0
+    const topLevelRows = shouldShowStatus ? 3 : 2
+    const topLevelGap = parseCssPixels(paletteStyles.rowGap || paletteStyles.gap)
+    const tilesPanelGap = parseCssPixels(tilesPanelStyles.rowGap || tilesPanelStyles.gap)
+    const tilesPanelHeight =
+      parseCssPixels(tilesPanelStyles.borderTopWidth) +
+      parseCssPixels(tilesPanelStyles.paddingTop) +
+      parseCssPixels(tilesPanelStyles.paddingBottom) +
+      tilesHeader.getBoundingClientRect().height +
+      tilesPanelGap +
+      tileBodyHeight
+    const targetHeight = Math.ceil(clampNumber(
+      parseCssPixels(paletteStyles.paddingTop) +
+        parseCssPixels(paletteStyles.paddingBottom) +
+        llmPanel.getBoundingClientRect().height +
+        (quickAddStatusRef.current?.getBoundingClientRect().height ?? 0) +
+        tilesPanelHeight +
+        topLevelGap * Math.max(topLevelRows - 1, 0),
+      QUICK_ADD_MIN_WINDOW_HEIGHT,
+      QUICK_ADD_MAX_WINDOW_HEIGHT,
+    ))
+
+    if (lastQuickAddWindowHeightRef.current !== null
+      && Math.abs(lastQuickAddWindowHeightRef.current - targetHeight) < 1
+    ) {
+      return
+    }
+
+    lastQuickAddWindowHeightRef.current = targetHeight
+    void quickAddResizeWindow(targetHeight)
+      .then(() => {
+        window.requestAnimationFrame(updateQuickAddScrollMetrics)
+      })
+      .catch((error) => {
+        console.warn('Failed to resize Quick Add window', error)
+      })
+  }, [shouldShowStatus, tauriRuntime, updateQuickAddScrollMetrics])
+
+  useLayoutEffect(() => {
+    const frame = window.requestAnimationFrame(resizeQuickAddWindowToContent)
+    return () => window.cancelAnimationFrame(frame)
+  }, [
+    dataError,
+    quickEntryModel.groups,
+    resizeQuickAddWindowToContent,
+    status,
+    statusMessage,
+  ])
 
   useLayoutEffect(() => {
     const node = quickAddScrollRef.current
@@ -503,13 +582,20 @@ function QuickAdd() {
       : quickEntryModel.orderedActivities.length === 0
         ? 'All Quick Entry items are hidden.'
         : 'No activities to show.'
-  const shouldShowStatus = status !== 'idle' && statusMessage.trim().length > 0
 
   return (
-    <main className="quick-add-shell quick-add-palette" aria-busy={status === 'loading' || status === 'submitting'}>
+    <main
+      ref={quickAddPaletteRef}
+      className="quick-add-shell quick-add-palette"
+      aria-busy={status === 'loading' || status === 'submitting'}
+    >
       <h1 className="sr-only">Quick Add</h1>
 
-      <section className="quick-add-llm-panel" aria-labelledby="quick-add-llm-title">
+      <section
+        ref={quickAddLlmPanelRef}
+        className="quick-add-llm-panel"
+        aria-labelledby="quick-add-llm-title"
+      >
         <div className="quick-add-llm-header">
           <h2 id="quick-add-llm-title" className="quick-add-section-title">LLM Entry</h2>
           <button
@@ -573,13 +659,13 @@ function QuickAdd() {
       </section>
 
       {shouldShowStatus ? (
-        <p className={`quick-add-status ${status}`}>
+        <p ref={quickAddStatusRef} className={`quick-add-status ${status}`}>
           {statusMessage}
         </p>
       ) : null}
 
-      <section className="quick-add-tiles-panel" aria-label="Quick Entry">
-        <div className="quick-add-tiles-header">
+      <section ref={quickAddTilesPanelRef} className="quick-add-tiles-panel" aria-label="Quick Entry">
+        <div ref={quickAddTilesHeaderRef} className="quick-add-tiles-header">
           <h2 className="quick-add-section-title">Quick Entry</h2>
         </div>
         <QuickEntryTileList
@@ -600,6 +686,15 @@ function QuickAdd() {
       </section>
     </main>
   )
+}
+
+function parseCssPixels(value: string): number {
+  const parsed = Number.parseFloat(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
 }
 
 function formatLocalTime(value: Date): string {
