@@ -25,17 +25,17 @@ use crate::models::{
     LlmAlternativeActivity, LlmEntry, LlmGapFillActivity, LlmGapFillRequest, LlmTimeOffRequest,
     MicrophonePermissionResult, MicrophonePermissionStatus, NormalizedEntry, OpenAiModelId,
     QuickAddPreferences, QuickAddSuggestionInput, QuickAddSuggestionResult, ReportingDisplayColumn,
-    ReportingDisplayDensity, ReportingDisplayPreset, ReportingRowLabelMode, ReportingState,
-    ReportingViewMode, SettingsSetCalendarBulkModelInput, SettingsSetCalendarBulkPreferencesInput,
-    SettingsSetInterfacePreferencesInput, SettingsSetOpenAiModelInput,
-    SettingsSetQuickAddPreferencesInput, SettingsSetTimelinePreferencesInput,
-    SettingsSetTranscriptionModelInput, SettingsStatus, StatusLevel, StorageHealth,
-    SummaryExportResult, SummaryExportWeeklyExcelInput, SummaryLayoutColumn, SummaryLayoutFieldKey,
-    SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput, TimelineDaySummary,
-    TimelineEntry, TimelineMonthSummaryInput, TimelineTotalBreakdown, TimelineUpdateInput,
-    TimelineUpdateMode, TimelineWeekStartDay, TimelineWeekView, TimelineWeekViewDay,
-    TimelineWeeklySummary, TimelineWeeklySummaryNote, TranscribeAudioInput, TranscribeAudioResult,
-    TranscriptionModelId, Warning, WarningType,
+    ReportingDisplayDensity, ReportingDisplayFieldKey, ReportingDisplayPreset,
+    ReportingRowLabelMode, ReportingState, ReportingViewMode, SettingsSetCalendarBulkModelInput,
+    SettingsSetCalendarBulkPreferencesInput, SettingsSetInterfacePreferencesInput,
+    SettingsSetOpenAiModelInput, SettingsSetQuickAddPreferencesInput,
+    SettingsSetTimelinePreferencesInput, SettingsSetTranscriptionModelInput, SettingsStatus,
+    StatusLevel, StorageHealth, SummaryExportResult, SummaryExportWeeklyExcelInput,
+    SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState,
+    TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
+    TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekStartDay,
+    TimelineWeekView, TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote,
+    TranscribeAudioInput, TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -75,11 +75,16 @@ const APP_SETTING_SUMMARY_LAYOUT_STATE: &str = "summary_layout_state";
 const APP_SETTING_REPORTING_STATE: &str = "reporting_state";
 const SUMMARY_LAYOUT_STATE_VERSION: i64 = 3;
 const SUMMARY_LAYOUT_MAX_NAME_LENGTH: usize = 40;
-const DEFAULT_SUMMARY_LAYOUT_PRESET_ID: &str = "preset-standard";
+const STANDARD_SUMMARY_LAYOUT_PRESET_ID: &str = "preset-standard";
+const BILLING_SUMMARY_LAYOUT_PRESET_ID: &str = "preset-billing";
+const DEFAULT_SUMMARY_LAYOUT_PRESET_ID: &str = BILLING_SUMMARY_LAYOUT_PRESET_ID;
 const DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID: &str = "row-total";
 const REPORTING_STATE_VERSION: i64 = 1;
 const REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH: usize = 40;
-const DEFAULT_REPORTING_DISPLAY_PRESET_ID: &str = "reporting-display-compact-review";
+const COMPACT_REPORTING_DISPLAY_PRESET_ID: &str = "reporting-display-compact";
+const ENGAGEMENT_ACTIVITY_REPORTING_DISPLAY_PRESET_ID: &str =
+    "reporting-display-engagement-activity";
+const DEFAULT_REPORTING_DISPLAY_PRESET_ID: &str = COMPACT_REPORTING_DISPLAY_PRESET_ID;
 fn state_lock_error() -> String {
     "application state lock poisoned".to_string()
 }
@@ -448,7 +453,7 @@ fn read_saved_show_diagnostics_tab(connection: &Connection) -> AppResult<bool> {
     ))
 }
 
-fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
+fn standard_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
     vec![
         SummaryLayoutColumn::Field {
             id: "field-engagement-code".to_string(),
@@ -461,14 +466,6 @@ fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
         SummaryLayoutColumn::Field {
             id: "field-activity-name".to_string(),
             field_key: SummaryLayoutFieldKey::ActivityName,
-        },
-        SummaryLayoutColumn::Field {
-            id: "field-engagement-name".to_string(),
-            field_key: SummaryLayoutFieldKey::EngagementName,
-        },
-        SummaryLayoutColumn::Field {
-            id: "field-client-name".to_string(),
-            field_key: SummaryLayoutFieldKey::ClientName,
         },
         SummaryLayoutColumn::Day {
             id: "day-0".to_string(),
@@ -502,15 +499,88 @@ fn default_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
     ]
 }
 
+fn billing_summary_layout_columns() -> Vec<SummaryLayoutColumn> {
+    vec![
+        SummaryLayoutColumn::Field {
+            id: "billing-field-engagement-code".to_string(),
+            field_key: SummaryLayoutFieldKey::EngagementCode,
+        },
+        SummaryLayoutColumn::Field {
+            id: "billing-field-activity-code".to_string(),
+            field_key: SummaryLayoutFieldKey::ActivityCode,
+        },
+        SummaryLayoutColumn::Field {
+            id: "billing-field-engagement-name".to_string(),
+            field_key: SummaryLayoutFieldKey::EngagementName,
+        },
+        SummaryLayoutColumn::Field {
+            id: "billing-field-client-name".to_string(),
+            field_key: SummaryLayoutFieldKey::ClientName,
+        },
+        SummaryLayoutColumn::FreeText {
+            id: "billing-free-text-role".to_string(),
+            label: "Role".to_string(),
+            row_values: HashMap::new(),
+            repeat: false,
+            repeat_value: String::new(),
+            repeat_row_key: None,
+        },
+        SummaryLayoutColumn::FreeText {
+            id: "billing-free-text-work-location".to_string(),
+            label: "Work Location".to_string(),
+            row_values: HashMap::new(),
+            repeat: true,
+            repeat_value: "".to_string(),
+            repeat_row_key: None,
+        },
+        default_summary_layout_row_total_column(),
+        SummaryLayoutColumn::Day {
+            id: "billing-day-0".to_string(),
+            day_index: 0,
+        },
+        SummaryLayoutColumn::Day {
+            id: "billing-day-1".to_string(),
+            day_index: 1,
+        },
+        SummaryLayoutColumn::Day {
+            id: "billing-day-2".to_string(),
+            day_index: 2,
+        },
+        SummaryLayoutColumn::Day {
+            id: "billing-day-3".to_string(),
+            day_index: 3,
+        },
+        SummaryLayoutColumn::Day {
+            id: "billing-day-4".to_string(),
+            day_index: 4,
+        },
+        SummaryLayoutColumn::Day {
+            id: "billing-day-5".to_string(),
+            day_index: 5,
+        },
+        SummaryLayoutColumn::Day {
+            id: "billing-day-6".to_string(),
+            day_index: 6,
+        },
+    ]
+}
+
 fn default_summary_layout_state() -> SummaryLayoutState {
     SummaryLayoutState {
         version: SUMMARY_LAYOUT_STATE_VERSION,
         selected_preset_id: DEFAULT_SUMMARY_LAYOUT_PRESET_ID.to_string(),
-        presets: vec![SummaryLayoutPreset {
-            id: DEFAULT_SUMMARY_LAYOUT_PRESET_ID.to_string(),
-            name: "Standard".to_string(),
-            columns: default_summary_layout_columns(),
-        }],
+        presets: vec![
+            SummaryLayoutPreset {
+                id: STANDARD_SUMMARY_LAYOUT_PRESET_ID.to_string(),
+                name: "Standard".to_string(),
+                columns: standard_summary_layout_columns(),
+            },
+            SummaryLayoutPreset {
+                id: BILLING_SUMMARY_LAYOUT_PRESET_ID.to_string(),
+                name: "Billing".to_string(),
+                columns: billing_summary_layout_columns(),
+            },
+        ],
     }
 }
 
@@ -726,15 +796,44 @@ fn read_summary_layout_state(connection: &Connection) -> AppResult<SummaryLayout
 
 fn default_reporting_display_preset() -> ReportingDisplayPreset {
     ReportingDisplayPreset {
-        id: DEFAULT_REPORTING_DISPLAY_PRESET_ID.to_string(),
-        name: "Compact Review".to_string(),
-        density: ReportingDisplayDensity::Compact,
+        id: COMPACT_REPORTING_DISPLAY_PRESET_ID.to_string(),
+        name: "Compact".to_string(),
+        density: ReportingDisplayDensity::Comfortable,
+        row_label_mode: ReportingRowLabelMode::ActivityOnly,
+        show_codes: false,
+        show_client: false,
+        show_engagement_type: false,
+        show_empty_days: true,
+        columns: default_reporting_display_columns(),
+    }
+}
+
+fn engagement_activity_reporting_display_preset() -> ReportingDisplayPreset {
+    ReportingDisplayPreset {
+        id: ENGAGEMENT_ACTIVITY_REPORTING_DISPLAY_PRESET_ID.to_string(),
+        name: "Engagement + Activity".to_string(),
+        density: ReportingDisplayDensity::Comfortable,
         row_label_mode: ReportingRowLabelMode::Combined,
         show_codes: true,
         show_client: false,
         show_engagement_type: false,
         show_empty_days: true,
-        columns: default_reporting_display_columns(),
+        columns: vec![
+            ReportingDisplayColumn::Field {
+                id: "reporting-field-engagement".to_string(),
+                field_key: ReportingDisplayFieldKey::Engagement,
+            },
+            ReportingDisplayColumn::Field {
+                id: "reporting-field-activity".to_string(),
+                field_key: ReportingDisplayFieldKey::Activity,
+            },
+            ReportingDisplayColumn::DayGroup {
+                id: "reporting-days".to_string(),
+            },
+            ReportingDisplayColumn::RowTotal {
+                id: "reporting-row-total".to_string(),
+            },
+        ],
     }
 }
 
@@ -743,8 +842,11 @@ fn default_reporting_state() -> ReportingState {
         version: REPORTING_STATE_VERSION,
         selected_view_mode: ReportingViewMode::Table,
         selected_display_preset_id: DEFAULT_REPORTING_DISPLAY_PRESET_ID.to_string(),
-        selected_export_preset_id: None,
-        display_presets: vec![default_reporting_display_preset()],
+        selected_export_preset_id: Some(DEFAULT_SUMMARY_LAYOUT_PRESET_ID.to_string()),
+        display_presets: vec![
+            default_reporting_display_preset(),
+            engagement_activity_reporting_display_preset(),
+        ],
     }
 }
 
@@ -9123,11 +9225,12 @@ mod tests {
         CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, Engagement,
         EngagementType, EngagementUpsertInput, InterpretTextInput, KeySource, LlmEntry,
         LlmGapFillActivity, LlmGapFillRequest, LlmTimeOffRequest, NormalizedEntry, OpenAiModelId,
-        StatusLevel, SummaryLayoutColumn, SummaryLayoutFieldKey, SummaryLayoutPreset,
-        SummaryLayoutState, TimelineCreateInput, TimelineEntry, TimelineTotalBreakdown,
-        TimelineWeekStartDay, TimelineWeeklySummary, TimelineWeeklySummaryCell,
-        TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
-        TranscriptionModelId, WarningType,
+        ReportingDisplayColumn, ReportingDisplayDensity, ReportingDisplayFieldKey,
+        ReportingRowLabelMode, ReportingViewMode, StatusLevel, SummaryLayoutColumn,
+        SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput,
+        TimelineEntry, TimelineTotalBreakdown, TimelineWeekStartDay, TimelineWeeklySummary,
+        TimelineWeeklySummaryCell, TimelineWeeklySummaryDay, TimelineWeeklySummaryNote,
+        TimelineWeeklySummaryRow, TranscriptionModelId, WarningType,
     };
     use crate::openai::LlmAttemptTelemetry;
 
@@ -9138,15 +9241,16 @@ mod tests {
         build_summary_export_hours_and_notes_sheet_columns,
         build_summary_export_hours_sheet_columns, capture_source_label,
         compute_gap_fill_free_intervals, create_manual_timeline_entry, dedupe_prepared_entries,
-        default_summary_layout_state, derive_key_status_level, distribute_gap_fill_minutes,
-        llm_attempt_event_status, message_has_contextual_day_or_date_cue,
-        message_has_explicit_clock_time_cue, message_has_implicit_recent_duration_cue,
-        message_has_relative_duration_cue, normalize_calendar_bulk_ignored_keywords,
-        normalize_confidence, normalize_llm_entry, normalize_snapped_update_window,
-        normalize_summary_layout_preset_for_export, normalize_summary_layout_state,
-        prepare_gap_fill_entries, prepare_time_off_entries, read_saved_calendar_bulk_preferences,
-        read_saved_openai_key_configured, read_saved_openai_key_configured_marker,
-        read_saved_show_diagnostics_tab, read_saved_timeline_preferences, reconcile_context_refs,
+        default_reporting_state, default_summary_layout_state, derive_key_status_level,
+        distribute_gap_fill_minutes, llm_attempt_event_status,
+        message_has_contextual_day_or_date_cue, message_has_explicit_clock_time_cue,
+        message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
+        normalize_calendar_bulk_ignored_keywords, normalize_confidence, normalize_llm_entry,
+        normalize_snapped_update_window, normalize_summary_layout_preset_for_export,
+        normalize_summary_layout_state, prepare_gap_fill_entries, prepare_time_off_entries,
+        read_saved_calendar_bulk_preferences, read_saved_openai_key_configured,
+        read_saved_openai_key_configured_marker, read_saved_show_diagnostics_tab,
+        read_saved_timeline_preferences, reconcile_context_refs,
         resolve_calendar_candidate_ignored_state, resolve_calendar_event_date,
         resolve_calendar_event_time, resolve_gap_fill_request, resolve_requested_openai_model,
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
@@ -10318,16 +10422,105 @@ mod tests {
     }
 
     #[test]
-    fn default_summary_layout_state_seeds_standard_preset() {
+    fn default_summary_layout_state_seeds_standard_and_billing_presets() {
         let state = default_summary_layout_state();
         assert_eq!(state.version, 3);
-        assert_eq!(state.presets.len(), 1);
-        assert_eq!(state.presets[0].name, "Standard");
-        assert_eq!(state.selected_preset_id, state.presets[0].id);
-        assert_eq!(state.presets[0].columns.len(), 13);
+        assert_eq!(state.presets.len(), 2);
+        assert_eq!(state.selected_preset_id, "preset-billing");
+
+        let standard = state
+            .presets
+            .iter()
+            .find(|preset| preset.name == "Standard")
+            .expect("Standard export preset should be seeded");
+        assert_eq!(standard.columns.len(), 11);
         assert!(matches!(
-            state.presets[0].columns.last(),
+            standard.columns.last(),
             Some(SummaryLayoutColumn::RowTotal { .. })
+        ));
+
+        let billing = state
+            .presets
+            .iter()
+            .find(|preset| preset.name == "Billing")
+            .expect("Billing export preset should be seeded");
+        assert_eq!(billing.id, "preset-billing");
+        assert_eq!(billing.columns.len(), 14);
+        assert!(matches!(
+            billing.columns[6],
+            SummaryLayoutColumn::RowTotal { .. }
+        ));
+        match &billing.columns[5] {
+            SummaryLayoutColumn::FreeText {
+                label,
+                repeat,
+                repeat_value,
+                ..
+            } => {
+                assert_eq!(label, "Work Location");
+                assert!(*repeat);
+                assert_eq!(repeat_value, "");
+            }
+            column => panic!("expected Work Location free-text column, got {column:?}"),
+        }
+    }
+
+    #[test]
+    fn default_reporting_state_seeds_display_and_export_presets() {
+        let state = default_reporting_state();
+        assert_eq!(state.version, 1);
+        assert_eq!(state.selected_view_mode, ReportingViewMode::Table);
+        assert_eq!(
+            state.selected_display_preset_id,
+            "reporting-display-compact"
+        );
+        assert_eq!(
+            state.selected_export_preset_id.as_deref(),
+            Some("preset-billing")
+        );
+        assert_eq!(state.display_presets.len(), 2);
+
+        let compact = state
+            .display_presets
+            .iter()
+            .find(|preset| preset.name == "Compact")
+            .expect("Compact reporting preset should be seeded");
+        assert_eq!(compact.density, ReportingDisplayDensity::Comfortable);
+        assert_eq!(compact.row_label_mode, ReportingRowLabelMode::ActivityOnly);
+        assert!(!compact.show_codes);
+        assert_eq!(compact.columns.len(), 3);
+        assert!(matches!(
+            compact.columns.first(),
+            Some(ReportingDisplayColumn::Field {
+                field_key: ReportingDisplayFieldKey::Details,
+                ..
+            })
+        ));
+
+        let engagement_activity = state
+            .display_presets
+            .iter()
+            .find(|preset| preset.name == "Engagement + Activity")
+            .expect("Engagement + Activity reporting preset should be seeded");
+        assert_eq!(
+            engagement_activity.row_label_mode,
+            ReportingRowLabelMode::Combined
+        );
+        assert!(engagement_activity.show_codes);
+        assert_eq!(engagement_activity.columns.len(), 4);
+        assert!(matches!(
+            engagement_activity.columns[0],
+            ReportingDisplayColumn::Field {
+                field_key: ReportingDisplayFieldKey::Engagement,
+                ..
+            }
+        ));
+        assert!(matches!(
+            engagement_activity.columns[1],
+            ReportingDisplayColumn::Field {
+                field_key: ReportingDisplayFieldKey::Activity,
+                ..
+            }
         ));
     }
 

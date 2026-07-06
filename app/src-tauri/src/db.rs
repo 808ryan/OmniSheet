@@ -20,16 +20,19 @@ use crate::models::{
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
 pub const DIAGNOSTICS_RETENTION_DAYS: i64 = 7;
 const MAX_USAGE_DESCRIPTION_LENGTH: usize = 500;
-const STANDARD_TIME_OFF_CODES_SEEDED_SETTING: &str = "standard_time_off_codes_seeded_v1";
+const STANDARD_TIME_OFF_CODES_SEEDED_SETTING: &str = "standard_time_off_codes_seeded_v2";
 
 #[derive(Clone, Copy)]
 struct StandardTimeOffDefinition {
     engagement_id: &'static str,
     activity_id: &'static str,
-    code: &'static str,
+    engagement_code: &'static str,
+    activity_code: &'static str,
     name: &'static str,
-    color_hex: &'static str,
-    tags: &'static [&'static str],
+    engagement_color_hex: &'static str,
+    activity_color_hex: Option<&'static str>,
+    engagement_tags: &'static [&'static str],
+    activity_tags: &'static [&'static str],
     describe_when_to_use: &'static str,
 }
 
@@ -37,19 +40,25 @@ const STANDARD_TIME_OFF_DEFINITIONS: [StandardTimeOffDefinition; 2] = [
     StandardTimeOffDefinition {
         engagement_id: "standard-vacation-engagement",
         activity_id: "standard-vacation-activity",
-        code: "VACATION",
+        engagement_code: "VACATION",
+        activity_code: "VACATION",
         name: "Vacation",
-        color_hex: "#2F80ED",
-        tags: &["ooo", "out of office", "pto", "vacation", "time off"],
+        engagement_color_hex: "#BABABA",
+        activity_color_hex: None,
+        engagement_tags: &["ooo", "out of office", "pto", "vacation", "time off"],
+        activity_tags: &["ooo", "out of office", "pto", "vacation", "time off"],
         describe_when_to_use: "Use for vacation, PTO, OOO, out of office, and personal time off days.",
     },
     StandardTimeOffDefinition {
         engagement_id: "standard-public-holiday-engagement",
         activity_id: "standard-public-holiday-activity",
-        code: "HOLIDAY",
+        engagement_code: "HOLIDAY",
+        activity_code: "HOLIDAY",
         name: "Public Holiday",
-        color_hex: "#34A853",
-        tags: &["holiday", "public holiday", "observed holiday"],
+        engagement_color_hex: "#BABABA",
+        activity_color_hex: None,
+        engagement_tags: &[],
+        activity_tags: &["holiday", "public holiday", "observed holiday"],
         describe_when_to_use: "Use for public holidays, observed holidays, and OOO time specifically taken for a holiday.",
     },
 ];
@@ -523,29 +532,36 @@ fn ensure_standard_time_off_engagement(
             SELECT id
             FROM engagements
             WHERE upper(trim(COALESCE(code, ''))) = ?1
+               OR upper(trim(COALESCE(code, ''))) = ?3
                OR lower(trim(name)) = ?2
             ORDER BY
-              CASE WHEN upper(trim(COALESCE(code, ''))) = ?1 THEN 0 ELSE 1 END,
+              CASE
+                WHEN upper(trim(COALESCE(code, ''))) = ?1 THEN 0
+                WHEN upper(trim(COALESCE(code, ''))) = ?3 THEN 1
+                ELSE 2
+              END,
               created_at ASC
             LIMIT 1
             "#,
-            params![definition.code, name_key],
+            params![
+                definition.engagement_code,
+                name_key,
+                definition.activity_code
+            ],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
 
     if let Some(id) = existing_id {
         let now = current_unix_timestamp();
-        let tags_json = serde_json::to_string(&definition.tags)?;
-        let can_set_code = !engagement_code_exists_elsewhere(conn, definition.code, &id)?;
+        let tags_json = serde_json::to_string(&definition.engagement_tags)?;
+        let can_set_code =
+            !engagement_code_exists_elsewhere(conn, definition.engagement_code, &id)?;
         if can_set_code {
             conn.execute(
                 r#"
                 UPDATE engagements
-                SET code = CASE
-                      WHEN code IS NULL OR trim(code) = '' THEN ?2
-                      ELSE code
-                    END,
+                SET code = ?2,
                     engagement_type = 'internal',
                     color_hex = COALESCE(color_hex, ?3),
                     tags = CASE
@@ -559,8 +575,8 @@ fn ensure_standard_time_off_engagement(
                 "#,
                 params![
                     id,
-                    definition.code,
-                    definition.color_hex,
+                    definition.engagement_code,
+                    definition.engagement_color_hex,
                     tags_json,
                     definition.describe_when_to_use,
                     now,
@@ -583,7 +599,7 @@ fn ensure_standard_time_off_engagement(
                 "#,
                 params![
                     id,
-                    definition.color_hex,
+                    definition.engagement_color_hex,
                     tags_json,
                     definition.describe_when_to_use,
                     now,
@@ -595,7 +611,7 @@ fn ensure_standard_time_off_engagement(
     }
 
     let now = current_unix_timestamp();
-    let tags_json = serde_json::to_string(&definition.tags)?;
+    let tags_json = serde_json::to_string(&definition.engagement_tags)?;
     conn.execute(
         r#"
         INSERT INTO engagements (
@@ -605,9 +621,9 @@ fn ensure_standard_time_off_engagement(
         "#,
         params![
             definition.engagement_id,
-            definition.code,
+            definition.engagement_code,
             definition.name,
-            definition.color_hex,
+            definition.engagement_color_hex,
             tags_json,
             definition.describe_when_to_use,
             now,
@@ -638,24 +654,21 @@ fn ensure_standard_time_off_activity(
               created_at ASC
             LIMIT 1
             "#,
-            params![engagement_id, definition.code, name_key],
+            params![engagement_id, definition.activity_code, name_key],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
 
     if let Some(id) = existing_id {
         let now = current_unix_timestamp();
-        let tags_json = serde_json::to_string(&definition.tags)?;
+        let tags_json = serde_json::to_string(&definition.activity_tags)?;
         let can_set_code =
-            !activity_code_exists_elsewhere(conn, engagement_id, definition.code, &id)?;
+            !activity_code_exists_elsewhere(conn, engagement_id, definition.activity_code, &id)?;
         if can_set_code {
             conn.execute(
                 r#"
                 UPDATE activities
-                SET code = CASE
-                      WHEN code IS NULL OR trim(code) = '' THEN ?3
-                      ELSE code
-                    END,
+                SET code = ?3,
                     color_hex = COALESCE(color_hex, ?4),
                     tags = CASE
                       WHEN trim(tags) = '' OR tags = '[]' THEN ?5
@@ -670,8 +683,8 @@ fn ensure_standard_time_off_activity(
                 params![
                     id,
                     engagement_id,
-                    definition.code,
-                    definition.color_hex,
+                    definition.activity_code,
+                    definition.activity_color_hex,
                     tags_json,
                     definition.describe_when_to_use,
                     now,
@@ -695,7 +708,7 @@ fn ensure_standard_time_off_activity(
                 params![
                     id,
                     engagement_id,
-                    definition.color_hex,
+                    definition.activity_color_hex,
                     tags_json,
                     definition.describe_when_to_use,
                     now,
@@ -707,7 +720,7 @@ fn ensure_standard_time_off_activity(
     }
 
     let now = current_unix_timestamp();
-    let tags_json = serde_json::to_string(&definition.tags)?;
+    let tags_json = serde_json::to_string(&definition.activity_tags)?;
     conn.execute(
         r#"
         INSERT INTO activities (
@@ -718,9 +731,9 @@ fn ensure_standard_time_off_activity(
         params![
             definition.activity_id,
             engagement_id,
-            definition.code,
+            definition.activity_code,
             definition.name,
-            definition.color_hex,
+            definition.activity_color_hex,
             tags_json,
             definition.describe_when_to_use,
             now,
@@ -728,6 +741,51 @@ fn ensure_standard_time_off_activity(
     )?;
 
     Ok(definition.activity_id.to_string())
+}
+
+fn seed_activity_id(prefix: &str, code: &str) -> String {
+    let normalized_code = code
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect::<String>();
+    format!("{prefix}-{normalized_code}")
+}
+
+fn find_engagement_id_by_code(conn: &Connection, code: &str) -> AppResult<Option<String>> {
+    let id = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM engagements
+            WHERE upper(trim(COALESCE(code, ''))) = ?1
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+            params![code.trim().to_ascii_uppercase()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(id)
+}
+
+fn find_engagement_id_by_name(conn: &Connection, name: &str) -> AppResult<Option<String>> {
+    let id = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM engagements
+            WHERE lower(trim(name)) = ?1
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+            params![name.trim().to_ascii_lowercase()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(id)
 }
 
 fn engagement_code_exists_elsewhere(
@@ -2676,11 +2734,18 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("vacation count should load");
-        let existing_status: (String, i64) = connection
+        let legacy_vacation_count: i64 = connection
             .query_row(
-                "SELECT engagement_type, is_active FROM engagements WHERE id = 'existing-vacation'",
+                "SELECT COUNT(*) FROM engagements WHERE upper(trim(code)) = 'VACATION'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
+            )
+            .expect("legacy vacation count should load");
+        let existing_status: (String, String, i64) = connection
+            .query_row(
+                "SELECT code, engagement_type, is_active FROM engagements WHERE id = 'existing-vacation'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("existing engagement should load");
         let existing_activity_active: i64 = connection
@@ -2692,7 +2757,11 @@ mod tests {
             .expect("existing activity should load");
 
         assert_eq!(vacation_count, 1);
-        assert_eq!(existing_status, ("internal".to_string(), 1));
+        assert_eq!(legacy_vacation_count, 0);
+        assert_eq!(
+            existing_status,
+            ("VACATION".to_string(), "internal".to_string(), 1)
+        );
         assert_eq!(existing_activity_active, 1);
     }
 
@@ -2958,7 +3027,7 @@ mod tests {
         .expect("manual entry should save");
 
         let suggestions =
-            list_quick_add_suggestions(&connection, 5).expect("suggestions should load");
+            list_quick_add_suggestions(&connection, 500).expect("suggestions should load");
 
         assert!(suggestions.len() >= 3);
         assert_eq!(suggestions[0].activity_id, used_activity_id);

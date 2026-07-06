@@ -15,7 +15,9 @@ export interface SummaryLayoutFieldOption {
 
 export const SUMMARY_LAYOUT_STATE_VERSION = 3
 export const SUMMARY_LAYOUT_MAX_NAME_LENGTH = 40
-export const DEFAULT_SUMMARY_LAYOUT_PRESET_ID = 'preset-standard'
+export const STANDARD_SUMMARY_LAYOUT_PRESET_ID = 'preset-standard'
+export const BILLING_SUMMARY_LAYOUT_PRESET_ID = 'preset-billing'
+export const DEFAULT_SUMMARY_LAYOUT_PRESET_ID = BILLING_SUMMARY_LAYOUT_PRESET_ID
 export const DEFAULT_SUMMARY_LAYOUT_ROW_TOTAL_COLUMN_ID = 'row-total'
 
 export const SUMMARY_LAYOUT_FIELD_OPTIONS: SummaryLayoutFieldOption[] = [
@@ -90,14 +92,12 @@ export function buildDefaultSummaryLayoutState(): SummaryLayoutState {
     selectedPresetId: DEFAULT_SUMMARY_LAYOUT_PRESET_ID,
     presets: [
       {
-        id: DEFAULT_SUMMARY_LAYOUT_PRESET_ID,
+        id: STANDARD_SUMMARY_LAYOUT_PRESET_ID,
         name: 'Standard',
         columns: [
           { kind: 'field', id: 'field-engagement-code', fieldKey: 'engagementCode' },
           { kind: 'field', id: 'field-activity-code', fieldKey: 'activityCode' },
           { kind: 'field', id: 'field-activity-name', fieldKey: 'activityName' },
-          { kind: 'field', id: 'field-engagement-name', fieldKey: 'engagementName' },
-          { kind: 'field', id: 'field-client-name', fieldKey: 'clientName' },
           { kind: 'day', id: 'day-0', dayIndex: 0 },
           { kind: 'day', id: 'day-1', dayIndex: 1 },
           { kind: 'day', id: 'day-2', dayIndex: 2 },
@@ -106,6 +106,42 @@ export function buildDefaultSummaryLayoutState(): SummaryLayoutState {
           { kind: 'day', id: 'day-5', dayIndex: 5 },
           { kind: 'day', id: 'day-6', dayIndex: 6 },
           createSummaryLayoutRowTotalColumn(),
+        ],
+      },
+      {
+        id: BILLING_SUMMARY_LAYOUT_PRESET_ID,
+        name: 'Billing',
+        columns: [
+          { kind: 'field', id: 'billing-field-engagement-code', fieldKey: 'engagementCode' },
+          { kind: 'field', id: 'billing-field-activity-code', fieldKey: 'activityCode' },
+          { kind: 'field', id: 'billing-field-engagement-name', fieldKey: 'engagementName' },
+          { kind: 'field', id: 'billing-field-client-name', fieldKey: 'clientName' },
+          {
+            kind: 'freeText',
+            id: 'billing-free-text-role',
+            label: 'Role',
+            rowValues: {},
+            repeat: false,
+            repeatValue: '',
+            repeatRowKey: null,
+          },
+          {
+            kind: 'freeText',
+            id: 'billing-free-text-work-location',
+            label: 'Work Location',
+            rowValues: {},
+            repeat: true,
+            repeatValue: '',
+            repeatRowKey: null,
+          },
+          createSummaryLayoutRowTotalColumn(),
+          { kind: 'day', id: 'billing-day-0', dayIndex: 0 },
+          { kind: 'day', id: 'billing-day-1', dayIndex: 1 },
+          { kind: 'day', id: 'billing-day-2', dayIndex: 2 },
+          { kind: 'day', id: 'billing-day-3', dayIndex: 3 },
+          { kind: 'day', id: 'billing-day-4', dayIndex: 4 },
+          { kind: 'day', id: 'billing-day-5', dayIndex: 5 },
+          { kind: 'day', id: 'billing-day-6', dayIndex: 6 },
         ],
       },
     ],
