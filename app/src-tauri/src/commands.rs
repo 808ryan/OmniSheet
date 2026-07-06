@@ -1944,7 +1944,18 @@ enum TimeOffKind {
 }
 
 impl TimeOffKind {
-    fn code(self) -> &'static str {
+    fn engagement_code(self) -> &'static str {
+        match self {
+            Self::Vacation => "A-US010015",
+            Self::PublicHoliday => "A-US010002",
+        }
+    }
+
+    fn activity_code(self) -> &'static str {
+        "0000"
+    }
+
+    fn legacy_code(self) -> &'static str {
         match self {
             Self::Vacation => "VACATION",
             Self::PublicHoliday => "HOLIDAY",
@@ -2700,13 +2711,22 @@ fn resolve_time_off_code_refs(
     kind: TimeOffKind,
     code_context: &CodeContext,
 ) -> Option<(String, String)> {
-    let code = kind.code();
     let name = kind.name();
     let engagement = code_context.engagements.iter().find(|engagement| {
-        text_matches_code_or_name(engagement.code.as_deref(), &engagement.name, code, name)
+        text_matches_any_code_or_name(
+            engagement.code.as_deref(),
+            &engagement.name,
+            &[kind.engagement_code(), kind.legacy_code()],
+            name,
+        )
     })?;
     let activity = engagement.activities.iter().find(|activity| {
-        text_matches_code_or_name(activity.code.as_deref(), &activity.name, code, name)
+        text_matches_any_code_or_name(
+            activity.code.as_deref(),
+            &activity.name,
+            &[kind.activity_code(), kind.legacy_code()],
+            name,
+        )
     })?;
 
     Some((
@@ -2715,14 +2735,18 @@ fn resolve_time_off_code_refs(
     ))
 }
 
-fn text_matches_code_or_name(
+fn text_matches_any_code_or_name(
     candidate_code: Option<&str>,
     candidate_name: &str,
-    expected_code: &str,
+    expected_codes: &[&str],
     expected_name: &str,
 ) -> bool {
-    candidate_code.is_some_and(|code| code.trim().eq_ignore_ascii_case(expected_code))
-        || candidate_name.trim().eq_ignore_ascii_case(expected_name)
+    candidate_code.is_some_and(|code| {
+        let normalized_code = code.trim();
+        expected_codes
+            .iter()
+            .any(|expected_code| normalized_code.eq_ignore_ascii_case(expected_code))
+    }) || candidate_name.trim().eq_ignore_ascii_case(expected_name)
 }
 
 fn is_business_day(date: NaiveDate) -> bool {
@@ -9425,14 +9449,14 @@ mod tests {
                 ContextEngagement {
                     id: "vacation-engagement".to_string(),
                     engagement_ref: "eng-001".to_string(),
-                    code: Some("VACATION".to_string()),
+                    code: Some("A-US010015".to_string()),
                     name: "Vacation".to_string(),
                     tags: vec!["ooo".to_string(), "vacation".to_string()],
                     describe_when_to_use: Some("Use for vacation and OOO.".to_string()),
                     activities: vec![ContextActivity {
                         id: "vacation-activity".to_string(),
                         activity_ref: "act-001-001".to_string(),
-                        code: Some("VACATION".to_string()),
+                        code: Some("0000".to_string()),
                         name: "Vacation".to_string(),
                         tags: vec!["ooo".to_string()],
                         describe_when_to_use: Some("Use for vacation and OOO.".to_string()),
@@ -9441,14 +9465,14 @@ mod tests {
                 ContextEngagement {
                     id: "holiday-engagement".to_string(),
                     engagement_ref: "eng-002".to_string(),
-                    code: Some("HOLIDAY".to_string()),
+                    code: Some("A-US010002".to_string()),
                     name: "Public Holiday".to_string(),
                     tags: vec!["holiday".to_string()],
                     describe_when_to_use: Some("Use for public holidays.".to_string()),
                     activities: vec![ContextActivity {
                         id: "holiday-activity".to_string(),
                         activity_ref: "act-002-001".to_string(),
-                        code: Some("HOLIDAY".to_string()),
+                        code: Some("0000".to_string()),
                         name: "Public Holiday".to_string(),
                         tags: vec!["holiday".to_string()],
                         describe_when_to_use: Some("Use for public holidays.".to_string()),

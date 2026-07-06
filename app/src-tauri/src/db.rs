@@ -30,7 +30,9 @@ struct StandardTimeOffDefinition {
     engagement_id: &'static str,
     activity_id: &'static str,
     engagement_code: &'static str,
+    legacy_engagement_code: &'static str,
     activity_code: &'static str,
+    legacy_activity_code: &'static str,
     name: &'static str,
     engagement_color_hex: &'static str,
     activity_color_hex: Option<&'static str>,
@@ -50,7 +52,9 @@ const STANDARD_TIME_OFF_DEFINITIONS: [StandardTimeOffDefinition; 2] = [
         engagement_id: "standard-vacation-engagement",
         activity_id: "standard-vacation-activity",
         engagement_code: "A-US010015",
-        activity_code: "VACATION",
+        legacy_engagement_code: "VACATION",
+        activity_code: "0000",
+        legacy_activity_code: "VACATION",
         name: "Vacation",
         engagement_color_hex: "#BABABA",
         activity_color_hex: None,
@@ -62,7 +66,9 @@ const STANDARD_TIME_OFF_DEFINITIONS: [StandardTimeOffDefinition; 2] = [
         engagement_id: "standard-public-holiday-engagement",
         activity_id: "standard-public-holiday-activity",
         engagement_code: "A-US010002",
-        activity_code: "HOLIDAY",
+        legacy_engagement_code: "HOLIDAY",
+        activity_code: "0000",
+        legacy_activity_code: "HOLIDAY",
         name: "Public Holiday",
         engagement_color_hex: "#BABABA",
         activity_color_hex: None,
@@ -556,7 +562,7 @@ fn ensure_standard_time_off_engagement(
             params![
                 definition.engagement_code,
                 name_key,
-                definition.activity_code
+                definition.legacy_engagement_code
             ],
             |row| row.get::<_, String>(0),
         )
@@ -657,14 +663,24 @@ fn ensure_standard_time_off_activity(
             WHERE engagement_id = ?1
               AND (
                 upper(trim(COALESCE(code, ''))) = ?2
+                OR upper(trim(COALESCE(code, ''))) = ?4
                 OR lower(trim(name)) = ?3
               )
             ORDER BY
-              CASE WHEN upper(trim(COALESCE(code, ''))) = ?2 THEN 0 ELSE 1 END,
+              CASE
+                WHEN upper(trim(COALESCE(code, ''))) = ?2 THEN 0
+                WHEN upper(trim(COALESCE(code, ''))) = ?4 THEN 1
+                ELSE 2
+              END,
               created_at ASC
             LIMIT 1
             "#,
-            params![engagement_id, definition.activity_code, name_key],
+            params![
+                engagement_id,
+                definition.activity_code,
+                name_key,
+                definition.legacy_activity_code
+            ],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
@@ -2830,7 +2846,7 @@ mod tests {
         assert_eq!(vacation.engagement_type, EngagementType::Internal);
         assert!(vacation.is_active);
         assert!(vacation.activities.iter().any(|activity| {
-            activity.code.as_deref() == Some("VACATION")
+            activity.code.as_deref() == Some("0000")
                 && activity.name == "Vacation"
                 && activity.is_active
         }));
@@ -2839,7 +2855,7 @@ mod tests {
         assert_eq!(holiday.engagement_type, EngagementType::Internal);
         assert!(holiday.is_active);
         assert!(holiday.activities.iter().any(|activity| {
-            activity.code.as_deref() == Some("HOLIDAY")
+            activity.code.as_deref() == Some("0000")
                 && activity.name == "Public Holiday"
                 && activity.is_active
         }));
@@ -2860,7 +2876,13 @@ mod tests {
             .expect("engagement count should load");
         let activity_count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM activities WHERE code IN ('VACATION', 'HOLIDAY')",
+                r#"
+                SELECT COUNT(*)
+                FROM activities a
+                INNER JOIN engagements e ON e.id = a.engagement_id
+                WHERE e.code IN ('A-US010015', 'A-US010002')
+                  AND a.code = '0000'
+                "#,
                 [],
                 |row| row.get(0),
             )
@@ -2949,11 +2971,11 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("existing engagement should load");
-        let existing_activity_active: i64 = connection
+        let existing_activity: (String, i64) = connection
             .query_row(
-                "SELECT is_active FROM activities WHERE id = 'existing-vacation-activity'",
+                "SELECT code, is_active FROM activities WHERE id = 'existing-vacation-activity'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("existing activity should load");
 
@@ -2963,7 +2985,7 @@ mod tests {
             existing_status,
             ("A-US010015".to_string(), "internal".to_string(), 1)
         );
-        assert_eq!(existing_activity_active, 1);
+        assert_eq!(existing_activity, ("0000".to_string(), 1));
     }
 
     #[test]
