@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension, Params};
+use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
@@ -20,36 +21,53 @@ use crate::models::{
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
 pub const DIAGNOSTICS_RETENTION_DAYS: i64 = 7;
 const MAX_USAGE_DESCRIPTION_LENGTH: usize = 500;
-const STANDARD_TIME_OFF_CODES_SEEDED_SETTING: &str = "standard_time_off_codes_seeded_v1";
+const STANDARD_TIME_OFF_CODES_SEEDED_SETTING: &str = "standard_time_off_codes_seeded_v2";
+const APPLE_FY26_CODES_SEEDED_SETTING: &str = "apple_fy26_codes_seeded_v1";
+const APPLE_FY26_ACTIVITIES_JSON: &str = include_str!("seed_data/apple_fy26_activities.json");
 
 #[derive(Clone, Copy)]
 struct StandardTimeOffDefinition {
     engagement_id: &'static str,
     activity_id: &'static str,
-    code: &'static str,
+    engagement_code: &'static str,
+    activity_code: &'static str,
     name: &'static str,
-    color_hex: &'static str,
-    tags: &'static [&'static str],
+    engagement_color_hex: &'static str,
+    activity_color_hex: Option<&'static str>,
+    engagement_tags: &'static [&'static str],
+    activity_tags: &'static [&'static str],
     describe_when_to_use: &'static str,
+}
+
+#[derive(Deserialize)]
+struct SeedActivityDefinition {
+    code: String,
+    name: String,
 }
 
 const STANDARD_TIME_OFF_DEFINITIONS: [StandardTimeOffDefinition; 2] = [
     StandardTimeOffDefinition {
         engagement_id: "standard-vacation-engagement",
         activity_id: "standard-vacation-activity",
-        code: "VACATION",
+        engagement_code: "A-US010015",
+        activity_code: "VACATION",
         name: "Vacation",
-        color_hex: "#2F80ED",
-        tags: &["ooo", "out of office", "pto", "vacation", "time off"],
+        engagement_color_hex: "#BABABA",
+        activity_color_hex: None,
+        engagement_tags: &["ooo", "out of office", "pto", "vacation", "time off"],
+        activity_tags: &["ooo", "out of office", "pto", "vacation", "time off"],
         describe_when_to_use: "Use for vacation, PTO, OOO, out of office, and personal time off days.",
     },
     StandardTimeOffDefinition {
         engagement_id: "standard-public-holiday-engagement",
         activity_id: "standard-public-holiday-activity",
-        code: "HOLIDAY",
+        engagement_code: "A-US010002",
+        activity_code: "HOLIDAY",
         name: "Public Holiday",
-        color_hex: "#34A853",
-        tags: &["holiday", "public holiday", "observed holiday"],
+        engagement_color_hex: "#BABABA",
+        activity_color_hex: None,
+        engagement_tags: &[],
+        activity_tags: &["holiday", "public holiday", "observed holiday"],
         describe_when_to_use: "Use for public holidays, observed holidays, and OOO time specifically taken for a holiday.",
     },
 ];
@@ -211,6 +229,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
     migrate_optional_user_code_schema(conn)?;
     ensure_optional_code_indexes(conn)?;
     ensure_standard_time_off_codes(conn)?;
+    ensure_apple_fy26_codes(conn)?;
 
     Ok(())
 }
@@ -523,29 +542,36 @@ fn ensure_standard_time_off_engagement(
             SELECT id
             FROM engagements
             WHERE upper(trim(COALESCE(code, ''))) = ?1
+               OR upper(trim(COALESCE(code, ''))) = ?3
                OR lower(trim(name)) = ?2
             ORDER BY
-              CASE WHEN upper(trim(COALESCE(code, ''))) = ?1 THEN 0 ELSE 1 END,
+              CASE
+                WHEN upper(trim(COALESCE(code, ''))) = ?1 THEN 0
+                WHEN upper(trim(COALESCE(code, ''))) = ?3 THEN 1
+                ELSE 2
+              END,
               created_at ASC
             LIMIT 1
             "#,
-            params![definition.code, name_key],
+            params![
+                definition.engagement_code,
+                name_key,
+                definition.activity_code
+            ],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
 
     if let Some(id) = existing_id {
         let now = current_unix_timestamp();
-        let tags_json = serde_json::to_string(&definition.tags)?;
-        let can_set_code = !engagement_code_exists_elsewhere(conn, definition.code, &id)?;
+        let tags_json = serde_json::to_string(&definition.engagement_tags)?;
+        let can_set_code =
+            !engagement_code_exists_elsewhere(conn, definition.engagement_code, &id)?;
         if can_set_code {
             conn.execute(
                 r#"
                 UPDATE engagements
-                SET code = CASE
-                      WHEN code IS NULL OR trim(code) = '' THEN ?2
-                      ELSE code
-                    END,
+                SET code = ?2,
                     engagement_type = 'internal',
                     color_hex = COALESCE(color_hex, ?3),
                     tags = CASE
@@ -559,8 +585,8 @@ fn ensure_standard_time_off_engagement(
                 "#,
                 params![
                     id,
-                    definition.code,
-                    definition.color_hex,
+                    definition.engagement_code,
+                    definition.engagement_color_hex,
                     tags_json,
                     definition.describe_when_to_use,
                     now,
@@ -583,7 +609,7 @@ fn ensure_standard_time_off_engagement(
                 "#,
                 params![
                     id,
-                    definition.color_hex,
+                    definition.engagement_color_hex,
                     tags_json,
                     definition.describe_when_to_use,
                     now,
@@ -595,7 +621,7 @@ fn ensure_standard_time_off_engagement(
     }
 
     let now = current_unix_timestamp();
-    let tags_json = serde_json::to_string(&definition.tags)?;
+    let tags_json = serde_json::to_string(&definition.engagement_tags)?;
     conn.execute(
         r#"
         INSERT INTO engagements (
@@ -605,9 +631,9 @@ fn ensure_standard_time_off_engagement(
         "#,
         params![
             definition.engagement_id,
-            definition.code,
+            definition.engagement_code,
             definition.name,
-            definition.color_hex,
+            definition.engagement_color_hex,
             tags_json,
             definition.describe_when_to_use,
             now,
@@ -638,24 +664,21 @@ fn ensure_standard_time_off_activity(
               created_at ASC
             LIMIT 1
             "#,
-            params![engagement_id, definition.code, name_key],
+            params![engagement_id, definition.activity_code, name_key],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
 
     if let Some(id) = existing_id {
         let now = current_unix_timestamp();
-        let tags_json = serde_json::to_string(&definition.tags)?;
+        let tags_json = serde_json::to_string(&definition.activity_tags)?;
         let can_set_code =
-            !activity_code_exists_elsewhere(conn, engagement_id, definition.code, &id)?;
+            !activity_code_exists_elsewhere(conn, engagement_id, definition.activity_code, &id)?;
         if can_set_code {
             conn.execute(
                 r#"
                 UPDATE activities
-                SET code = CASE
-                      WHEN code IS NULL OR trim(code) = '' THEN ?3
-                      ELSE code
-                    END,
+                SET code = ?3,
                     color_hex = COALESCE(color_hex, ?4),
                     tags = CASE
                       WHEN trim(tags) = '' OR tags = '[]' THEN ?5
@@ -670,8 +693,8 @@ fn ensure_standard_time_off_activity(
                 params![
                     id,
                     engagement_id,
-                    definition.code,
-                    definition.color_hex,
+                    definition.activity_code,
+                    definition.activity_color_hex,
                     tags_json,
                     definition.describe_when_to_use,
                     now,
@@ -695,7 +718,7 @@ fn ensure_standard_time_off_activity(
                 params![
                     id,
                     engagement_id,
-                    definition.color_hex,
+                    definition.activity_color_hex,
                     tags_json,
                     definition.describe_when_to_use,
                     now,
@@ -707,7 +730,7 @@ fn ensure_standard_time_off_activity(
     }
 
     let now = current_unix_timestamp();
-    let tags_json = serde_json::to_string(&definition.tags)?;
+    let tags_json = serde_json::to_string(&definition.activity_tags)?;
     conn.execute(
         r#"
         INSERT INTO activities (
@@ -718,9 +741,9 @@ fn ensure_standard_time_off_activity(
         params![
             definition.activity_id,
             engagement_id,
-            definition.code,
+            definition.activity_code,
             definition.name,
-            definition.color_hex,
+            definition.activity_color_hex,
             tags_json,
             definition.describe_when_to_use,
             now,
@@ -728,6 +751,242 @@ fn ensure_standard_time_off_activity(
     )?;
 
     Ok(definition.activity_id.to_string())
+}
+
+fn ensure_apple_fy26_codes(conn: &Connection) -> AppResult<()> {
+    if get_app_setting(conn, APPLE_FY26_CODES_SEEDED_SETTING)?.as_deref() == Some("1") {
+        return Ok(());
+    }
+
+    let engagement_id = ensure_apple_fy26_engagement(conn)?;
+    let activities: Vec<SeedActivityDefinition> = serde_json::from_str(APPLE_FY26_ACTIVITIES_JSON)?;
+    for activity in &activities {
+        ensure_apple_fy26_activity(conn, &engagement_id, activity)?;
+    }
+
+    upsert_app_setting(conn, APPLE_FY26_CODES_SEEDED_SETTING, "1")?;
+    Ok(())
+}
+
+fn ensure_apple_fy26_engagement(conn: &Connection) -> AppResult<String> {
+    const APPLE_ENGAGEMENT_ID: &str = "apple-fy26-engagement";
+    const APPLE_ENGAGEMENT_CODE: &str = "E-69306633";
+    const APPLE_ENGAGEMENT_NAME: &str = "Apple FY26";
+    const APPLE_CLIENT: &str = "Apple";
+    const APPLE_COLOR_HEX: &str = "#1F7AFF";
+    const APPLE_USAGE: &str = "Use for Apple FY26 engagement work.";
+
+    let mut existing_id = find_engagement_id_by_code(conn, APPLE_ENGAGEMENT_CODE)?;
+    if existing_id.is_none() {
+        for name in ["Apple FY26", "Apple ITGC"] {
+            existing_id = find_engagement_id_by_name(conn, name)?;
+            if existing_id.is_some() {
+                break;
+            }
+        }
+    }
+
+    let tags_json = serde_json::to_string(&Vec::<String>::new())?;
+    if let Some(id) = existing_id {
+        let now = current_unix_timestamp();
+        let can_set_code = !engagement_code_exists_elsewhere(conn, APPLE_ENGAGEMENT_CODE, &id)?;
+        if can_set_code {
+            conn.execute(
+                r#"
+                UPDATE engagements
+                SET code = ?2,
+                    name = CASE
+                      WHEN lower(trim(name)) = 'apple itgc' THEN ?3
+                      ELSE name
+                    END,
+                    client = COALESCE(NULLIF(trim(client), ''), ?4),
+                    engagement_type = 'external',
+                    color_hex = COALESCE(color_hex, ?5),
+                    tags = CASE
+                      WHEN trim(tags) = '' OR tags = '[]' THEN ?6
+                      ELSE tags
+                    END,
+                    describe_when_to_use = COALESCE(NULLIF(trim(describe_when_to_use), ''), ?7),
+                    is_active = 1,
+                    updated_at = ?8
+                WHERE id = ?1
+                "#,
+                params![
+                    id,
+                    APPLE_ENGAGEMENT_CODE,
+                    APPLE_ENGAGEMENT_NAME,
+                    APPLE_CLIENT,
+                    APPLE_COLOR_HEX,
+                    tags_json,
+                    APPLE_USAGE,
+                    now,
+                ],
+            )?;
+        } else {
+            conn.execute(
+                r#"
+                UPDATE engagements
+                SET name = CASE
+                      WHEN lower(trim(name)) = 'apple itgc' THEN ?2
+                      ELSE name
+                    END,
+                    client = COALESCE(NULLIF(trim(client), ''), ?3),
+                    engagement_type = 'external',
+                    color_hex = COALESCE(color_hex, ?4),
+                    tags = CASE
+                      WHEN trim(tags) = '' OR tags = '[]' THEN ?5
+                      ELSE tags
+                    END,
+                    describe_when_to_use = COALESCE(NULLIF(trim(describe_when_to_use), ''), ?6),
+                    is_active = 1,
+                    updated_at = ?7
+                WHERE id = ?1
+                "#,
+                params![
+                    id,
+                    APPLE_ENGAGEMENT_NAME,
+                    APPLE_CLIENT,
+                    APPLE_COLOR_HEX,
+                    tags_json,
+                    APPLE_USAGE,
+                    now,
+                ],
+            )?;
+        }
+
+        return Ok(id);
+    }
+
+    let now = current_unix_timestamp();
+    conn.execute(
+        r#"
+        INSERT INTO engagements (
+          id, code, name, client, engagement_type, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, 'external', ?5, ?6, ?7, 1, ?8, ?8)
+        "#,
+        params![
+            APPLE_ENGAGEMENT_ID,
+            APPLE_ENGAGEMENT_CODE,
+            APPLE_ENGAGEMENT_NAME,
+            APPLE_CLIENT,
+            APPLE_COLOR_HEX,
+            tags_json,
+            APPLE_USAGE,
+            now,
+        ],
+    )?;
+
+    Ok(APPLE_ENGAGEMENT_ID.to_string())
+}
+
+fn ensure_apple_fy26_activity(
+    conn: &Connection,
+    engagement_id: &str,
+    definition: &SeedActivityDefinition,
+) -> AppResult<String> {
+    let code = definition.code.trim().to_ascii_uppercase();
+    let name = definition.name.trim();
+    if code.is_empty() || name.is_empty() {
+        return Err(AppError::Config(
+            "Apple FY26 seed activities require code and name".to_string(),
+        ));
+    }
+
+    let existing_id = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM activities
+            WHERE engagement_id = ?1
+              AND upper(trim(COALESCE(code, ''))) = ?2
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+            params![engagement_id, code],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    if let Some(id) = existing_id {
+        let now = current_unix_timestamp();
+        conn.execute(
+            r#"
+            UPDATE activities
+            SET name = ?3,
+                tags = CASE
+                  WHEN trim(tags) = '' THEN '[]'
+                  ELSE tags
+                END,
+                is_active = 1,
+                updated_at = ?4
+            WHERE id = ?1
+              AND engagement_id = ?2
+            "#,
+            params![id, engagement_id, name, now],
+        )?;
+
+        return Ok(id);
+    }
+
+    let now = current_unix_timestamp();
+    let id = seed_activity_id("apple-fy26-activity", &code);
+    conn.execute(
+        r#"
+        INSERT INTO activities (
+          id, engagement_id, code, name, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, NULL, '[]', NULL, 1, ?5, ?5)
+        "#,
+        params![id, engagement_id, code, name, now],
+    )?;
+
+    Ok(id)
+}
+
+fn seed_activity_id(prefix: &str, code: &str) -> String {
+    let normalized_code = code
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect::<String>();
+    format!("{prefix}-{normalized_code}")
+}
+
+fn find_engagement_id_by_code(conn: &Connection, code: &str) -> AppResult<Option<String>> {
+    let id = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM engagements
+            WHERE upper(trim(COALESCE(code, ''))) = ?1
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+            params![code.trim().to_ascii_uppercase()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(id)
+}
+
+fn find_engagement_id_by_name(conn: &Connection, name: &str) -> AppResult<Option<String>> {
+    let id = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM engagements
+            WHERE lower(trim(name)) = ?1
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+            params![name.trim().to_ascii_lowercase()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(id)
 }
 
 fn engagement_code_exists_elsewhere(
@@ -2560,11 +2819,11 @@ mod tests {
         let engagements = list_engagements(&connection).expect("engagements should load");
         let vacation = engagements
             .iter()
-            .find(|engagement| engagement.code.as_deref() == Some("VACATION"))
+            .find(|engagement| engagement.code.as_deref() == Some("A-US010015"))
             .expect("vacation engagement should be seeded");
         let holiday = engagements
             .iter()
-            .find(|engagement| engagement.code.as_deref() == Some("HOLIDAY"))
+            .find(|engagement| engagement.code.as_deref() == Some("A-US010002"))
             .expect("holiday engagement should be seeded");
 
         assert_eq!(vacation.name, "Vacation");
@@ -2594,7 +2853,7 @@ mod tests {
 
         let engagement_count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM engagements WHERE code IN ('VACATION', 'HOLIDAY')",
+                "SELECT COUNT(*) FROM engagements WHERE code IN ('A-US010015', 'A-US010002')",
                 [],
                 |row| row.get(0),
             )
@@ -2671,16 +2930,23 @@ mod tests {
 
         let vacation_count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM engagements WHERE upper(trim(code)) = 'VACATION'",
+                "SELECT COUNT(*) FROM engagements WHERE upper(trim(code)) = 'A-US010015'",
                 [],
                 |row| row.get(0),
             )
             .expect("vacation count should load");
-        let existing_status: (String, i64) = connection
+        let legacy_vacation_count: i64 = connection
             .query_row(
-                "SELECT engagement_type, is_active FROM engagements WHERE id = 'existing-vacation'",
+                "SELECT COUNT(*) FROM engagements WHERE upper(trim(code)) = 'VACATION'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
+            )
+            .expect("legacy vacation count should load");
+        let existing_status: (String, String, i64) = connection
+            .query_row(
+                "SELECT code, engagement_type, is_active FROM engagements WHERE id = 'existing-vacation'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("existing engagement should load");
         let existing_activity_active: i64 = connection
@@ -2692,8 +2958,147 @@ mod tests {
             .expect("existing activity should load");
 
         assert_eq!(vacation_count, 1);
-        assert_eq!(existing_status, ("internal".to_string(), 1));
+        assert_eq!(legacy_vacation_count, 0);
+        assert_eq!(
+            existing_status,
+            ("A-US010015".to_string(), "internal".to_string(), 1)
+        );
         assert_eq!(existing_activity_active, 1);
+    }
+
+    #[test]
+    fn migrations_seed_apple_fy26_engagement_activities() {
+        let connection = test_connection();
+
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        let apple = engagements
+            .iter()
+            .find(|engagement| engagement.code.as_deref() == Some("E-69306633"))
+            .expect("Apple FY26 engagement should be seeded");
+
+        assert_eq!(apple.name, "Apple FY26");
+        assert_eq!(apple.client.as_deref(), Some("Apple"));
+        assert_eq!(apple.engagement_type, EngagementType::External);
+        assert!(apple.is_active);
+        assert_eq!(apple.activities.len(), 225);
+
+        for code in ["0000", "0350", "DID5", "SDC1", "T303", "0643"] {
+            assert!(
+                apple
+                    .activities
+                    .iter()
+                    .any(|activity| activity.code.as_deref() == Some(code)),
+                "expected Apple FY26 activity code {code}"
+            );
+        }
+
+        let itgc_activity = apple
+            .activities
+            .iter()
+            .find(|activity| activity.code.as_deref() == Some("0350"))
+            .expect("ITGC activity should be seeded");
+        assert_eq!(itgc_activity.name, "RSK - ITGC - Non-SAP");
+    }
+
+    #[test]
+    fn migrations_reuse_existing_apple_itgc_engagement() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE engagements (
+                  id TEXT PRIMARY KEY,
+                  code TEXT,
+                  name TEXT NOT NULL,
+                  client TEXT,
+                  engagement_type TEXT NOT NULL DEFAULT 'external',
+                  color_hex TEXT,
+                  tags TEXT NOT NULL,
+                  describe_when_to_use TEXT,
+                  is_active INTEGER NOT NULL DEFAULT 1,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE activities (
+                  id TEXT PRIMARY KEY,
+                  engagement_id TEXT NOT NULL,
+                  code TEXT,
+                  name TEXT NOT NULL,
+                  color_hex TEXT,
+                  tags TEXT NOT NULL,
+                  describe_when_to_use TEXT,
+                  is_active INTEGER NOT NULL DEFAULT 1,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL,
+                  FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE app_settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+                );
+
+                INSERT INTO engagements (
+                  id, code, name, client, engagement_type, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+                )
+                VALUES (
+                  'existing-apple', NULL, 'Apple ITGC', NULL, 'external', NULL, '[]', NULL, 0, 1, 1
+                );
+
+                INSERT INTO activities (
+                  id, engagement_id, code, name, color_hex, tags, describe_when_to_use, is_active, created_at, updated_at
+                )
+                VALUES (
+                  'existing-apple-activity-0350', 'existing-apple', '0350', 'Old ITGC Name', NULL, '[]', NULL, 0, 1, 1
+                );
+                "#,
+            )
+            .expect("existing tables should be created");
+
+        run_migrations(&connection).expect("migrations should run");
+
+        let existing_apple: (String, String, String, i64) = connection
+            .query_row(
+                "SELECT code, name, client, is_active FROM engagements WHERE id = 'existing-apple'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("existing Apple engagement should load");
+        let apple_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM engagements WHERE upper(trim(code)) = 'E-69306633'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("Apple engagement count should load");
+        let apple_activity_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM activities WHERE engagement_id = 'existing-apple'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("Apple activity count should load");
+        let updated_activity: (String, i64) = connection
+            .query_row(
+                "SELECT name, is_active FROM activities WHERE id = 'existing-apple-activity-0350'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("existing Apple activity should load");
+
+        assert_eq!(
+            existing_apple,
+            (
+                "E-69306633".to_string(),
+                "Apple FY26".to_string(),
+                "Apple".to_string(),
+                1
+            )
+        );
+        assert_eq!(apple_count, 1);
+        assert_eq!(apple_activity_count, 225);
+        assert_eq!(updated_activity, ("RSK - ITGC - Non-SAP".to_string(), 1));
     }
 
     #[test]
@@ -2958,7 +3363,7 @@ mod tests {
         .expect("manual entry should save");
 
         let suggestions =
-            list_quick_add_suggestions(&connection, 5).expect("suggestions should load");
+            list_quick_add_suggestions(&connection, 500).expect("suggestions should load");
 
         assert!(suggestions.len() >= 3);
         assert_eq!(suggestions[0].activity_id, used_activity_id);

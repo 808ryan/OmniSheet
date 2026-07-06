@@ -1,0 +1,902 @@
+[
+  {
+    "code": "0000",
+    "name": "General"
+  },
+  {
+    "code": "0001",
+    "name": "All Partner time not provided"
+  },
+  {
+    "code": "0009",
+    "name": "A - External Reporting"
+  },
+  {
+    "code": "0087",
+    "name": "A | Eng Econ"
+  },
+  {
+    "code": "0088",
+    "name": "A | PACE & Independence"
+  },
+  {
+    "code": "0090",
+    "name": "B | 404 Coordination"
+  },
+  {
+    "code": "0098",
+    "name": "COR | Admin"
+  },
+  {
+    "code": "0099",
+    "name": "COR | GDS Coordination"
+  },
+  {
+    "code": "0100",
+    "name": "COR | Innovation & Analytics"
+  },
+  {
+    "code": "0101",
+    "name": "COR | International"
+  },
+  {
+    "code": "0109",
+    "name": "OPS | Admin"
+  },
+  {
+    "code": "0127",
+    "name": "TAX | Scope"
+  },
+  {
+    "code": "0134",
+    "name": "TRS | Scope"
+  },
+  {
+    "code": "0141",
+    "name": "TRS | Admin"
+  },
+  {
+    "code": "0143",
+    "name": "TRS | PBC Management"
+  },
+  {
+    "code": "0168",
+    "name": "SUP | Intern Admin"
+  },
+  {
+    "code": "0183",
+    "name": "OPS - A - Financial Disclosures - YE"
+  },
+  {
+    "code": "0190",
+    "name": "REV - E - Accounts Receivable - Interim"
+  },
+  {
+    "code": "0211",
+    "name": "COR - I - Intercompany - YE"
+  },
+  {
+    "code": "0215",
+    "name": "COR - LA - Goodwill - YE"
+  },
+  {
+    "code": "0250",
+    "name": "TRS - T - Stock Comp / Equity - Interim"
+  },
+  {
+    "code": "0252",
+    "name": "REV - UA1 - Product Revenue - Interim"
+  },
+  {
+    "code": "0253",
+    "name": "REV - UA1 - Product Revenue - YE"
+  },
+  {
+    "code": "0254",
+    "name": "REV - UA2 - AMP Revenue - Interim"
+  },
+  {
+    "code": "0262",
+    "name": "REV - UA4 - Licensing Revenue - Interim"
+  },
+  {
+    "code": "0263",
+    "name": "REV - UA4 - Licensing Revenue - YE"
+  },
+  {
+    "code": "0276",
+    "name": "COR - VC - Other Operating Expenses-Int"
+  },
+  {
+    "code": "0280",
+    "name": "REV - AMP Revenue - WT"
+  },
+  {
+    "code": "0281",
+    "name": "REV - AMP Revenue - Interim TOC"
+  },
+  {
+    "code": "0282",
+    "name": "REV - AMP Revenue - YE TOC"
+  },
+  {
+    "code": "0286",
+    "name": "TRS - Cash - WT"
+  },
+  {
+    "code": "0287",
+    "name": "TRS - Cash - Interim TOC"
+  },
+  {
+    "code": "0289",
+    "name": "COR - C&J WT"
+  },
+  {
+    "code": "0290",
+    "name": "COR - C&J Interim TOC"
+  },
+  {
+    "code": "0291",
+    "name": "COR - C&J YE TOC"
+  },
+  {
+    "code": "0295",
+    "name": "OPS - Financial Reporting WT"
+  },
+  {
+    "code": "0296",
+    "name": "OPS - Financial Reporting Interim TOC"
+  },
+  {
+    "code": "0298",
+    "name": "COR - IP & eApproval - WT"
+  },
+  {
+    "code": "0299",
+    "name": "COR - IP & eApproval - Interim TOC"
+  },
+  {
+    "code": "0301",
+    "name": "TRS - Investments - WT"
+  },
+  {
+    "code": "0302",
+    "name": "TRS - Investments - Interim TOC"
+  },
+  {
+    "code": "0310",
+    "name": "TRS - Other Treasury Transactions - WT"
+  },
+  {
+    "code": "0311",
+    "name": "TRS-Other Treasury Transactions-Int-TOC"
+  },
+  {
+    "code": "0313",
+    "name": "REV - Product Rev - Rev Rec - WT"
+  },
+  {
+    "code": "0314",
+    "name": "REV - Product Rev - Rev Rec-Interim TOC"
+  },
+  {
+    "code": "0316",
+    "name": "REV - Product Rev - OB - WT"
+  },
+  {
+    "code": "0317",
+    "name": "REV - Product Rev - OB - Interim TOC"
+  },
+  {
+    "code": "0319",
+    "name": "REV - Product Rev - C&C - WT"
+  },
+  {
+    "code": "0322",
+    "name": "REV - Product Rev - Soft & Serv - WT"
+  },
+  {
+    "code": "0325",
+    "name": "TRS - Stock Admin - WT"
+  },
+  {
+    "code": "0326",
+    "name": "TRS - Stock Admin - Interim TOC"
+  },
+  {
+    "code": "0328",
+    "name": "TAX - Tax Provision - WT"
+  },
+  {
+    "code": "0329",
+    "name": "TAX - Tax Provision - Interim TOC"
+  },
+  {
+    "code": "0330",
+    "name": "TAX - Tax Provision - YE TOC"
+  },
+  {
+    "code": "0335",
+    "name": "OPS - General Audit Procedures"
+  },
+  {
+    "code": "0337",
+    "name": "TAX - General Audit Procedures"
+  },
+  {
+    "code": "0338",
+    "name": "TRS - General Audit Procedures"
+  },
+  {
+    "code": "0343",
+    "name": "TRS - Related Party - WT"
+  },
+  {
+    "code": "0346",
+    "name": "TRS - Related Party - Interim TOC"
+  },
+  {
+    "code": "0347",
+    "name": "RSK - Planning - Documentation prep and"
+  },
+  {
+    "code": "0348",
+    "name": "RSK - EM - Engagement Management: Meetin"
+  },
+  {
+    "code": "0349",
+    "name": "RSK - ITGC - SAP"
+  },
+  {
+    "code": "0350",
+    "name": "RSK - ITGC - Non-SAP"
+  },
+  {
+    "code": "0353",
+    "name": "RSK - ITAC - AMP"
+  },
+  {
+    "code": "0354",
+    "name": "RSK - ITAC - Non-Revenue"
+  },
+  {
+    "code": "0355",
+    "name": "RSK - ITGC - AMP"
+  },
+  {
+    "code": "0359",
+    "name": "RSK - SOC Reports"
+  },
+  {
+    "code": "0366",
+    "name": "Core Q3"
+  },
+  {
+    "code": "0371",
+    "name": "Independence Q2"
+  },
+  {
+    "code": "0372",
+    "name": "Independence Q3"
+  },
+  {
+    "code": "0374",
+    "name": "Ops Q2"
+  },
+  {
+    "code": "0375",
+    "name": "Ops Q3"
+  },
+  {
+    "code": "0378",
+    "name": "Revenue Q2"
+  },
+  {
+    "code": "0379",
+    "name": "Revenue Q3"
+  },
+  {
+    "code": "0381",
+    "name": "Treasury Q2"
+  },
+  {
+    "code": "0382",
+    "name": "Treasury Q3"
+  },
+  {
+    "code": "0386",
+    "name": "COR - GC - Other Assets - YE"
+  },
+  {
+    "code": "0389",
+    "name": "COR - NA - Accounts Payable - YE"
+  },
+  {
+    "code": "0391",
+    "name": "COR - PE - Accrued Expenses - YE"
+  },
+  {
+    "code": "0393",
+    "name": "COR - VC - Other Operating Expenses - YE"
+  },
+  {
+    "code": "0407",
+    "name": "COR - K - PPE and depr Expense - YE"
+  },
+  {
+    "code": "0408",
+    "name": "TRS - M - Notes Payable - Interim"
+  },
+  {
+    "code": "0429",
+    "name": "REV - UA2 - AMP Revenue - YE"
+  },
+  {
+    "code": "0439",
+    "name": "TRS - VB - Payroll Expense - YE"
+  },
+  {
+    "code": "0440",
+    "name": "TRS - VD - Other Income / Expense - YE"
+  },
+  {
+    "code": "0444",
+    "name": "OPS - Financial Reporting YE TOC"
+  },
+  {
+    "code": "0445",
+    "name": "TRS - Investments - YE TOC"
+  },
+  {
+    "code": "0448",
+    "name": "TRS - Other Treasury Transactions-YE TOC"
+  },
+  {
+    "code": "0449",
+    "name": "REV - Product Rev - Rev Rec - YE TOC"
+  },
+  {
+    "code": "0452",
+    "name": "TRS - Stock Admin - YE TOC"
+  },
+  {
+    "code": "0461",
+    "name": "COR - Group Coordination"
+  },
+  {
+    "code": "0466",
+    "name": "COR - SA - Lease - YE"
+  },
+  {
+    "code": "0468",
+    "name": "COR - Litigation - WT"
+  },
+  {
+    "code": "0471",
+    "name": "COR - PF - Litigation Accrual - YE"
+  },
+  {
+    "code": "0474",
+    "name": "COR - ETC or Budget"
+  },
+  {
+    "code": "0475",
+    "name": "COR - Sync"
+  },
+  {
+    "code": "0476",
+    "name": "COR - General Audit Procedures -A-binder"
+  },
+  {
+    "code": "0477",
+    "name": "COR-General Audit Procedure-JE Procedure"
+  },
+  {
+    "code": "0478",
+    "name": "COR - General Audit Procedures - Scrub"
+  },
+  {
+    "code": "0480",
+    "name": "Non-Audit ELs"
+  },
+  {
+    "code": "0481",
+    "name": "OPS - DP or BS Interim TOC"
+  },
+  {
+    "code": "0482",
+    "name": "OPS - DP or BS WT"
+  },
+  {
+    "code": "0483",
+    "name": "OPS - DP or BS YE TOC"
+  },
+  {
+    "code": "0484",
+    "name": "Project Management"
+  },
+  {
+    "code": "0485",
+    "name": "RSK - 404 Coordination"
+  },
+  {
+    "code": "0486",
+    "name": "RSK - Economics"
+  },
+  {
+    "code": "0488",
+    "name": "RSK - IPE"
+  },
+  {
+    "code": "0489",
+    "name": "RSK - ITAC - OPS"
+  },
+  {
+    "code": "0491",
+    "name": "RSK - Onboarding"
+  },
+  {
+    "code": "0492",
+    "name": "RSK - Onsite Logistics and Social"
+  },
+  {
+    "code": "0493",
+    "name": "RSK - Performance Management"
+  },
+  {
+    "code": "0494",
+    "name": "TRS - Investment Interim"
+  },
+  {
+    "code": "0496",
+    "name": "RSK - ITAC - Product Revenue - OB"
+  },
+  {
+    "code": "0497",
+    "name": "RSK - ITAC - Product Revenue - RR"
+  },
+  {
+    "code": "0499",
+    "name": "TRS - Cash Flow Procedures"
+  },
+  {
+    "code": "0500",
+    "name": "TRS - SOC report"
+  },
+  {
+    "code": "0502",
+    "name": "COR - Content Assets YE"
+  },
+  {
+    "code": "0503",
+    "name": "REV - Admin - SR"
+  },
+  {
+    "code": "0504",
+    "name": "REV - Admin - PR"
+  },
+  {
+    "code": "0505",
+    "name": "REV - Scope - SR"
+  },
+  {
+    "code": "0506",
+    "name": "REV - Scope - PR"
+  },
+  {
+    "code": "0507",
+    "name": "REV - General Audit Procedures - PR"
+  },
+  {
+    "code": "DID1",
+    "name": "Digital Strategy"
+  },
+  {
+    "code": "DID2",
+    "name": "Data Access & Transformation"
+  },
+  {
+    "code": "DID3",
+    "name": "Innovation Services"
+  },
+  {
+    "code": "DID4",
+    "name": "Analysis & Insights"
+  },
+  {
+    "code": "SDC1",
+    "name": "SDC Independence"
+  },
+  {
+    "code": "SDC4",
+    "name": "SDC Job Status Reporting"
+  },
+  {
+    "code": "SDC5",
+    "name": "SDC Firm Compilation"
+  },
+  {
+    "code": "T301",
+    "name": "T3 FI Scope & Strategy"
+  },
+  {
+    "code": "T304",
+    "name": "T3 FI Substantive"
+  },
+  {
+    "code": "T305",
+    "name": "T3 FI General Procedures"
+  },
+  {
+    "code": "0545",
+    "name": "REV - Product Rev - OB - YE TOC"
+  },
+  {
+    "code": "0546",
+    "name": "REV - Product Rev - C&C - Interim TOC"
+  },
+  {
+    "code": "0547",
+    "name": "REV - PC1 - Product Deferred Revenue-YE"
+  },
+  {
+    "code": "0549",
+    "name": "COR - Litigation - YE TOC"
+  },
+  {
+    "code": "0552",
+    "name": "COR - IP & eApproval - YE TOC"
+  },
+  {
+    "code": "0553",
+    "name": "REV - UB - Revenue Reserves - YE"
+  },
+  {
+    "code": "0554",
+    "name": "TRS - C - Cash - YE"
+  },
+  {
+    "code": "0555",
+    "name": "TRS - T - Stock Comp / Equity - YE"
+  },
+  {
+    "code": "0556",
+    "name": "TRS - C - Cash - Interim"
+  },
+  {
+    "code": "0557",
+    "name": "REV - E - Accounts Receivable - YE"
+  },
+  {
+    "code": "0560",
+    "name": "OPS - G - Strat Inv Dep & rel COGS - YE"
+  },
+  {
+    "code": "0561",
+    "name": "OPS - GA - Vendor Non-Trade Rec - YE"
+  },
+  {
+    "code": "0562",
+    "name": "TRS - M - Notes Payable - YE"
+  },
+  {
+    "code": "0563",
+    "name": "COR - PF - Litigation Accrual - Interim"
+  },
+  {
+    "code": "0565",
+    "name": "TRS - Cash - YE TOC"
+  },
+  {
+    "code": "0567",
+    "name": "COR - Litigation - Interim TOC"
+  },
+  {
+    "code": "0568",
+    "name": "REV - Product Rev - C&C - YE TOC"
+  },
+  {
+    "code": "0570",
+    "name": "TRS - Related Party - YE TOC"
+  },
+  {
+    "code": "0572",
+    "name": "TRS - Investment YE"
+  },
+  {
+    "code": "0573",
+    "name": "REV - LRA - Music COS - YE"
+  },
+  {
+    "code": "0582",
+    "name": "COR - FinRef"
+  },
+  {
+    "code": "T306",
+    "name": "T3 FI Walkthroughs"
+  },
+  {
+    "code": "T308",
+    "name": "T3 FI Conclusion"
+  },
+  {
+    "code": "T309",
+    "name": "T3 FI Scope Changes"
+  },
+  {
+    "code": "0619",
+    "name": "RSK - ITGC - AMP Pricing"
+  },
+  {
+    "code": "DID5",
+    "name": "Markets & Communications"
+  },
+  {
+    "code": "0635",
+    "name": "REV - OMS"
+  },
+  {
+    "code": "0529",
+    "name": "TAX - A - Team meetings"
+  },
+  {
+    "code": "0530",
+    "name": "TAX - O - ETR and TARF"
+  },
+  {
+    "code": "0531",
+    "name": "TAX - O - Other"
+  },
+  {
+    "code": "0532",
+    "name": "TAX - O - Transfer Pricing"
+  },
+  {
+    "code": "0533",
+    "name": "TAX - O - Uncertain Tax Positions"
+  },
+  {
+    "code": "0534",
+    "name": "TAX - O - International Tax"
+  },
+  {
+    "code": "0536",
+    "name": "Tax Q2"
+  },
+  {
+    "code": "0537",
+    "name": "Tax Q3"
+  },
+  {
+    "code": "0538",
+    "name": "TAX - A - Planning and SOX 404"
+  },
+  {
+    "code": "0539",
+    "name": "TAX - O - 10K Tie-out"
+  },
+  {
+    "code": "0540",
+    "name": "TAX - O - Current Tax"
+  },
+  {
+    "code": "0541",
+    "name": "TAX - O - Deferred Tax"
+  },
+  {
+    "code": "0620",
+    "name": "TRS - Eng Econ"
+  },
+  {
+    "code": "0621",
+    "name": "RSK - AMP Pricing Controls"
+  },
+  {
+    "code": "0622",
+    "name": "RSK - ADPL Controls"
+  },
+  {
+    "code": "0585",
+    "name": "COR - FinRef WT"
+  },
+  {
+    "code": "0586",
+    "name": "COR - FinRef Interim TOC"
+  },
+  {
+    "code": "0587",
+    "name": "COR - FinRef YE TOC"
+  },
+  {
+    "code": "0590",
+    "name": "TRS - C&J WT"
+  },
+  {
+    "code": "0591",
+    "name": "TRS - C&J Interim TOC"
+  },
+  {
+    "code": "0592",
+    "name": "TRS - Reporting Project Management"
+  },
+  {
+    "code": "0594",
+    "name": "COR - Fixed Assets TOC & WTS"
+  },
+  {
+    "code": "0595",
+    "name": "COR - Commitment Disclosure WT & TOC"
+  },
+  {
+    "code": "0596",
+    "name": "RSK - ITGC - Non-SAP (BP)"
+  },
+  {
+    "code": "0597",
+    "name": "RSK - ITGC - ADPL"
+  },
+  {
+    "code": "0598",
+    "name": "REV - AMP Revenue Pricing - Interim TOC"
+  },
+  {
+    "code": "0599",
+    "name": "REV - AMP Revenue Pricing - WT"
+  },
+  {
+    "code": "0600",
+    "name": "REV - AMP Revenue Pricing - YE TOC"
+  },
+  {
+    "code": "0601",
+    "name": "REV - ADPL - Interim TOC"
+  },
+  {
+    "code": "0602",
+    "name": "REV - ADPL - WT"
+  },
+  {
+    "code": "0603",
+    "name": "REV - ADPL - YE TOC"
+  },
+  {
+    "code": "0604",
+    "name": "REV - UA2a - ADPL - Interim"
+  },
+  {
+    "code": "0605",
+    "name": "REV - UA2a - ADPL - YE"
+  },
+  {
+    "code": "0606",
+    "name": "REV - General Audit Procedures - SR"
+  },
+  {
+    "code": "0607",
+    "name": "REV - Intern Time - SR"
+  },
+  {
+    "code": "0608",
+    "name": "REV - Econ - SR"
+  },
+  {
+    "code": "0609",
+    "name": "REV - PMO - SR"
+  },
+  {
+    "code": "0611",
+    "name": "Service Revenue Q2"
+  },
+  {
+    "code": "0612",
+    "name": "Service Revenue Q3"
+  },
+  {
+    "code": "0613",
+    "name": "OPS -BuySell/Non-Retail Inventory Int&Ye"
+  },
+  {
+    "code": "0614",
+    "name": "OPS - Limited Risk Accounts"
+  },
+  {
+    "code": "0615",
+    "name": "OPS - VA. - Cost of Sales"
+  },
+  {
+    "code": "0616",
+    "name": "REV - Project Management - PR"
+  },
+  {
+    "code": "0617",
+    "name": "S - Purchase Commitments"
+  },
+  {
+    "code": "0636",
+    "name": "TRS - FX Portal"
+  },
+  {
+    "code": "0623",
+    "name": "REV - Dataiku"
+  },
+  {
+    "code": "0625",
+    "name": "COR - Ariba"
+  },
+  {
+    "code": "0626",
+    "name": "REV - HMS"
+  },
+  {
+    "code": "0627",
+    "name": "RSK - Ad Platforms"
+  },
+  {
+    "code": "0628",
+    "name": "RSK - AMP Setup"
+  },
+  {
+    "code": "0629",
+    "name": "RSK - Dataiku"
+  },
+  {
+    "code": "0630",
+    "name": "RSK - JS7"
+  },
+  {
+    "code": "0631",
+    "name": "RSK - Corp Tax"
+  },
+  {
+    "code": "0632",
+    "name": "RSK - SAP SLM (Hana)"
+  },
+  {
+    "code": "0633",
+    "name": "RSK - Ariba"
+  },
+  {
+    "code": "0634",
+    "name": "RSK - HMS"
+  },
+  {
+    "code": "SDC2",
+    "name": "SDC Learning Compliance"
+  },
+  {
+    "code": "SDC3",
+    "name": "SDC Audit Opinion"
+  },
+  {
+    "code": "T303",
+    "name": "T3 FI Test of Controls"
+  },
+  {
+    "code": "0637",
+    "name": "RSK - SAP ITGCs"
+  },
+  {
+    "code": "0638",
+    "name": "RSK - SAP ITGCs (baseline and TAG)"
+  },
+  {
+    "code": "0639",
+    "name": "RSK - SAP ITGCs (FF)"
+  },
+  {
+    "code": "0640",
+    "name": "RSK - SAP ITGCs (SWAT)"
+  },
+  {
+    "code": "0641",
+    "name": "EMEIA Walkthroughs"
+  },
+  {
+    "code": "0642",
+    "name": "RSK - FF Overruns"
+  },
+  {
+    "code": "0643",
+    "name": "RSK - OMS_Couchbase"
+  }
+]
