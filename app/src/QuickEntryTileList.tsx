@@ -2,7 +2,7 @@ import type {
   CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
-  Ref,
+  RefObject,
 } from 'react'
 
 import {
@@ -18,12 +18,8 @@ import type {
   QuickEntryDragState,
 } from './lib/quickEntry'
 import type { Activity, Engagement } from './lib/types'
-
-interface QuickEntryScrollMetrics {
-  canScroll: boolean
-  thumbTopPct: number
-  thumbHeightPct: number
-}
+import { QuickEntryScrollIndicator } from './QuickEntryScrollIndicator'
+import type { QuickEntryScrollMetrics } from './QuickEntryScrollIndicator'
 
 interface QuickEntryTileListProps {
   groups: QuickEntryActivityGroup[]
@@ -31,7 +27,7 @@ interface QuickEntryTileListProps {
   emptyMessage: string
   errorMessage?: string | null
   disabled?: boolean
-  scrollRef?: Ref<HTMLDivElement>
+  scrollRef?: RefObject<HTMLDivElement | null>
   scrollMetrics?: QuickEntryScrollMetrics
   onScroll?: () => void
   onPointerDown: (
@@ -163,17 +159,8 @@ export function QuickEntryTileList({
           })}
         </div>
       </div>
-      {scrollMetrics?.canScroll ? (
-        <div
-          className="quick-add-scroll-indicator"
-          aria-hidden="true"
-          style={{
-            '--quick-add-scroll-thumb-top': `${scrollMetrics.thumbTopPct}%`,
-            '--quick-add-scroll-thumb-height': `${scrollMetrics.thumbHeightPct}%`,
-          } as CSSProperties}
-        >
-          <span />
-        </div>
+      {scrollRef && scrollMetrics ? (
+        <QuickEntryScrollIndicator scrollRef={scrollRef} metrics={scrollMetrics} />
       ) : null}
     </div>
   )

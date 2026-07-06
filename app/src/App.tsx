@@ -50,6 +50,8 @@ import {
 } from './lib/api'
 import { isAppRuntime, isTauriRuntime } from './lib/runtime'
 import { QUICK_ADD_OPEN_TIMELINE_EVENT, QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
+import { QuickEntryScrollIndicator } from './QuickEntryScrollIndicator'
+import type { QuickEntryScrollMetrics } from './QuickEntryScrollIndicator'
 import { SegmentedControl } from './SegmentedControl'
 import {
   buildDefaultSummaryLayoutState,
@@ -179,12 +181,6 @@ interface SubmissionQueueItem {
   completedAtMs?: number
   transcriptionModelUsed?: TranscriptionModelId
   transcriptionDurationMs?: number
-}
-
-interface QuickAddScrollMetrics {
-  canScroll: boolean
-  thumbTopPct: number
-  thumbHeightPct: number
 }
 
 type QuickAddSettingsDragKind = 'engagement' | 'activity'
@@ -997,7 +993,7 @@ function App() {
     useState<QuickAddSettingsDragState | null>(null)
   const [quickAddSettingsDropCommitKeys, setQuickAddSettingsDropCommitKeys] = useState<string[]>([])
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickEntryDragState | null>(null)
-  const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickAddScrollMetrics>({
+  const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickEntryScrollMetrics>({
     canScroll: false,
     thumbTopPct: 0,
     thumbHeightPct: 100,
@@ -9356,14 +9352,10 @@ function App() {
                       })}
                     </div>
                   </div>
-                  {quickAddScrollMetrics.canScroll ? (
-                    <div
-                      className="quick-add-scroll-indicator"
-                      aria-hidden="true"
-                    >
-                      <span />
-                    </div>
-                  ) : null}
+                  <QuickEntryScrollIndicator
+                    scrollRef={quickAddScrollRef}
+                    metrics={quickAddScrollMetrics}
+                  />
                 </div>
               )}
             </div>
@@ -10098,9 +10090,9 @@ function App() {
                                   <span className="codes-state-pill">Inactive</span>
                                 )}
                               </span>
-                              <small>
-                                {engagement.describeWhenToUse?.trim() || 'Usage guidance not added yet.'}
-                              </small>
+                              {engagement.describeWhenToUse?.trim() ? (
+                                <small>{engagement.describeWhenToUse}</small>
+                              ) : null}
                             </span>
                           </button>
                           <div className="codes-rail-actions">

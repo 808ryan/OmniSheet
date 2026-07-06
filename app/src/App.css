@@ -404,8 +404,12 @@
   width: 0.22rem;
   border-radius: 999px;
   background: rgba(16, 34, 63, 0.08);
-  pointer-events: none;
+  cursor: pointer;
   opacity: 0.88;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .quick-add-scroll-indicator span {
@@ -419,6 +423,7 @@
   background: rgba(16, 34, 63, 0.34);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.34);
   will-change: top, height;
+  cursor: grab;
   transition:
     height 120ms ease,
     background-color 120ms ease;
@@ -426,6 +431,11 @@
 
 .quick-add-scroll-frame:hover .quick-add-scroll-indicator span {
   background: rgba(16, 34, 63, 0.44);
+}
+
+.quick-add-scroll-indicator.dragging span {
+  background: rgba(16, 34, 63, 0.54);
+  cursor: grabbing;
 }
 
 .quick-add-list {
@@ -499,6 +509,8 @@
   color: var(--ink);
   box-shadow: var(--glass-inset);
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   transition:
     border-color 120ms ease,
     background-color 120ms ease,
