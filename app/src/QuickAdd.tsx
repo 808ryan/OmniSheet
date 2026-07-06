@@ -29,6 +29,7 @@ import {
 import type { QuickEntryDragState } from './lib/quickEntry'
 import { isTauriRuntime } from './lib/runtime'
 import { formatDate } from './lib/time'
+import type { QuickEntryScrollMetrics } from './QuickEntryScrollIndicator'
 import type {
   Activity,
   Engagement,
@@ -40,12 +41,6 @@ import { QuickEntryTileList } from './QuickEntryTileList'
 import './QuickAdd.css'
 
 type QuickAddStatus = 'idle' | 'loading' | 'submitting' | 'success' | 'error'
-
-interface QuickEntryScrollMetrics {
-  canScroll: boolean
-  thumbTopPct: number
-  thumbHeightPct: number
-}
 
 const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
 const LLM_ENTRY_EXAMPLE_TEXT = 'Spent an hour on Non-Rev ITACs...'

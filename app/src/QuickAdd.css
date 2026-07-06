@@ -315,7 +315,11 @@ body.quick-add-window {
   width: 0.2rem;
   border-radius: 999px;
   background: rgba(15, 23, 42, 0.08);
-  pointer-events: none;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .quick-add-scroll-indicator span {
@@ -328,6 +332,12 @@ body.quick-add-window {
   border-radius: inherit;
   background: rgba(15, 23, 42, 0.3);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.36);
+  cursor: grab;
+}
+
+.quick-add-scroll-indicator.dragging span {
+  background: rgba(15, 23, 42, 0.44);
+  cursor: grabbing;
 }
 
 .quick-add-list {
@@ -401,6 +411,8 @@ body.quick-add-window {
   color: var(--quick-add-ink);
   cursor: pointer;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   box-shadow:
     0 8px 18px rgba(15, 23, 42, 0.06),
     var(--quick-add-inset);
