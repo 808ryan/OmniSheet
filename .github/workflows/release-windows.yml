@@ -51,6 +51,7 @@ jobs:
 
           "tag_name=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "release_name=$releaseName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$($tagName.Substring(1))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -77,3 +78,45 @@ jobs:
           releaseDraft: true
           releaseName: ${{ steps.release_meta.outputs.release_name }}
           tagName: ${{ steps.release_meta.outputs.tag_name }}
+
+      - name: Prepare portable Windows executable
+        id: portable
+        shell: pwsh
+        run: |
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "app/src-tauri/target/release"
+          $sourcePath = Join-Path $releaseDir "app.exe"
+
+          if (-not (Test-Path -LiteralPath $sourcePath)) {
+            $candidates = Get-ChildItem -Path $releaseDir -Filter "*.exe" -File |
+              Where-Object { $_.Name -notmatch '(?i)(setup|unins|uninstall)' }
+
+            if ($candidates.Count -ne 1) {
+              Write-Error "Could not uniquely identify the portable Windows executable in $releaseDir"
+              Get-ChildItem -Path $releaseDir -Filter "*.exe" -File | ForEach-Object {
+                Write-Host "Found executable candidate: $($_.FullName)"
+              }
+              exit 1
+            }
+
+            $sourcePath = $candidates[0].FullName
+          }
+
+          $portableDir = Join-Path $env:RUNNER_TEMP "omnisheet-portable"
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+
+          $assetPath = Join-Path $portableDir "OmniSheet_${{ steps.release_meta.outputs.version }}_windows_portable.exe"
+          Copy-Item -LiteralPath $sourcePath -Destination $assetPath -Force
+
+          "asset_path=$assetPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Prepared portable executable asset at $assetPath"
+
+      - name: Upload portable Windows executable
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload `
+            "${{ steps.release_meta.outputs.tag_name }}" `
+            "${{ steps.portable.outputs.asset_path }}" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --clobber
