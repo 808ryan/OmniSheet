@@ -2398,6 +2398,7 @@ button.danger:hover:not(:disabled) {
 
 .timeline-create-popover .activity-command-results {
   max-height: min(15rem, 35vh);
+  background: rgba(255, 255, 255, 0.84);
 }
 
 .timeline-block-label {

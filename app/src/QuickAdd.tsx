@@ -607,6 +607,7 @@ function QuickAdd() {
     event: ReactPointerEvent<HTMLButtonElement>,
     engagement: Engagement,
     activity: Activity,
+    initialDurationMinutes = QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
   ) => {
     if (event.button !== 0 || statusRef.current === 'submitting' || activity.isActive === false) {
       return
@@ -621,7 +622,8 @@ function QuickAdd() {
       pointerId: event.pointerId,
       originClientX: event.clientX,
       currentClientX: event.clientX,
-      durationMinutes: QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
+      baseDurationMinutes: initialDurationMinutes,
+      durationMinutes: initialDurationMinutes,
       isDragging: false,
     }))
   }
@@ -637,6 +639,7 @@ function QuickAdd() {
     const nextDuration = quickEntryDurationFromDrag(
       current.originClientX,
       event.clientX,
+      current.baseDurationMinutes,
     )
     const nextIsDragging =
       current.isDragging
@@ -822,11 +825,33 @@ function QuickAdd() {
           placeholder={isTimerSelectionMode ? 'Choose activity to start' : 'Search activities'}
           ariaLabel={isTimerSelectionMode ? 'Choose an activity to start tracking' : 'Search for an activity to add'}
           actionLabel={isTimerSelectionMode ? 'Start' : 'Add'}
-          actionIcon={isTimerSelectionMode ? undefined : 'plus'}
+          actionIcon="plus"
           resultsMaterial="opaque"
           showDuration={!isTimerSelectionMode}
           contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
           onCancel={() => setIsTimerSelectionMode(false)}
+          resultDragState={isTimerSelectionMode ? null : quickBlockDragState}
+          onResultPointerDown={isTimerSelectionMode
+            ? undefined
+            : (event, item, durationMinutes) => onQuickBlockActivityPointerDown(
+              event,
+              item.engagement,
+              item.activity,
+              durationMinutes,
+            )}
+          onResultPointerMove={isTimerSelectionMode
+            ? undefined
+            : onQuickBlockActivityPointerMove}
+          onResultPointerUp={isTimerSelectionMode
+            ? undefined
+            : (event, item) => onQuickBlockActivityPointerUp(
+              event,
+              item.engagement,
+              item.activity,
+            )}
+          onResultPointerCancel={isTimerSelectionMode
+            ? undefined
+            : onQuickBlockActivityPointerCancel}
           onSubmit={(item, durationMinutes) => {
             if (isTimerSelectionMode) {
               void startActivityTimer(item.engagement, item.activity)

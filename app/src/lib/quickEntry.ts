@@ -42,6 +42,7 @@ export interface QuickEntryDragState {
   pointerId: number
   originClientX: number
   currentClientX: number
+  baseDurationMinutes: number
   durationMinutes: number
   isDragging: boolean
 }
@@ -279,11 +280,15 @@ export function quickEntryDurationProgress(minutes: number): number {
   return ((clampQuickEntryDuration(minutes) - QUICK_ENTRY_DEFAULT_DURATION_MINUTES) / span) * 100
 }
 
-export function quickEntryDurationFromDrag(originClientX: number, currentClientX: number): number {
+export function quickEntryDurationFromDrag(
+  originClientX: number,
+  currentClientX: number,
+  baseDurationMinutes = QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
+): number {
   const dragDistance = Math.max(0, currentClientX - originClientX)
   const durationSteps = Math.round(dragDistance / QUICK_ENTRY_DRAG_STEP_PX)
   return clampQuickEntryDuration(
-    QUICK_ENTRY_DEFAULT_DURATION_MINUTES
+    baseDurationMinutes
     + durationSteps * QUICK_ENTRY_DURATION_STEP_MINUTES,
   )
 }

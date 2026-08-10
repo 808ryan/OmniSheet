@@ -47,3 +47,17 @@ export function PlusIcon({ className }: InterfaceIconProps) {
     </svg>
   )
 }
+
+export function ChevronDownIcon({ className }: InterfaceIconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="m4.25 6.25 3.75 3.5 3.75-3.5" />
+    </svg>
+  )
+}

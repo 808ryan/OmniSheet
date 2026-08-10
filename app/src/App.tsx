@@ -599,7 +599,7 @@ const TIMELINE_BLOCK_SELECTION_RING_ALPHA = 0.3
 const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
 const TIMELINE_MIN_BLOCK_HEIGHT_PX = 30
 const TIMELINE_DRAG_SNAP_MINUTES = 15
-const TIMELINE_DRAG_ACTIVATION_PX = 4
+const TIMELINE_DRAG_ACTIVATION_PX = 8
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
 const TIMELINE_DURATION_RESIZE_ACTIVATION_PX = 12
 const TIMELINE_DURATION_RESIZE_DOMINANCE_RATIO = 1.5
@@ -1023,6 +1023,7 @@ function App() {
   const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
   const [activeTimer, setActiveTimer] = useState<ActiveTimer | null>(null)
   const [isTimerSelectionMode, setIsTimerSelectionMode] = useState(false)
+  const [isSidebarActivitySearchOpen, setIsSidebarActivitySearchOpen] = useState(false)
   const [isQuickAddSettingsOpen, setIsQuickAddSettingsOpen] = useState(false)
   const [quickAddSettingsDraft, setQuickAddSettingsDraft] = useState<QuickAddPreferences | null>(null)
   const [quickAddSettingsDragState, setQuickAddSettingsDragState] =
@@ -6028,6 +6029,7 @@ function App() {
     event: ReactPointerEvent<HTMLButtonElement>,
     engagement: Engagement,
     activity: Activity,
+    initialDurationMinutes = QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
   ) => {
     if (event.button !== 0 || timelineMutationInFlightRef.current || activity.isActive === false) {
       return
@@ -6043,7 +6045,8 @@ function App() {
       pointerId: event.pointerId,
       originClientX: event.clientX,
       currentClientX: event.clientX,
-      durationMinutes: QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
+      baseDurationMinutes: initialDurationMinutes,
+      durationMinutes: initialDurationMinutes,
       isDragging: false,
     }))
   }
@@ -6059,6 +6062,7 @@ function App() {
     const nextDuration = quickEntryDurationFromDrag(
       current.originClientX,
       event.clientX,
+      current.baseDurationMinutes,
     )
     const nextIsDragging =
       current.isDragging
@@ -6413,11 +6417,14 @@ function App() {
         weekTimelineLayoutMetrics,
       ).minute
       : clientYToTimelineMinute(event.clientY, grid, timelineWindow)
-    const isDragging = current.isDragging
-      || Math.abs(event.clientY - current.originClientY) >= TIMELINE_DRAG_ACTIVATION_PX
+    const snappedPointerMinute = snapMinute(pointerMinute, TIMELINE_DRAG_SNAP_MINUTES)
+    const isDragging = current.isDragging || (
+      Math.abs(event.clientY - current.originClientY) >= TIMELINE_DRAG_ACTIVATION_PX
+      && snappedPointerMinute !== current.originMinute
+    )
     const nextState: TimelineCreateDragState = {
       ...current,
-      currentMinute: snapMinute(pointerMinute, TIMELINE_DRAG_SNAP_MINUTES),
+      currentMinute: snappedPointerMinute,
       currentClientX: event.clientX,
       currentClientY: event.clientY,
       isDragging,
@@ -9705,11 +9712,36 @@ function App() {
                 placeholder={isTimerSelectionMode ? 'Choose activity to start' : 'Search activities'}
                 ariaLabel={isTimerSelectionMode ? 'Choose an activity to start tracking' : 'Search for an activity to add'}
                 actionLabel={isTimerSelectionMode ? 'Start' : 'Add'}
-                actionIcon={isTimerSelectionMode ? undefined : 'plus'}
+                actionIcon="plus"
                 resultsMaterial="opaque"
+                resultsPresentation="inline"
+                resultLimit={activityCommandItems.length}
                 showDuration={!isTimerSelectionMode}
                 contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
                 onCancel={() => setIsTimerSelectionMode(false)}
+                onOpenChange={setIsSidebarActivitySearchOpen}
+                resultDragState={isTimerSelectionMode ? null : quickBlockDragState}
+                onResultPointerDown={isTimerSelectionMode
+                  ? undefined
+                  : (event, item, durationMinutes) => onQuickBlockActivityPointerDown(
+                    event,
+                    item.engagement,
+                    item.activity,
+                    durationMinutes,
+                  )}
+                onResultPointerMove={isTimerSelectionMode
+                  ? undefined
+                  : onQuickBlockActivityPointerMove}
+                onResultPointerUp={isTimerSelectionMode
+                  ? undefined
+                  : (event, item) => onQuickBlockActivityPointerUp(
+                    event,
+                    item.engagement,
+                    item.activity,
+                  )}
+                onResultPointerCancel={isTimerSelectionMode
+                  ? undefined
+                  : onQuickBlockActivityPointerCancel}
                 onSubmit={(item, durationMinutes) => {
                   if (isTimerSelectionMode) {
                     startActivityTimer(item.engagement, item.activity)
@@ -9720,20 +9752,22 @@ function App() {
                 }}
               />
 
-              <p className="quick-add-browse-label">Activity shortcuts</p>
-              {quickAddSuggestionsError ? (
-                <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
-              ) : null}
-              {quickAddActivityGroups.length === 0 ? (
-                <p className="quick-add-empty">
-                  {allQuickAddActivities.length === 0
-                    ? 'No active activities yet.'
-                    : orderedQuickAddActivities.length === 0
-                      ? 'All Quick Entry items are hidden.'
-                      : 'No activity shortcuts to show.'}
-                </p>
-              ) : (
-                <div className="quick-add-scroll-frame">
+              {!isSidebarActivitySearchOpen ? (
+                <>
+                  <p className="quick-add-browse-label">Activity shortcuts</p>
+                  {quickAddSuggestionsError ? (
+                    <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
+                  ) : null}
+                  {quickAddActivityGroups.length === 0 ? (
+                    <p className="quick-add-empty">
+                      {allQuickAddActivities.length === 0
+                        ? 'No active activities yet.'
+                        : orderedQuickAddActivities.length === 0
+                          ? 'All Quick Entry items are hidden.'
+                          : 'No activity shortcuts to show.'}
+                    </p>
+                  ) : (
+                    <div className="quick-add-scroll-frame">
                   <div
                     ref={quickAddScrollRef}
                     className="quick-add-scroll"
@@ -9833,8 +9867,10 @@ function App() {
                     scrollRef={quickAddScrollRef}
                     metrics={quickAddScrollMetrics}
                   />
-                </div>
-              )}
+                    </div>
+                  )}
+                </>
+              ) : null}
             </div>
 
           </section>
