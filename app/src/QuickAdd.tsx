@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
+  CSSProperties,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
 } from 'react'
-import { emit } from '@tauri-apps/api/event'
+import { emit, listen } from '@tauri-apps/api/event'
 
+import { ActivityCommandBar } from './ActivityCommandBar'
+import { TimerIcon } from './InterfaceIcons'
 import {
   engagementList,
   interpretTextMessage,
@@ -14,9 +17,17 @@ import {
   quickAddShowMainWindow,
   quickAddSuggestions,
   settingsGetStatus,
+  timerGetActive,
+  timerCancel,
+  timerStart,
+  timerStop,
   timelineCreateEntry,
 } from './lib/api'
-import { QUICK_ADD_OPEN_TIMELINE_EVENT, QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
+import {
+  QUICK_ADD_OPEN_TIMELINE_EVENT,
+  QUICK_ADD_SUBMITTED_EVENT,
+  TIMER_CHANGED_EVENT,
+} from './lib/events'
 import {
   buildQuickEntryModel,
   QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
@@ -31,6 +42,7 @@ import { isTauriRuntime } from './lib/runtime'
 import { formatDate } from './lib/time'
 import type { QuickEntryScrollMetrics } from './QuickEntryScrollIndicator'
 import type {
+  ActiveTimer,
   Activity,
   Engagement,
   OpenAiModelId,
@@ -55,6 +67,10 @@ function QuickAdd() {
   const [quickAddSuggestionItems, setQuickAddSuggestionItems] = useState<QuickAddSuggestion[]>([])
   const [quickAddSuggestedKeys, setQuickAddSuggestedKeys] = useState<string[]>([])
   const [message, setMessage] = useState('')
+  const [activeTimer, setActiveTimer] = useState<ActiveTimer | null>(null)
+  const [isTimerSelectionMode, setIsTimerSelectionMode] = useState(false)
+  const [isBulkEntryOpen, setIsBulkEntryOpen] = useState(false)
+  const [timerClock, setTimerClock] = useState(() => new Date())
   const [status, setStatus] = useState<QuickAddStatus>(tauriRuntime ? 'loading' : 'error')
   const [statusMessage, setStatusMessage] = useState(
     tauriRuntime
@@ -117,15 +133,17 @@ function QuickAdd() {
     setDataError(null)
 
     try {
-      const [nextSettingsStatus, nextEngagements, nextSuggestions] = await Promise.all([
+      const [nextSettingsStatus, nextEngagements, nextSuggestions, nextActiveTimer] = await Promise.all([
         settingsGetStatus(),
         engagementList(),
         quickAddSuggestions(),
+        timerGetActive(),
       ])
 
       setSettingsStatus(nextSettingsStatus)
       setEngagements(nextEngagements)
       setQuickAddSuggestionItems(nextSuggestions.suggestions)
+      setActiveTimer(nextActiveTimer)
       updateSuggestedKeys(nextSuggestions.suggestions)
 
       setStatus((previous) => previous === 'submitting' ? previous : 'idle')
@@ -137,6 +155,42 @@ function QuickAdd() {
       setStatusMessage(messageText)
     }
   }, [tauriRuntime, updateSuggestedKeys])
+
+  useEffect(() => {
+    if (!tauriRuntime) {
+      return
+    }
+
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+    void listen(TIMER_CHANGED_EVENT, () => {
+      void timerGetActive().then((nextTimer) => {
+        if (!cancelled) {
+          setActiveTimer(nextTimer)
+        }
+      })
+    }).then((nextUnlisten) => {
+      if (cancelled) {
+        nextUnlisten()
+        return
+      }
+      unlisten = nextUnlisten
+    })
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [tauriRuntime])
+
+  useEffect(() => {
+    if (!activeTimer) {
+      return
+    }
+
+    const interval = window.setInterval(() => setTimerClock(new Date()), 1000)
+    return () => window.clearInterval(interval)
+  }, [activeTimer])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -197,6 +251,15 @@ function QuickAdd() {
       quickAddSuggestedKeys,
       quickAddSuggestionItems,
     ],
+  )
+  const activityCommandItems = useMemo(
+    () => buildQuickEntryModel({
+      engagements,
+      preferences: quickAddPreferences,
+      suggestions: [],
+      suggestedKeys: [],
+    }).orderedActivities,
+    [engagements, quickAddPreferences],
   )
   const shouldShowStatus = status !== 'idle' && statusMessage.trim().length > 0
 
@@ -307,7 +370,10 @@ function QuickAdd() {
     const frame = window.requestAnimationFrame(resizeQuickAddWindowToContent)
     return () => window.cancelAnimationFrame(frame)
   }, [
+    activeTimer,
     dataError,
+    isBulkEntryOpen,
+    isTimerSelectionMode,
     quickEntryModel.groups,
     resizeQuickAddWindowToContent,
     status,
@@ -445,6 +511,98 @@ function QuickAdd() {
     }
   }, [])
 
+  const startActivityTimer = useCallback(async (
+    engagement: Engagement,
+    activity: Activity,
+  ) => {
+    if (statusRef.current === 'submitting' || activeTimer) {
+      return
+    }
+
+    const now = new Date()
+    setStatus('submitting')
+    setStatusMessage(`Starting ${activity.name || activity.code || 'timer'}...`)
+
+    try {
+      const timer = await timerStart({
+        engagementId: engagement.id,
+        activityId: activity.id,
+        startDate: formatDate(now),
+        startMinute: now.getHours() * 60 + now.getMinutes(),
+      })
+      setActiveTimer(timer)
+      setTimerClock(now)
+      setIsTimerSelectionMode(false)
+      setStatus('success')
+      setStatusMessage(`Tracking ${activity.name || activity.code || 'activity'}.`)
+      await emit(TIMER_CHANGED_EVENT)
+    } catch (error) {
+      setStatus('error')
+      setStatusMessage(extractErrorMessage(error))
+    }
+  }, [activeTimer])
+
+  const stopCurrentTimer = useCallback(async () => {
+    if (!activeTimer || statusRef.current === 'submitting') {
+      return
+    }
+
+    const now = new Date()
+    const elapsedHours = (now.getTime() - activeTimer.startedAt * 1000) / 3_600_000
+    if (
+      elapsedHours >= 12
+      && !window.confirm(`This timer has been running for ${Math.floor(elapsedHours)} hours. Save the full range?`)
+    ) {
+      return
+    }
+    setStatus('submitting')
+    setStatusMessage(`Stopping ${activeTimer.activityName}...`)
+
+    try {
+      const result = await timerStop({
+        stopDate: formatDate(now),
+        stopMinute: now.getHours() * 60 + now.getMinutes(),
+      })
+      setActiveTimer(null)
+      setStatus('success')
+      setStatusMessage(`Saved ${activeTimer.activityName}.`)
+      await emit(TIMER_CHANGED_EVENT)
+      await emit(QUICK_ADD_SUBMITTED_EVENT, {
+        createdEntryIds: result.createdEntryIds,
+        touchedMonthKeys: result.touchedMonthKeys,
+      })
+    } catch (error) {
+      setStatus('error')
+      setStatusMessage(extractErrorMessage(error))
+    }
+  }, [activeTimer])
+
+  const discardCurrentTimer = useCallback(async () => {
+    if (!activeTimer || statusRef.current === 'submitting') {
+      return
+    }
+    if (!window.confirm(`Discard the running timer for ${activeTimer.activityName}?`)) {
+      return
+    }
+
+    setStatus('submitting')
+    setStatusMessage('Discarding timer...')
+    try {
+      await timerCancel()
+      setActiveTimer(null)
+      setStatus('success')
+      setStatusMessage('Timer discarded.')
+      await emit(TIMER_CHANGED_EVENT)
+    } catch (error) {
+      setStatus('error')
+      setStatusMessage(extractErrorMessage(error))
+    }
+  }, [activeTimer])
+
+  const activeTimerElapsedLabel = activeTimer
+    ? formatElapsedTimer(Math.max(0, timerClock.getTime() - activeTimer.startedAt * 1000))
+    : null
+
   const onQuickBlockActivityPointerDown = (
     event: ReactPointerEvent<HTMLButtonElement>,
     engagement: Engagement,
@@ -577,7 +735,6 @@ function QuickAdd() {
       : quickEntryModel.orderedActivities.length === 0
         ? 'All Quick Entry items are hidden.'
         : 'No activities to show.'
-
   return (
     <main
       ref={quickAddPaletteRef}
@@ -588,69 +745,150 @@ function QuickAdd() {
 
       <section
         ref={quickAddLlmPanelRef}
-        className="quick-add-llm-panel"
-        aria-labelledby="quick-add-llm-title"
+        className="quick-add-command-panel"
+        aria-labelledby="quick-add-command-title"
       >
-        <div className="quick-add-llm-header">
-          <h2 id="quick-add-llm-title" className="quick-add-section-title">LLM Entry</h2>
-          <button
-            type="button"
-            className="quick-add-home-button"
-            onClick={() => void openMainTimeline()}
-            disabled={status === 'submitting'}
-            aria-label="Open OmniSheet timeline"
-            title="Open OmniSheet timeline"
-          >
-            <svg
-              className="quick-add-home-icon"
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-              focusable="false"
-            >
-              <path d="M4.25 10.75 12 4.25l7.75 6.5v8.75H4.25z" />
-            </svg>
-          </button>
-        </div>
-        <form className="quick-add-command" onSubmit={onSubmit}>
-          <label className="quick-add-entry-bar">
-            <span className="sr-only">Describe a timesheet entry</span>
-            <textarea
-              value={message}
-              onKeyDown={onMessageKeyDown}
-              onChange={(event) => {
-                setMessage(event.target.value)
-                if (statusRef.current === 'submitting') {
-                  return
-                }
-
-                setStatus('idle')
-                setStatusMessage('')
-              }}
-              placeholder={LLM_ENTRY_EXAMPLE_TEXT}
-              rows={1}
-              disabled={status === 'submitting'}
-              autoFocus
-            />
-            <span className="quick-add-send-hint" title={sendButtonTitle}>
+        <div className="quick-add-command-header">
+          <h2 id="quick-add-command-title" className="quick-add-section-title">Quick Entry</h2>
+          <div className="quick-add-header-actions">
+            {!activeTimer ? (
               <button
-                type="submit"
-                className="quick-add-send-button"
-                disabled={!canSubmitText}
-                aria-label="Send entry"
+                type="button"
+                className={`quick-add-timer-mode-button ${isTimerSelectionMode ? 'is-active' : ''}`}
+                onClick={() => setIsTimerSelectionMode((previous) => !previous)}
+                disabled={status === 'submitting'}
+                aria-pressed={isTimerSelectionMode}
+                aria-label={isTimerSelectionMode ? 'Cancel start timer selection' : 'Start timer'}
+                title={isTimerSelectionMode ? 'Cancel start timer selection' : 'Start timer'}
               >
-                <svg
-                  className="quick-add-send-icon"
-                  viewBox="0 0 16 16"
-                  aria-hidden="true"
-                  focusable="false"
-                >
-                  <path d="M8 13V3.75" />
-                  <path d="M4.25 7.5 8 3.75 11.75 7.5" />
-                </svg>
+                <TimerIcon className="quick-add-timer-mode-icon" />
               </button>
+            ) : null}
+            <button
+              type="button"
+              className="quick-add-home-button"
+              onClick={() => void openMainTimeline()}
+              disabled={status === 'submitting'}
+              aria-label="Open OmniSheet timeline"
+              title="Open OmniSheet timeline"
+            >
+              <svg
+                className="quick-add-home-icon"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M4.25 10.75 12 4.25l7.75 6.5v8.75H4.25z" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {activeTimer ? (
+          <div
+            className="quick-add-active-timer"
+            style={{ '--quick-add-timer-color': activeTimer.activityColorHex ?? activeTimer.engagementColorHex ?? '#1f7aff' } as CSSProperties}
+          >
+            <span className="quick-add-active-timer-accent" aria-hidden="true" />
+            <span className="quick-add-active-timer-copy">
+              <strong>{activeTimer.activityName || activeTimer.activityCode}</strong>
+              <small>{activeTimer.engagementName || activeTimer.engagementCode}</small>
             </span>
-          </label>
-        </form>
+            <time>{activeTimerElapsedLabel}</time>
+            <button
+              type="button"
+              className="quick-add-discard-button"
+              onClick={() => void discardCurrentTimer()}
+              disabled={status === 'submitting'}
+            >
+              Discard
+            </button>
+            <button
+              type="button"
+              className="quick-add-stop-button"
+              onClick={() => void stopCurrentTimer()}
+              disabled={status === 'submitting'}
+            >
+              Stop
+            </button>
+          </div>
+        ) : null}
+
+        <ActivityCommandBar
+          key={isTimerSelectionMode ? 'tray-timer-command' : 'tray-entry-command'}
+          activities={activityCommandItems}
+          disabled={status === 'submitting' || status === 'loading'}
+          autoFocus
+          placeholder={isTimerSelectionMode ? 'Choose activity to start' : 'Search activities'}
+          ariaLabel={isTimerSelectionMode ? 'Choose an activity to start tracking' : 'Search for an activity to add'}
+          actionLabel={isTimerSelectionMode ? 'Start' : 'Add'}
+          actionIcon={isTimerSelectionMode ? undefined : 'plus'}
+          resultsMaterial="opaque"
+          showDuration={!isTimerSelectionMode}
+          contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
+          onCancel={() => setIsTimerSelectionMode(false)}
+          onSubmit={(item, durationMinutes) => {
+            if (isTimerSelectionMode) {
+              void startActivityTimer(item.engagement, item.activity)
+              return
+            }
+
+            void createQuickBlockEntry(item.engagement, item.activity, durationMinutes)
+          }}
+        />
+
+        <button
+          type="button"
+          className="quick-add-bulk-toggle"
+          onClick={() => setIsBulkEntryOpen((previous) => !previous)}
+          aria-expanded={isBulkEntryOpen}
+          aria-controls="quick-add-bulk-entry"
+        >
+          <span>Bulk entry with AI</span>
+          <span aria-hidden="true">{isBulkEntryOpen ? '−' : '+'}</span>
+        </button>
+
+        {isBulkEntryOpen ? (
+          <form id="quick-add-bulk-entry" className="quick-add-command" onSubmit={onSubmit}>
+            <label className="quick-add-entry-bar">
+              <span className="sr-only">Describe several timesheet entries</span>
+              <textarea
+                value={message}
+                onKeyDown={onMessageKeyDown}
+                onChange={(event) => {
+                  setMessage(event.target.value)
+                  if (statusRef.current === 'submitting') {
+                    return
+                  }
+
+                  setStatus('idle')
+                  setStatusMessage('')
+                }}
+                placeholder={LLM_ENTRY_EXAMPLE_TEXT}
+                rows={1}
+                disabled={status === 'submitting'}
+              />
+              <span className="quick-add-send-hint" title={sendButtonTitle}>
+                <button
+                  type="submit"
+                  className="quick-add-send-button"
+                  disabled={!canSubmitText}
+                  aria-label="Create bulk entries"
+                >
+                  <svg
+                    className="quick-add-send-icon"
+                    viewBox="0 0 16 16"
+                    aria-hidden="true"
+                    focusable="false"
+                  >
+                    <path d="M8 13V3.75" />
+                    <path d="M4.25 7.5 8 3.75 11.75 7.5" />
+                  </svg>
+                </button>
+              </span>
+            </label>
+          </form>
+        ) : null}
       </section>
 
       {shouldShowStatus ? (
@@ -661,7 +899,7 @@ function QuickAdd() {
 
       <section ref={quickAddTilesPanelRef} className="quick-add-tiles-panel" aria-label="Quick Entry">
         <div ref={quickAddTilesHeaderRef} className="quick-add-tiles-header">
-          <h2 className="quick-add-section-title">Quick Entry</h2>
+          <h2 className="quick-add-section-title">Activities</h2>
         </div>
         <QuickEntryTileList
           groups={quickEntryModel.groups}
@@ -696,6 +934,14 @@ function formatLocalTime(value: Date): string {
   const hour = `${value.getHours()}`.padStart(2, '0')
   const minute = `${value.getMinutes()}`.padStart(2, '0')
   return `${hour}:${minute}`
+}
+
+function formatElapsedTimer(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return [hours, minutes, seconds].map((value) => `${value}`.padStart(2, '0')).join(':')
 }
 
 function monthKeyFromDate(date: string): string {

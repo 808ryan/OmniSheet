@@ -8,8 +8,10 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import { listen } from '@tauri-apps/api/event'
+import { emit, listen } from '@tauri-apps/api/event'
 
+import { ActivityCommandBar } from './ActivityCommandBar'
+import { TimerIcon } from './InterfaceIcons'
 import {
   activityDelete,
   activityUpsert,
@@ -38,6 +40,10 @@ import {
   summaryExportWeeklyExcel,
   summaryLayoutStateGet,
   summaryLayoutStateSet,
+  timerCancel,
+  timerGetActive,
+  timerStart,
+  timerStop,
   transcribeAudioClip,
   timelineCreateEntry,
   timelineDeleteEntry,
@@ -49,7 +55,11 @@ import {
   voiceRequestMicrophonePermission,
 } from './lib/api'
 import { isAppRuntime, isTauriRuntime } from './lib/runtime'
-import { QUICK_ADD_OPEN_TIMELINE_EVENT, QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
+import {
+  QUICK_ADD_OPEN_TIMELINE_EVENT,
+  QUICK_ADD_SUBMITTED_EVENT,
+  TIMER_CHANGED_EVENT,
+} from './lib/events'
 import { QuickEntryScrollIndicator } from './QuickEntryScrollIndicator'
 import type { QuickEntryScrollMetrics } from './QuickEntryScrollIndicator'
 import { SegmentedControl } from './SegmentedControl'
@@ -99,6 +109,7 @@ import type {
   QuickEntryDragState,
 } from './lib/quickEntry'
 import type {
+  ActiveTimer,
   Activity,
   CalendarExtractCandidate,
   CaptureSourceId,
@@ -427,6 +438,28 @@ interface TimelineDragState {
   isDragging: boolean
 }
 
+interface TimelineCreateSelection {
+  surface: 'day' | 'week'
+  date: string
+  startMinute: number
+  endMinute: number
+  x: number
+  y: number
+}
+
+interface TimelineCreateDragState {
+  surface: 'day' | 'week'
+  pointerId: number
+  date: string
+  originMinute: number
+  currentMinute: number
+  originClientX: number
+  originClientY: number
+  currentClientX: number
+  currentClientY: number
+  isDragging: boolean
+}
+
 interface PositionedWeekTimelineEntry extends PositionedTimelineEntry {
   dayIndex: number
   left: number
@@ -564,6 +597,7 @@ const TIMELINE_BLOCK_FILL_ALPHA = 0.2
 const TIMELINE_BLOCK_BORDER_ALPHA = 0.34
 const TIMELINE_BLOCK_SELECTION_RING_ALPHA = 0.3
 const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
+const TIMELINE_MIN_BLOCK_HEIGHT_PX = 30
 const TIMELINE_DRAG_SNAP_MINUTES = 15
 const TIMELINE_DRAG_ACTIVATION_PX = 4
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
@@ -571,6 +605,7 @@ const TIMELINE_DURATION_RESIZE_ACTIVATION_PX = 12
 const TIMELINE_DURATION_RESIZE_DOMINANCE_RATIO = 1.5
 const TIMELINE_DURATION_RESIZE_STEP_PX = 28
 const TIMELINE_DURATION_RESIZE_STEP_MINUTES = 30
+const ACTIVE_TIMER_PREVIEW_ENTRY_ID_PREFIX = 'active-timer-preview:'
 const WEEK_TIMELINE_HEADER_HEIGHT = 64
 const WEEK_TIMELINE_GUTTER_LEFT = 60
 const WEEK_TIMELINE_DAY_WIDTH = 176
@@ -983,10 +1018,11 @@ function App() {
   const [voiceCaptureState, setVoiceCaptureState] = useState<VoiceCaptureState>('idle')
   const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
-  const [quickAddSearch, setQuickAddSearch] = useState('')
   const [quickAddSuggestionItems, setQuickAddSuggestionItems] = useState<QuickAddSuggestion[]>([])
   const [quickAddSuggestedKeys, setQuickAddSuggestedKeys] = useState<string[]>([])
   const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
+  const [activeTimer, setActiveTimer] = useState<ActiveTimer | null>(null)
+  const [isTimerSelectionMode, setIsTimerSelectionMode] = useState(false)
   const [isQuickAddSettingsOpen, setIsQuickAddSettingsOpen] = useState(false)
   const [quickAddSettingsDraft, setQuickAddSettingsDraft] = useState<QuickAddPreferences | null>(null)
   const [quickAddSettingsDragState, setQuickAddSettingsDragState] =
@@ -1022,6 +1058,10 @@ function App() {
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
+  const [timelineCreateSelection, setTimelineCreateSelection] =
+    useState<TimelineCreateSelection | null>(null)
+  const [timelineCreateDragState, setTimelineCreateDragState] =
+    useState<TimelineCreateDragState | null>(null)
   const [isWeekTimelineLoading, setIsWeekTimelineLoading] = useState(false)
   const [weekTimelineError, setWeekTimelineError] = useState<string | null>(null)
   const [timelineLanePreferences, setTimelineLanePreferences] = useState(() => ({
@@ -1049,6 +1089,7 @@ function App() {
   const entryDraftAutoSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const entryDraftLastSavedKeyRef = useRef<string | null>(null)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
+  const timelineCreateDragStateRef = useRef<TimelineCreateDragState | null>(null)
   const timelineMutationInFlightRef = useRef(false)
   const quickBlockDragStateRef = useRef<QuickEntryDragState | null>(null)
   const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
@@ -1445,12 +1486,11 @@ function App() {
       preferences: quickAddPreferences,
       suggestions: quickAddSuggestionItems,
       suggestedKeys: quickAddSuggestedKeys,
-      search: quickAddSearch,
+      search: '',
     }),
     [
       engagements,
       quickAddPreferences,
-      quickAddSearch,
       quickAddSuggestedKeys,
       quickAddSuggestionItems,
     ],
@@ -1458,6 +1498,15 @@ function App() {
   const allQuickAddActivities = quickEntryModel.allActivities
   const orderedQuickAddActivities = quickEntryModel.orderedActivities
   const quickAddActivityGroups = quickEntryModel.groups
+  const activityCommandItems = useMemo(
+    () => buildQuickEntryModel({
+      engagements,
+      preferences: quickAddPreferences,
+      suggestions: [],
+      suggestedKeys: [],
+    }).orderedActivities,
+    [engagements, quickAddPreferences],
+  )
   useEffect(() => {
     setQuickAddSuggestedKeys((previous) => {
       if (previous.length === 0) {
@@ -1842,6 +1891,28 @@ function App() {
       + TIMELINE_CANVAS_TOP_PADDING
       + TIMELINE_CANVAS_BOTTOM_PADDING
   )
+  const activeTimerDayPreviewEntry = useMemo(
+    () => buildActiveTimerPreviewEntry(activeTimer, selectedDate, timelineClock),
+    [activeTimer, selectedDate, timelineClock],
+  )
+  const timelineCreatePreview = useMemo<TimelineCreateSelection | null>(() => {
+    if (!timelineCreateDragState?.isDragging) {
+      return timelineCreateSelection
+    }
+
+    const range = resolveTimelineCreateRange(
+      timelineCreateDragState.originMinute,
+      timelineCreateDragState.currentMinute,
+      timelineWindow,
+    )
+    return {
+      surface: timelineCreateDragState.surface,
+      date: timelineCreateDragState.date,
+      ...range,
+      x: timelineCreateDragState.currentClientX,
+      y: timelineCreateDragState.currentClientY,
+    }
+  }, [timelineCreateDragState, timelineCreateSelection, timelineWindow])
   const timelinePositioningPreferences = useMemo(
     () => ({
       preferredLaneByEntryId: timelineLanePreferences.byEntryId,
@@ -1869,6 +1940,12 @@ function App() {
     () => applyDragPreviewToTimelineEntries(optimisticTimelineEntries, timelineDragState),
     [optimisticTimelineEntries, timelineDragState],
   )
+  const timelineEntriesWithActiveTimerPreview = useMemo(
+    () => activeTimerDayPreviewEntry
+      ? [...timelineEntriesForLayout, activeTimerDayPreviewEntry]
+      : timelineEntriesForLayout,
+    [activeTimerDayPreviewEntry, timelineEntriesForLayout],
+  )
   const timelineDayTotalBreakdown = useMemo(
     () => buildTimelineTotalBreakdown(
       timelineEntriesForLayout,
@@ -1881,7 +1958,7 @@ function App() {
     && timelineDayTotalBreakdown.uncategorizedMinutes > 0
   const previewPositionedTimelineEntries = useMemo(
     () => positionTimelineEntries(
-      timelineEntriesForLayout,
+      timelineEntriesWithActiveTimerPreview,
       timelineWindow,
       {
         ...timelinePositioningPreferences,
@@ -1895,7 +1972,7 @@ function App() {
     ),
     [
       timelineDragState,
-      timelineEntriesForLayout,
+      timelineEntriesWithActiveTimerPreview,
       timelinePositioningPreferences,
       timelineWindow,
     ],
@@ -1912,6 +1989,12 @@ function App() {
   const weekTimelineDays = useMemo(
     () => weekTimeline?.days ?? buildWeekViewDays(selectedDate, timelineWeekStartDay),
     [selectedDate, timelineWeekStartDay, weekTimeline],
+  )
+  const activeTimerWeekPreviewEntries = useMemo(
+    () => weekTimelineDays
+      .map((day) => buildActiveTimerPreviewEntry(activeTimer, day.date, timelineClock))
+      .filter((entry): entry is TimelineEntry => entry !== null),
+    [activeTimer, timelineClock, weekTimelineDays],
   )
   const weekTimelineEntries = useMemo(
     () => weekTimeline?.entries ?? [],
@@ -1932,6 +2015,12 @@ function App() {
   const weekTimelineEntriesForLayout = useMemo(
     () => applyDragPreviewToTimelineEntries(optimisticWeekTimelineEntries, timelineDragState),
     [optimisticWeekTimelineEntries, timelineDragState],
+  )
+  const weekTimelineEntriesWithActiveTimerPreview = useMemo(
+    () => activeTimerWeekPreviewEntries.length > 0
+      ? [...weekTimelineEntriesForLayout, ...activeTimerWeekPreviewEntries]
+      : weekTimelineEntriesForLayout,
+    [activeTimerWeekPreviewEntries, weekTimelineEntriesForLayout],
   )
   const weekTimelineDayTotalBreakdowns = useMemo(
     () => buildTimelineDayTotalBreakdowns(
@@ -1992,7 +2081,7 @@ function App() {
   )
   const previewPositionedWeekTimelineEntries = useMemo(
     () => positionWeekTimelineEntries(
-      weekTimelineEntriesForLayout,
+      weekTimelineEntriesWithActiveTimerPreview,
       weekTimelineDays,
       timelineWindow,
       weekTimelineLayoutMetrics,
@@ -2005,7 +2094,7 @@ function App() {
       timelinePositioningPreferences,
       timelineWindow,
       weekTimelineDays,
-      weekTimelineEntriesForLayout,
+      weekTimelineEntriesWithActiveTimerPreview,
     ],
   )
   const draggedWeekEntryOriginPosition = useMemo(() => {
@@ -2453,6 +2542,15 @@ function App() {
     setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
   }, [])
 
+  const loadActiveTimer = useCallback(async () => {
+    const value = await timerGetActive()
+    setActiveTimer(value)
+    if (value) {
+      setIsTimerSelectionMode(false)
+    }
+    return value
+  }, [])
+
   const loadSummaryLayoutState = useCallback(async () => {
     const value = await summaryLayoutStateGet()
     setSummaryLayoutState(value)
@@ -2614,6 +2712,31 @@ function App() {
   ])
 
   useEffect(() => {
+    if (!tauriRuntime) {
+      return
+    }
+
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+
+    void listen(TIMER_CHANGED_EVENT, () => {
+      void loadActiveTimer()
+    }).then((nextUnlisten) => {
+      if (cancelled) {
+        nextUnlisten()
+        return
+      }
+
+      unlisten = nextUnlisten
+    })
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [loadActiveTimer, tauriRuntime])
+
+  useEffect(() => {
     let timeoutId: ReturnType<typeof window.setTimeout> | null = null
 
     const scheduleNextMinuteTick = () => {
@@ -2647,6 +2770,7 @@ function App() {
       try {
         setIsBusy(true)
         await Promise.all([
+          loadActiveTimer(),
           loadEngagements(),
           loadQuickAddSuggestions(),
           loadSettings(),
@@ -2665,6 +2789,7 @@ function App() {
     void initialize()
   }, [
     loadEngagements,
+    loadActiveTimer,
     loadQuickAddSuggestions,
     loadReportingState,
     loadSettings,
@@ -3487,6 +3612,9 @@ function App() {
     setHighlightedEntryId(null)
     setEntryDraft(null)
     setTimelineContextMenu(null)
+    setTimelineCreateSelection(null)
+    timelineCreateDragStateRef.current = null
+    setTimelineCreateDragState(null)
     setTimelineDragStateWithRef(() => null)
   }, [setTimelineDragStateWithRef])
 
@@ -5798,6 +5926,104 @@ function App() {
     ],
   )
 
+  const startActivityTimer = useCallback(
+    (engagement: Engagement, activity: Activity) => {
+      if (timelineMutationInFlightRef.current || activeTimer) {
+        return
+      }
+
+      const now = new Date()
+      void runTimelineMutation(async () => {
+        const timer = await timerStart({
+          engagementId: engagement.id,
+          activityId: activity.id,
+          startDate: formatDate(now),
+          startMinute: now.getHours() * HOUR_IN_MINUTES + now.getMinutes(),
+        })
+        setActiveTimer(timer)
+        setIsTimerSelectionMode(false)
+        setSuccessMessage(`Tracking ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
+        await emit(TIMER_CHANGED_EVENT)
+      })
+    },
+    [activeTimer, runTimelineMutation],
+  )
+
+  const stopCurrentTimer = useCallback(() => {
+    if (timelineMutationInFlightRef.current || !activeTimer) {
+      return
+    }
+
+    const stoppedActivityName = formatEntityDisplayLabel(
+      activeTimer.activityName,
+      activeTimer.activityCode,
+    )
+    const now = new Date()
+    const elapsedHours = (now.getTime() - activeTimer.startedAt * 1000) / 3_600_000
+    if (
+      elapsedHours >= 12
+      && !window.confirm(`This timer has been running for ${Math.floor(elapsedHours)} hours. Save the full range?`)
+    ) {
+      return
+    }
+    const date = formatDate(now)
+
+    void runTimelineMutation(async () => {
+      const result = await timerStop({
+        stopDate: date,
+        stopMinute: now.getHours() * HOUR_IN_MINUTES + now.getMinutes(),
+      })
+      setActiveTimer(null)
+      setActiveView('timeline')
+      updateSelectedDate(date, { clearSelection: false })
+      setSelectedEntryId(null)
+      setEntryDraft(null)
+
+      const [entries] = await Promise.all([
+        loadTimeline(date),
+        loadWeekTimeline(date),
+        loadWeeklySummary(date),
+        loadQuickAddSuggestions(),
+      ])
+      invalidateMonthSummaries(result.touchedMonthKeys)
+      const createdEntry = entries.find((entry) => result.createdEntryIds.includes(entry.id))
+      if (createdEntry) {
+        onSelectEntry(createdEntry)
+        setHighlightedEntryId(createdEntry.id)
+        scrollDayTimelineToEntry(createdEntry)
+      }
+      setSuccessMessage(`Saved ${stoppedActivityName}.`)
+      await emit(TIMER_CHANGED_EVENT)
+    })
+  }, [
+    activeTimer,
+    invalidateMonthSummaries,
+    loadQuickAddSuggestions,
+    loadTimeline,
+    loadWeekTimeline,
+    loadWeeklySummary,
+    onSelectEntry,
+    runTimelineMutation,
+    scrollDayTimelineToEntry,
+    updateSelectedDate,
+  ])
+
+  const discardCurrentTimer = useCallback(() => {
+    if (timelineMutationInFlightRef.current || !activeTimer) {
+      return
+    }
+    if (!window.confirm(`Discard the running timer for ${activeTimer.activityName}?`)) {
+      return
+    }
+
+    void runTimelineMutation(async () => {
+      await timerCancel()
+      setActiveTimer(null)
+      setSuccessMessage('Timer discarded.')
+      await emit(TIMER_CHANGED_EVENT)
+    })
+  }, [activeTimer, runTimelineMutation])
+
   const onQuickBlockActivityPointerDown = (
     event: ReactPointerEvent<HTMLButtonElement>,
     engagement: Engagement,
@@ -5881,41 +6107,72 @@ function App() {
   }
 
   const onCreateTimelineEntryAtMinute = useCallback(
-    (date: string, anchorMinute: number) => {
+    (
+      date: string,
+      anchorMinute: number,
+      clientX = window.innerWidth / 2,
+      clientY = window.innerHeight / 2,
+      surface: 'day' | 'week' = 'day',
+    ) => {
       const { startMinute, endMinute } = resolveManualTimelineCreateWindow(anchorMinute, timelineWindow)
+      const position = clampTimelineCreatePopoverPosition(clientX, clientY)
+      setTimelineContextMenu(null)
+      setTimelineCreateSelection({
+        surface,
+        date,
+        startMinute,
+        endMinute,
+        ...position,
+      })
+    },
+    [timelineWindow],
+  )
 
+  const createTimelineEntryFromSelection = useCallback(
+    (engagement: Engagement, activity: Activity) => {
+      if (!timelineCreateSelection || timelineMutationInFlightRef.current) {
+        return
+      }
+
+      const selection = timelineCreateSelection
       void runTimelineMutation(async () => {
         const result = await timelineCreateEntry({
-          date,
-          startMinute,
-          endMinute,
+          date: selection.date,
+          startMinute: selection.startMinute,
+          endMinute: selection.endMinute,
+          engagementId: engagement.id,
+          activityId: activity.id,
+          description: '',
         })
-        updateSelectedDate(date, { clearSelection: false })
+        setTimelineCreateSelection(null)
+        updateSelectedDate(selection.date, { clearSelection: false })
         const [entries] = await Promise.all([
-          loadTimeline(date),
-          loadWeekTimeline(date),
-          loadWeeklySummary(date),
+          loadTimeline(selection.date),
+          loadWeekTimeline(selection.date),
+          loadWeeklySummary(selection.date),
+          loadQuickAddSuggestions(),
         ])
-        invalidateMonthSummaries([monthKeyFromDate(date)])
+        invalidateMonthSummaries([monthKeyFromDate(selection.date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
         if (createdEntry) {
-          const nextDraft = buildEntryDraft(createdEntry)
           setSelectedEntryId(createdEntry.id)
-          entryDraftLastSavedKeyRef.current = serializeEntryDraft(nextDraft)
-          setEntryAutoSaveStatus('saved')
-          setEntryDraft(nextDraft)
+          setHighlightedEntryId(createdEntry.id)
+          if (selection.surface === 'day') {
+            scrollDayTimelineToEntry(createdEntry)
+          }
         }
-        setTimelineContextMenu(null)
-        setSuccessMessage('Timeline entry created.')
+        setSuccessMessage(`Added ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
       })
     },
     [
       invalidateMonthSummaries,
+      loadQuickAddSuggestions,
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
       runTimelineMutation,
-      timelineWindow,
+      scrollDayTimelineToEntry,
+      timelineCreateSelection,
       updateSelectedDate,
     ],
   )
@@ -5925,15 +6182,14 @@ function App() {
       return
     }
 
-    const date = timelineContextMenu.createDate
-    const startMinute = timelineContextMenu.createStartMinute
+    const { createDate: date, createStartMinute: startMinute, surface, x, y } = timelineContextMenu
     setTimelineContextMenu(null)
-    if (timelineContextMenu.surface === 'calendar-review') {
+    if (surface === 'calendar-review') {
       onCreateCalendarCandidateAtMinute(date, startMinute)
       return
     }
 
-    onCreateTimelineEntryAtMinute(date, startMinute)
+    onCreateTimelineEntryAtMinute(date, startMinute, x, y, surface)
   }
 
   const onDeleteTimelineContextMenuEntry = () => {
@@ -6033,7 +6289,7 @@ function App() {
 
   const onDoubleClickTimelineEmptySpace = (
     event: ReactMouseEvent<HTMLDivElement>,
-    surface: TimelineSurface = 'day',
+    surface: 'day' | 'week' = 'day',
   ) => {
     if (
       isBusy
@@ -6068,7 +6324,150 @@ function App() {
         date: selectedDateRef.current,
         minute: clientYToTimelineMinute(event.clientY, grid, timelineWindow),
       }
-    onCreateTimelineEntryAtMinute(pointerSlot.date, pointerSlot.minute)
+    onCreateTimelineEntryAtMinute(
+      pointerSlot.date,
+      pointerSlot.minute,
+      event.clientX,
+      event.clientY,
+      surface,
+    )
+  }
+
+  const onTimelineCreatePointerDown = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    surface: 'day' | 'week',
+  ) => {
+    if (
+      event.button !== 0
+      || isBusy
+      || timelineMutationInFlightRef.current
+      || isTimelineDeleteBusy
+      || timelineDragState?.isDragging
+      || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
+      || isTargetWithinTimelineBlock(event.target)
+      || isTargetWithinWeekTimelineGutter(event.target)
+    ) {
+      return
+    }
+
+    const grid = surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const pointerSlot = surface === 'week'
+      ? resolveWeekTimelinePointerSlot(
+        event.clientX,
+        event.clientY,
+        grid,
+        weekTimelineDays,
+        timelineWindow,
+        weekTimelineLayoutMetrics,
+      )
+      : {
+        date: selectedDateRef.current,
+        minute: clientYToTimelineMinute(event.clientY, grid, timelineWindow),
+      }
+    const originMinute = snapMinute(pointerSlot.minute, TIMELINE_DRAG_SNAP_MINUTES)
+    const nextState: TimelineCreateDragState = {
+      surface,
+      pointerId: event.pointerId,
+      date: pointerSlot.date,
+      originMinute,
+      currentMinute: originMinute,
+      originClientX: event.clientX,
+      originClientY: event.clientY,
+      currentClientX: event.clientX,
+      currentClientY: event.clientY,
+      isDragging: false,
+    }
+
+    event.currentTarget.setPointerCapture(event.pointerId)
+    timelineCreateDragStateRef.current = nextState
+    setTimelineCreateDragState(nextState)
+    setTimelineCreateSelection(null)
+    setTimelineContextMenu(null)
+  }
+
+  const onTimelineCreatePointerMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    surface: 'day' | 'week',
+  ) => {
+    const current = timelineCreateDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId || current.surface !== surface) {
+      return
+    }
+
+    const grid = surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const pointerMinute = surface === 'week'
+      ? resolveWeekTimelinePointerSlot(
+        event.clientX,
+        event.clientY,
+        grid,
+        weekTimelineDays,
+        timelineWindow,
+        weekTimelineLayoutMetrics,
+      ).minute
+      : clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    const isDragging = current.isDragging
+      || Math.abs(event.clientY - current.originClientY) >= TIMELINE_DRAG_ACTIVATION_PX
+    const nextState: TimelineCreateDragState = {
+      ...current,
+      currentMinute: snapMinute(pointerMinute, TIMELINE_DRAG_SNAP_MINUTES),
+      currentClientX: event.clientX,
+      currentClientY: event.clientY,
+      isDragging,
+    }
+    timelineCreateDragStateRef.current = nextState
+    setTimelineCreateDragState(nextState)
+  }
+
+  const onTimelineCreatePointerUp = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    surface: 'day' | 'week',
+  ) => {
+    const current = timelineCreateDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId || current.surface !== surface) {
+      return
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+
+    timelineCreateDragStateRef.current = null
+    setTimelineCreateDragState(null)
+    if (!current.isDragging) {
+      return
+    }
+
+    event.preventDefault()
+    const position = clampTimelineCreatePopoverPosition(event.clientX, event.clientY)
+    setTimelineCreateSelection({
+      surface,
+      date: current.date,
+      ...resolveTimelineCreateRange(current.originMinute, current.currentMinute, timelineWindow),
+      ...position,
+    })
+  }
+
+  const onTimelineCreatePointerCancel = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const current = timelineCreateDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId) {
+      return
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    timelineCreateDragStateRef.current = null
+    setTimelineCreateDragState(null)
   }
 
   const onDoubleClickCalendarReviewEmptySpace = (
@@ -7348,6 +7747,10 @@ function App() {
     if (view === 'week' && activeView !== 'week') {
       clearTimelineSelection()
     }
+
+    setTimelineCreateSelection(null)
+    timelineCreateDragStateRef.current = null
+    setTimelineCreateDragState(null)
 
     if (view === 'timeline' || view === 'week') {
       requestTimelineAutoCenter(selectedDateRef.current)
@@ -9140,9 +9543,9 @@ function App() {
                 onClick={() => setIsLlmEntryCollapsed((previous) => !previous)}
                 aria-expanded={!isLlmEntryCollapsed}
                 aria-controls="llm-entry-body"
-                title={isLlmEntryCollapsed ? 'Expand LLM Entry' : 'Collapse LLM Entry'}
+                title={isLlmEntryCollapsed ? 'Expand bulk entry' : 'Collapse bulk entry'}
               >
-                <span>LLM Entry</span>
+                <span>Bulk entry with AI</span>
                 <span
                   className={`control-icon ${isLlmEntryCollapsed ? 'chevron-down' : 'chevron-up'}`}
                   aria-hidden="true"
@@ -9225,25 +9628,99 @@ function App() {
             <div className="quick-add-panel" aria-label="Quick Entry">
               <div className="quick-add-header">
                 <h3>Quick Entry</h3>
-                <button
-                  type="button"
-                  className="quick-add-settings-button"
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={openQuickAddSettings}
-                  aria-label="Open Quick Entry settings"
-                  title="Quick Entry settings"
-                >
-                  <img src={settingsIcon} alt="" aria-hidden="true" draggable={false} />
-                </button>
+                <div className="quick-add-header-actions">
+                  {!activeTimer ? (
+                    <button
+                      type="button"
+                      className={`quick-add-start-timer-button ${isTimerSelectionMode ? 'is-active' : ''}`}
+                      onClick={() => setIsTimerSelectionMode((previous) => !previous)}
+                      disabled={isBusy}
+                      aria-pressed={isTimerSelectionMode}
+                      aria-label={isTimerSelectionMode ? 'Cancel start timer selection' : 'Start timer'}
+                      title={isTimerSelectionMode ? 'Cancel start timer selection' : 'Start timer'}
+                    >
+                      <TimerIcon className="quick-add-start-timer-icon" />
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="quick-add-settings-button"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={openQuickAddSettings}
+                    aria-label="Open Quick Entry settings"
+                    title="Quick Entry settings"
+                  >
+                    <img src={settingsIcon} alt="" aria-hidden="true" draggable={false} />
+                  </button>
+                </div>
               </div>
-              <input
-                className="quick-add-search"
-                type="search"
-                value={quickAddSearch}
-                onChange={(event) => setQuickAddSearch(event.target.value)}
-                placeholder="Search activities"
-                aria-label="Search quick entry activities"
+
+              {activeTimer ? (
+                <div
+                  className="quick-add-active-timer"
+                  style={{
+                    '--quick-add-timer-color': activeTimer.activityColorHex
+                      ?? activeTimer.engagementColorHex
+                      ?? TIMELINE_NEUTRAL_COLOR,
+                  } as CSSProperties}
+                >
+                  <span className="quick-add-active-timer-accent" aria-hidden="true" />
+                  <span className="quick-add-active-timer-copy">
+                    <strong>{formatEntityPrimaryLabel(
+                      activeTimer.activityName,
+                      activeTimer.activityCode,
+                      'Activity',
+                    )}</strong>
+                    <small>{formatEntityPrimaryLabel(
+                      activeTimer.engagementName,
+                      activeTimer.engagementCode,
+                      'Engagement',
+                    )}</small>
+                  </span>
+                  <time>{formatActiveTimerElapsed(activeTimer, timelineClock)}</time>
+                  <button
+                    type="button"
+                    className="quick-add-discard-timer-button"
+                    onClick={discardCurrentTimer}
+                    disabled={isBusy}
+                  >
+                    Discard
+                  </button>
+                  <button
+                    type="button"
+                    className="quick-add-stop-timer-button"
+                    onClick={stopCurrentTimer}
+                    disabled={isBusy}
+                  >
+                    Stop
+                  </button>
+                </div>
+              ) : null}
+
+              <ActivityCommandBar
+                key={isTimerSelectionMode ? 'sidebar-timer-command' : 'sidebar-entry-command'}
+                activities={activityCommandItems}
+                disabled={isBusy}
+                autoFocus={isTimerSelectionMode}
+                placeholder={isTimerSelectionMode ? 'Choose activity to start' : 'Search activities'}
+                ariaLabel={isTimerSelectionMode ? 'Choose an activity to start tracking' : 'Search for an activity to add'}
+                actionLabel={isTimerSelectionMode ? 'Start' : 'Add'}
+                actionIcon={isTimerSelectionMode ? undefined : 'plus'}
+                resultsMaterial="opaque"
+                showDuration={!isTimerSelectionMode}
+                contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
+                onCancel={() => setIsTimerSelectionMode(false)}
+                onSubmit={(item, durationMinutes) => {
+                  if (isTimerSelectionMode) {
+                    startActivityTimer(item.engagement, item.activity)
+                    return
+                  }
+
+                  createQuickBlockEntry(item.engagement, item.activity, durationMinutes)
+                }}
               />
+
+              <p className="quick-add-browse-label">Activity shortcuts</p>
               {quickAddSuggestionsError ? (
                 <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
               ) : null}
@@ -9251,9 +9728,9 @@ function App() {
                 <p className="quick-add-empty">
                   {allQuickAddActivities.length === 0
                     ? 'No active activities yet.'
-                    : orderedQuickAddActivities.length === 0 && quickAddSearch.trim().length === 0
+                    : orderedQuickAddActivities.length === 0
                       ? 'All Quick Entry items are hidden.'
-                      : 'No matching activities.'}
+                      : 'No activity shortcuts to show.'}
                 </p>
               ) : (
                 <div className="quick-add-scroll-frame">
@@ -9488,6 +9965,10 @@ function App() {
                   style={{ minHeight: `${timelineCanvasHeight}px` }}
                   onContextMenu={onOpenTimelineEmptyContextMenu}
                   onDoubleClick={onDoubleClickTimelineEmptySpace}
+                  onPointerDown={(event) => onTimelineCreatePointerDown(event, 'day')}
+                  onPointerMove={(event) => onTimelineCreatePointerMove(event, 'day')}
+                  onPointerUp={(event) => onTimelineCreatePointerUp(event, 'day')}
+                  onPointerCancel={onTimelineCreatePointerCancel}
                 >
                   {timelineHourMarks.map((minute) => (
                     <div
@@ -9514,6 +9995,26 @@ function App() {
                   ) : null}
 
                   <div className="timeline-entry-layer">
+                    {timelineCreatePreview?.surface === 'day'
+                      && timelineCreatePreview.date === selectedDate ? (
+                        <div
+                          className="timeline-create-preview"
+                          style={{
+                            top: TIMELINE_CANVAS_TOP_PADDING
+                              + (timelineCreatePreview.startMinute - timelineWindow.startMinute)
+                                * PIXELS_PER_MINUTE,
+                            height: Math.max(
+                              TIMELINE_DRAG_SNAP_MINUTES,
+                              timelineCreatePreview.endMinute - timelineCreatePreview.startMinute,
+                            ) * PIXELS_PER_MINUTE,
+                            left: '3%',
+                            width: '94%',
+                          }}
+                          aria-hidden="true"
+                        >
+                          <span>{minuteToLabel(timelineCreatePreview.startMinute)} – {minuteToLabel(timelineCreatePreview.endMinute)}</span>
+                        </div>
+                      ) : null}
                     {draggedEntryOriginPosition
                       ? (() => {
                         const ghostEntry = draggedEntryOriginPosition.entry
@@ -9562,18 +10063,46 @@ function App() {
                       )
                       const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
                       const needsReview = reviewLabel !== null
+                      const isActiveTimerPreview = isActiveTimerPreviewEntry(entry)
+                      const isSelectedBlock =
+                        selectedEntryId === entry.id || highlightedEntryId === entry.id
                       const isDragPreview =
                         timelineDragState?.isDragging
                         && timelineDragState.surface === 'day'
                         && timelineDragState.entryId === entry.id
                       const shouldShowDurationBadge =
-                        timelineDragState?.surface === 'day'
-                        && timelineDragState.entryId === entry.id
-                        && (
-                          timelineDragState.dragMode === 'pending'
-                          || timelineDragState.dragMode === 'resize-duration'
+                        isSelectedBlock
+                        || (
+                          timelineDragState?.surface === 'day'
+                          && timelineDragState.entryId === entry.id
+                          && (
+                            timelineDragState.dragMode === 'pending'
+                            || timelineDragState.dragMode === 'resize-duration'
+                          )
                         )
                       const blockPalette = buildTimelineBlockPalette(blockColor)
+
+                      if (isActiveTimerPreview) {
+                        return (
+                          <div
+                            key={entry.id}
+                            className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier}`}
+                            style={{
+                              top: positionedEntry.top,
+                              height: positionedEntry.height,
+                              left: `${positionedEntry.leftPercent}%`,
+                              width: `${positionedEntry.widthPercent}%`,
+                              ...buildTimelineBlockCssVariables(blockPalette),
+                            } as CSSProperties}
+                            aria-hidden="true"
+                          >
+                            <TimelineBlockContent
+                              label={`${blockLabel.label} — Running`}
+                              durationLabel={formatQuickBlockDuration(entry.durationMinutes)}
+                            />
+                          </div>
+                        )
+                      }
 
                       if (isDragPreview) {
                         return (
@@ -9604,7 +10133,7 @@ function App() {
                       const blockClassName = [
                         'timeline-block',
                         `tier-${blockLabel.tier}`,
-                        selectedEntryId === entry.id || highlightedEntryId === entry.id ? 'selected' : '',
+                        isSelectedBlock ? 'selected' : '',
                         needsReview ? 'needs-review' : '',
                         shouldShowDurationBadge ? 'duration-active' : '',
                       ]
@@ -9818,6 +10347,10 @@ function App() {
                     style={{ minHeight: `${timelineCanvasHeight}px` }}
                     onContextMenu={(event) => onOpenTimelineEmptyContextMenu(event, 'week')}
                     onDoubleClick={(event) => onDoubleClickTimelineEmptySpace(event, 'week')}
+                    onPointerDown={(event) => onTimelineCreatePointerDown(event, 'week')}
+                    onPointerMove={(event) => onTimelineCreatePointerMove(event, 'week')}
+                    onPointerUp={(event) => onTimelineCreatePointerUp(event, 'week')}
+                    onPointerCancel={onTimelineCreatePointerCancel}
                   >
                     {timelineHourMarks.map((minute) => (
                       <div
@@ -9882,6 +10415,34 @@ function App() {
                     ) : null}
 
                     <div className="week-timeline-entry-layer">
+                      {timelineCreatePreview?.surface === 'week'
+                        && weekTimelineDateSet.has(timelineCreatePreview.date) ? (() => {
+                          const dayIndex = weekTimelineDays.findIndex(
+                            (day) => day.date === timelineCreatePreview.date,
+                          )
+                          return (
+                            <div
+                              className="timeline-create-preview"
+                              style={{
+                                top: TIMELINE_CANVAS_TOP_PADDING
+                                  + (timelineCreatePreview.startMinute - timelineWindow.startMinute)
+                                    * PIXELS_PER_MINUTE,
+                                height: Math.max(
+                                  TIMELINE_DRAG_SNAP_MINUTES,
+                                  timelineCreatePreview.endMinute - timelineCreatePreview.startMinute,
+                                ) * PIXELS_PER_MINUTE,
+                                left: weekTimelineLayoutMetrics.gutterLeft
+                                  + (dayIndex * weekTimelineLayoutMetrics.dayWidth)
+                                  + WEEK_TIMELINE_ENTRY_COLUMN_INSET,
+                                width: weekTimelineLayoutMetrics.dayWidth
+                                  - (WEEK_TIMELINE_ENTRY_COLUMN_INSET * 2),
+                              }}
+                              aria-hidden="true"
+                            >
+                              <span>{minuteToLabel(timelineCreatePreview.startMinute)} – {minuteToLabel(timelineCreatePreview.endMinute)}</span>
+                            </div>
+                          )
+                        })() : null}
                       {draggedWeekEntryOriginPosition && timelineDragState?.surface === 'week'
                         ? (() => {
                           const ghostEntry = draggedWeekEntryOriginPosition.entry
@@ -9930,18 +10491,46 @@ function App() {
                         )
                         const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
                         const needsReview = reviewLabel !== null
+                        const isActiveTimerPreview = isActiveTimerPreviewEntry(entry)
+                        const isSelectedBlock =
+                          selectedEntryId === entry.id || highlightedEntryId === entry.id
                         const isDragPreview =
                           timelineDragState?.isDragging
                           && timelineDragState.surface === 'week'
                           && timelineDragState.entryId === entry.id
                         const shouldShowDurationBadge =
-                          timelineDragState?.surface === 'week'
-                          && timelineDragState.entryId === entry.id
-                          && (
-                            timelineDragState.dragMode === 'pending'
-                            || timelineDragState.dragMode === 'resize-duration'
+                          isSelectedBlock
+                          || (
+                            timelineDragState?.surface === 'week'
+                            && timelineDragState.entryId === entry.id
+                            && (
+                              timelineDragState.dragMode === 'pending'
+                              || timelineDragState.dragMode === 'resize-duration'
+                            )
                           )
                         const blockPalette = buildTimelineBlockPalette(blockColor)
+
+                        if (isActiveTimerPreview) {
+                          return (
+                            <div
+                              key={entry.id}
+                              className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier}`}
+                              style={{
+                                top: positionedEntry.top,
+                                height: positionedEntry.height,
+                                left: positionedEntry.left,
+                                width: positionedEntry.width,
+                                ...buildTimelineBlockCssVariables(blockPalette),
+                              } as CSSProperties}
+                              aria-hidden="true"
+                            >
+                              <TimelineBlockContent
+                                label={`${blockLabel.label} — Running`}
+                                durationLabel={formatQuickBlockDuration(entry.durationMinutes)}
+                              />
+                            </div>
+                          )
+                        }
 
                         if (isDragPreview) {
                           return (
@@ -9972,7 +10561,7 @@ function App() {
                         const blockClassName = [
                           'timeline-block',
                           `tier-${blockLabel.tier}`,
-                          selectedEntryId === entry.id || highlightedEntryId === entry.id ? 'selected' : '',
+                          isSelectedBlock ? 'selected' : '',
                           needsReview ? 'needs-review' : '',
                           shouldShowDurationBadge ? 'duration-active' : '',
                         ]
@@ -11177,6 +11766,57 @@ function App() {
       {codesCreateModal}
       {quickAddSettingsModal}
       {calendarBulkModal}
+      {timelineCreateSelection ? createPortal(
+        <div
+          className="timeline-create-popover"
+          style={{
+            left: `${timelineCreateSelection.x}px`,
+            top: `${timelineCreateSelection.y}px`,
+          }}
+          role="dialog"
+          aria-label="Create timeline entry"
+        >
+          <header className="timeline-create-popover-header">
+            <div>
+              <strong>Create entry</strong>
+              <span>
+                {formatWeekdayName(timelineCreateSelection.date, 'short')}{' '}
+                {formatMonthDay(timelineCreateSelection.date)} ·{' '}
+                {minuteToLabel(timelineCreateSelection.startMinute)}–{minuteToLabel(timelineCreateSelection.endMinute)}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="timeline-create-popover-close"
+              onClick={() => setTimelineCreateSelection(null)}
+              aria-label="Cancel entry creation"
+              title="Cancel"
+            >
+              <span className="control-icon close-icon" aria-hidden="true" />
+            </button>
+          </header>
+          <ActivityCommandBar
+            activities={activityCommandItems}
+            disabled={isBusy}
+            autoFocus
+            placeholder="Search activity"
+            ariaLabel="Search activity for this timeline range"
+            actionLabel="Create"
+            actionIcon="plus"
+            fixedDurationMinutes={
+              timelineCreateSelection.endMinute - timelineCreateSelection.startMinute
+            }
+            contextLabel="Type a few characters, then press Enter"
+            clearAfterSubmit={false}
+            resultLimit={6}
+            onCancel={() => setTimelineCreateSelection(null)}
+            onSubmit={(item) => {
+              createTimelineEntryFromSelection(item.engagement, item.activity)
+            }}
+          />
+        </div>,
+        document.body,
+      ) : null}
       {timelineContextMenu ? createPortal(
         <div
           ref={timelineContextMenuRef}
@@ -12810,6 +13450,88 @@ function formatTimelineHoursCompact(minutes: number): string {
   return `${formattedHours}h`
 }
 
+function formatActiveTimerElapsed(timer: ActiveTimer, now: Date): string {
+  const elapsedMinutes = Math.max(
+    0,
+    Math.floor((now.getTime() - timer.startedAt * 1000) / 60_000),
+  )
+  const hours = Math.floor(elapsedMinutes / HOUR_IN_MINUTES)
+  const minutes = elapsedMinutes % HOUR_IN_MINUTES
+  return `${hours}:${`${minutes}`.padStart(2, '0')}`
+}
+
+function buildActiveTimerPreviewEntry(
+  timer: ActiveTimer | null,
+  date: string,
+  now: Date,
+): TimelineEntry | null {
+  if (!timer) {
+    return null
+  }
+
+  const currentDate = formatDate(now)
+  if (date < timer.startDate || date > currentDate) {
+    return null
+  }
+
+  const startMinute = date === timer.startDate
+    ? Math.min(
+      MINUTES_IN_DAY - TIMELINE_DRAG_SNAP_MINUTES,
+      Math.max(0, snapMinute(timer.startMinute, TIMELINE_DRAG_SNAP_MINUTES)),
+    )
+    : 0
+  const currentMinute = now.getHours() * HOUR_IN_MINUTES + now.getMinutes()
+  const endMinute = date === currentDate
+    ? Math.min(
+      MINUTES_IN_DAY,
+      Math.max(
+        startMinute + TIMELINE_DRAG_SNAP_MINUTES,
+        snapMinute(currentMinute, TIMELINE_DRAG_SNAP_MINUTES),
+      ),
+    )
+    : MINUTES_IN_DAY
+
+  if (endMinute <= startMinute) {
+    return null
+  }
+
+  return {
+    id: `${ACTIVE_TIMER_PREVIEW_ENTRY_ID_PREFIX}${date}`,
+    date,
+    startMinute,
+    endMinute,
+    durationMinutes: endMinute - startMinute,
+    description: 'Timer running',
+    userSubmissionText: '',
+    source: 'active_timer_preview',
+    confidence: 1,
+    engagementId: timer.engagementId,
+    activityId: timer.activityId,
+    engagementCode: timer.engagementCode,
+    engagementName: timer.engagementName,
+    engagementType: inferEngagementTypeFromCode(timer.engagementCode),
+    activityCode: timer.activityCode,
+    activityName: timer.activityName,
+    usedActivityFallback: false,
+    usedTemporalFallback: false,
+    durationDefaulted: false,
+    fallbackSummary: null,
+    sourceMessageEntryIndex: null,
+    sourceMessageEntryCount: null,
+    modelUsed: null,
+    modelUsedLabel: null,
+    transcriptionModelUsed: null,
+    transcriptionModelUsedLabel: null,
+    warningFlags: [],
+    createdAt: timer.startedAt,
+    updatedAt: timer.startedAt,
+  }
+}
+
+function isActiveTimerPreviewEntry(entry: TimelineEntry): boolean {
+  return entry.id.startsWith(ACTIVE_TIMER_PREVIEW_ENTRY_ID_PREFIX)
+}
+
 function formatQuickBlockDuration(minutes: number): string {
   if (minutes < HOUR_IN_MINUTES) {
     return `${minutes}m`
@@ -13526,9 +14248,13 @@ function positionTimelineEntries(
       laneIndex += 1
     }
 
+    const visualEndMinute = Math.max(
+      clippedEntry.clippedEndMinute,
+      clippedEntry.clippedStartMinute + (TIMELINE_MIN_BLOCK_HEIGHT_PX / PIXELS_PER_MINUTE),
+    )
     activeLanes.push({
       laneIndex,
-      endMinute: clippedEntry.clippedEndMinute,
+      endMinute: visualEndMinute,
     })
 
     currentGroup.push({
@@ -13641,7 +14367,7 @@ function positionTimelineEntries(
         height: Math.max(
           (groupEntry.clippedEndMinute - groupEntry.clippedStartMinute)
           * PIXELS_PER_MINUTE,
-          30,
+          TIMELINE_MIN_BLOCK_HEIGHT_PX,
         ),
         leftPercent: groupEntry.laneIndex * (widthPercent + laneGapPercent),
         widthPercent,
@@ -13952,8 +14678,73 @@ function resolveManualTimelineCreateWindow(
   }
 }
 
+function resolveTimelineCreateRange(
+  originMinute: number,
+  currentMinute: number,
+  timelineWindow: TimelineWindow,
+): { startMinute: number; endMinute: number } {
+  const minMinute = timelineWindow.startMinute
+  const maxMinute = timelineWindow.endMinute
+  const snappedOrigin = Math.min(maxMinute, Math.max(minMinute, snapMinute(
+    originMinute,
+    TIMELINE_DRAG_SNAP_MINUTES,
+  )))
+  const snappedCurrent = Math.min(maxMinute, Math.max(minMinute, snapMinute(
+    currentMinute,
+    TIMELINE_DRAG_SNAP_MINUTES,
+  )))
+
+  if (snappedCurrent >= snappedOrigin) {
+    const startMinute = Math.min(
+      snappedOrigin,
+      maxMinute - TIMELINE_DRAG_SNAP_MINUTES,
+    )
+    return {
+      startMinute,
+      endMinute: Math.min(
+        maxMinute,
+        Math.max(snappedCurrent, startMinute + TIMELINE_DRAG_SNAP_MINUTES),
+      ),
+    }
+  }
+
+  const endMinute = Math.max(
+    snappedOrigin,
+    minMinute + TIMELINE_DRAG_SNAP_MINUTES,
+  )
+  return {
+    startMinute: Math.max(
+      minMinute,
+      Math.min(snappedCurrent, endMinute - TIMELINE_DRAG_SNAP_MINUTES),
+    ),
+    endMinute,
+  }
+}
+
 function isTargetWithinTimelineBlock(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('.timeline-block') !== null
+}
+
+function isTargetWithinWeekTimelineGutter(target: EventTarget | null): boolean {
+  return target instanceof Element
+    && target.closest('.week-timeline-frozen-gutter, .week-timeline-header') !== null
+}
+
+function clampTimelineCreatePopoverPosition(
+  clientX: number,
+  clientY: number,
+): { x: number; y: number } {
+  const viewportPadding = 12
+  const popoverWidth = 360
+  const popoverHeight = 390
+  const offset = 12
+  const maxX = Math.max(viewportPadding, window.innerWidth - popoverWidth - viewportPadding)
+  const maxY = Math.max(viewportPadding, window.innerHeight - popoverHeight - viewportPadding)
+
+  return {
+    x: Math.min(Math.max(clientX + offset, viewportPadding), maxX),
+    y: Math.min(Math.max(clientY + offset, viewportPadding), maxY),
+  }
 }
 
 function clampTimelineContextMenuPosition(
