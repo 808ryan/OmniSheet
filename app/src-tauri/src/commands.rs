@@ -16,7 +16,7 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::macos_permissions;
 use crate::models::{
-    default_reporting_display_columns, Activity, ActivityUpsertInput, ApiKeyInput,
+    default_reporting_display_columns, ActiveTimer, Activity, ActivityUpsertInput, ApiKeyInput,
     CalendarExtractCandidate, CalendarExtractInput, CalendarExtractResult,
     CalendarImportEntryInput, CalendarImportInput, CalendarImportResult, CalendarVisionEvent,
     CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, DateInput, DiagnosticsBundle,
@@ -35,7 +35,8 @@ use crate::models::{
     TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
     TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekStartDay,
     TimelineWeekView, TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote,
-    TranscribeAudioInput, TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
+    TimerStartInput, TimerStopInput, TimerStopResult, TranscribeAudioInput, TranscribeAudioResult,
+    TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -5455,6 +5456,182 @@ pub fn timeline_create_entry(
     create_manual_timeline_entry(&connection, input)
 }
 
+#[tauri::command]
+pub fn timer_get_active(state: State<'_, AppState>) -> Result<Option<ActiveTimer>, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    db::get_active_timer(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn timer_start(
+    state: State<'_, AppState>,
+    input: TimerStartInput,
+) -> Result<ActiveTimer, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    if db::get_active_timer(&connection)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err("a timer is already running".to_string());
+    }
+
+    let start_date = input.start_date.trim();
+    if parse_date(start_date).is_none() {
+        return Err("timer start date must be YYYY-MM-DD".to_string());
+    }
+    if !(0..MINUTES_IN_DAY).contains(&input.start_minute) {
+        return Err("timer start minute must be within the selected day".to_string());
+    }
+
+    let engagement_id = input.engagement_id.trim();
+    let activity_id = input.activity_id.trim();
+    validate_manual_create_refs(&connection, Some(engagement_id), Some(activity_id))?;
+
+    db::insert_active_timer(
+        &connection,
+        engagement_id,
+        activity_id,
+        start_date,
+        input.start_minute,
+        input.description.as_deref().unwrap_or(""),
+    )
+    .map_err(|error| error.to_string())?;
+
+    db::get_active_timer(&connection)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "timer could not be loaded after starting".to_string())
+}
+
+#[tauri::command]
+pub fn timer_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    db::clear_active_timer(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn timer_stop(
+    state: State<'_, AppState>,
+    input: TimerStopInput,
+) -> Result<TimerStopResult, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    let active_timer = db::get_active_timer(&connection)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no timer is running".to_string())?;
+    let windows = build_timer_entry_windows(&active_timer, &input)?;
+
+    connection
+        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .map_err(|error| error.to_string())?;
+
+    let write_result: Result<TimerStopResult, String> = (|| {
+        let mut created_entry_ids = Vec::with_capacity(windows.len());
+        let mut touched_month_keys = HashSet::<String>::new();
+
+        for (date, start_minute, end_minute) in windows {
+            let result = create_manual_timeline_entry(
+                &connection,
+                TimelineCreateInput {
+                    date: date.clone(),
+                    start_minute,
+                    end_minute,
+                    engagement_id: Some(active_timer.engagement_id.clone()),
+                    activity_id: Some(active_timer.activity_id.clone()),
+                    description: Some(active_timer.description.clone()),
+                },
+            )?;
+            created_entry_ids.push(result.id);
+            if let Some(month_key) = month_key_from_iso_date(&date) {
+                touched_month_keys.insert(month_key);
+            }
+        }
+
+        db::clear_active_timer(&connection).map_err(|error| error.to_string())?;
+        let mut touched_month_keys = touched_month_keys.into_iter().collect::<Vec<_>>();
+        touched_month_keys.sort();
+
+        Ok(TimerStopResult {
+            created_entry_ids,
+            touched_month_keys,
+        })
+    })();
+
+    match write_result {
+        Ok(result) => {
+            connection
+                .execute_batch("COMMIT")
+                .map_err(|error| error.to_string())?;
+            Ok(result)
+        }
+        Err(message) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(message)
+        }
+    }
+}
+
+fn build_timer_entry_windows(
+    active_timer: &ActiveTimer,
+    input: &TimerStopInput,
+) -> Result<Vec<(String, i64, i64)>, String> {
+    let start_date = parse_date(&active_timer.start_date)
+        .ok_or_else(|| "saved timer start date is invalid".to_string())?;
+    let stop_date = parse_date(input.stop_date.trim())
+        .ok_or_else(|| "timer stop date must be YYYY-MM-DD".to_string())?;
+    if stop_date < start_date {
+        return Err("timer stop date cannot be before its start date".to_string());
+    }
+    if !(0..MINUTES_IN_DAY).contains(&input.stop_minute) {
+        return Err("timer stop minute must be within the selected day".to_string());
+    }
+
+    if stop_date == start_date {
+        if input.stop_minute < active_timer.start_minute {
+            return Err("timer stop time cannot be before its start time".to_string());
+        }
+        let start_minute =
+            round_to_nearest_15(active_timer.start_minute).clamp(0, MINUTES_IN_DAY - 15);
+        let end_minute = round_to_nearest_15(input.stop_minute)
+            .clamp(start_minute + TIME_INCREMENT_MINUTES, MINUTES_IN_DAY);
+        return Ok(vec![(
+            start_date.format("%Y-%m-%d").to_string(),
+            start_minute,
+            end_minute,
+        )]);
+    }
+
+    let mut windows = Vec::<(String, i64, i64)>::new();
+    let mut date = start_date;
+    while date <= stop_date {
+        let is_first = date == start_date;
+        let is_last = date == stop_date;
+        let start_minute = if is_first {
+            round_to_nearest_15(active_timer.start_minute).clamp(0, MINUTES_IN_DAY - 15)
+        } else {
+            0
+        };
+        let end_minute = if is_last {
+            round_to_nearest_15(input.stop_minute).clamp(0, MINUTES_IN_DAY)
+        } else {
+            MINUTES_IN_DAY
+        };
+
+        if end_minute > start_minute {
+            windows.push((
+                date.format("%Y-%m-%d").to_string(),
+                start_minute,
+                end_minute,
+            ));
+        }
+        date += Duration::days(1);
+    }
+
+    if windows.is_empty() {
+        return Err("timer did not contain a saveable time range".to_string());
+    }
+
+    Ok(windows)
+}
+
 fn create_manual_timeline_entry(
     connection: &Connection,
     input: TimelineCreateInput,
@@ -9245,7 +9422,7 @@ mod tests {
 
     use crate::db;
     use crate::models::{
-        Activity, ActivityUpsertInput, CalendarImportEntryInput, CalendarVisionEvent,
+        ActiveTimer, Activity, ActivityUpsertInput, CalendarImportEntryInput, CalendarVisionEvent,
         CaptureSourceId, CodeContext, ContextActivity, ContextEngagement, Engagement,
         EngagementType, EngagementUpsertInput, InterpretTextInput, KeySource, LlmEntry,
         LlmGapFillActivity, LlmGapFillRequest, LlmTimeOffRequest, NormalizedEntry, OpenAiModelId,
@@ -9254,7 +9431,7 @@ mod tests {
         SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput,
         TimelineEntry, TimelineTotalBreakdown, TimelineWeekStartDay, TimelineWeeklySummary,
         TimelineWeeklySummaryCell, TimelineWeeklySummaryDay, TimelineWeeklySummaryNote,
-        TimelineWeeklySummaryRow, TranscriptionModelId, WarningType,
+        TimelineWeeklySummaryRow, TimerStopInput, TranscriptionModelId, WarningType,
     };
     use crate::openai::LlmAttemptTelemetry;
 
@@ -9263,7 +9440,7 @@ mod tests {
         apply_multi_event_sequence_adjustments, apply_time_off_entry_cap,
         apply_timeline_preferences_to_weekly_summary, build_export_metadata_maps,
         build_summary_export_hours_and_notes_sheet_columns,
-        build_summary_export_hours_sheet_columns, capture_source_label,
+        build_summary_export_hours_sheet_columns, build_timer_entry_windows, capture_source_label,
         compute_gap_fill_free_intervals, create_manual_timeline_entry, dedupe_prepared_entries,
         default_reporting_state, default_summary_layout_state, derive_key_status_level,
         distribute_gap_fill_minutes, llm_attempt_event_status,
@@ -9293,6 +9470,91 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory db should open");
         db::run_migrations(&connection).expect("migrations should run");
         connection
+    }
+
+    fn active_timer_for_test(start_date: &str, start_minute: i64) -> ActiveTimer {
+        ActiveTimer {
+            engagement_id: "engagement-1".to_string(),
+            activity_id: "activity-1".to_string(),
+            engagement_code: Some("E-1".to_string()),
+            engagement_name: "Client Audit".to_string(),
+            engagement_color_hex: None,
+            activity_code: Some("A-1".to_string()),
+            activity_name: "Testing".to_string(),
+            activity_color_hex: None,
+            start_date: start_date.to_string(),
+            start_minute,
+            started_at: 0,
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn timer_windows_round_a_same_day_range_to_quarter_hours() {
+        let timer = active_timer_for_test("2026-08-09", 547);
+        let windows = build_timer_entry_windows(
+            &timer,
+            &TimerStopInput {
+                stop_date: "2026-08-09".to_string(),
+                stop_minute: 652,
+            },
+        )
+        .expect("timer range should resolve");
+
+        assert_eq!(windows, vec![("2026-08-09".to_string(), 540, 645)]);
+    }
+
+    #[test]
+    fn timer_windows_keep_an_immediate_stop_saveable() {
+        let timer = active_timer_for_test("2026-08-09", 600);
+        let windows = build_timer_entry_windows(
+            &timer,
+            &TimerStopInput {
+                stop_date: "2026-08-09".to_string(),
+                stop_minute: 600,
+            },
+        )
+        .expect("timer range should resolve");
+
+        assert_eq!(windows, vec![("2026-08-09".to_string(), 600, 615)]);
+    }
+
+    #[test]
+    fn timer_windows_reject_a_same_day_stop_before_start() {
+        let timer = active_timer_for_test("2026-08-09", 600);
+        let result = build_timer_entry_windows(
+            &timer,
+            &TimerStopInput {
+                stop_date: "2026-08-09".to_string(),
+                stop_minute: 599,
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("backward timer range should fail"),
+            "timer stop time cannot be before its start time"
+        );
+    }
+
+    #[test]
+    fn timer_windows_split_a_cross_midnight_range() {
+        let timer = active_timer_for_test("2026-08-09", 1430);
+        let windows = build_timer_entry_windows(
+            &timer,
+            &TimerStopInput {
+                stop_date: "2026-08-10".to_string(),
+                stop_minute: 40,
+            },
+        )
+        .expect("timer range should resolve");
+
+        assert_eq!(
+            windows,
+            vec![
+                ("2026-08-09".to_string(), 1425, 1440),
+                ("2026-08-10".to_string(), 0, 45),
+            ]
+        );
     }
 
     #[test]
@@ -9365,6 +9627,36 @@ mod tests {
         .expect("activity saves");
 
         (engagement_id, activity_id)
+    }
+
+    #[test]
+    fn active_timer_persists_and_clears_as_a_singleton() {
+        let connection = test_connection();
+        let (engagement_id, activity_id) = create_test_engagement_with_activity(&connection);
+
+        db::insert_active_timer(
+            &connection,
+            &engagement_id,
+            &activity_id,
+            "2026-08-09",
+            600,
+            "Control testing",
+        )
+        .expect("timer should save");
+
+        let timer = db::get_active_timer(&connection)
+            .expect("timer should load")
+            .expect("timer should exist");
+        assert_eq!(timer.engagement_id, engagement_id);
+        assert_eq!(timer.activity_id, activity_id);
+        assert_eq!(timer.start_date, "2026-08-09");
+        assert_eq!(timer.start_minute, 600);
+        assert_eq!(timer.description, "Control testing");
+
+        db::clear_active_timer(&connection).expect("timer should clear");
+        assert!(db::get_active_timer(&connection)
+            .expect("cleared timer should load")
+            .is_none());
     }
 
     fn prepared_entry_for_test(

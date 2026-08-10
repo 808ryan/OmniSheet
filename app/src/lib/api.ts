@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 
 import { isTauriRuntime } from './runtime'
 import type {
+  ActiveTimer,
   ActivityUpsertInput,
   AppCommandErrorShape,
   CalendarExtractInput,
@@ -41,6 +42,9 @@ import type {
   TimelineWeeklySummary,
   TimelineMonthSummaryInput,
   TimelineUpdateInput,
+  TimerStartInput,
+  TimerStopInput,
+  TimerStopResult,
 } from './types'
 
 export class AppCommandError extends Error implements AppCommandErrorShape {
@@ -344,6 +348,22 @@ export function timelineUpdateEntry(input: TimelineUpdateInput): Promise<void> {
 
 export function timelineCreateEntry(input: TimelineCreateInput): Promise<IdResult> {
   return invokeCommand<IdResult>('timeline_create_entry', { input })
+}
+
+export function timerGetActive(): Promise<ActiveTimer | null> {
+  return invokeCommand<ActiveTimer | null>('timer_get_active')
+}
+
+export function timerStart(input: TimerStartInput): Promise<ActiveTimer> {
+  return invokeCommand<ActiveTimer>('timer_start', { input })
+}
+
+export function timerStop(input: TimerStopInput): Promise<TimerStopResult> {
+  return invokeCommand<TimerStopResult>('timer_stop', { input })
+}
+
+export function timerCancel(): Promise<void> {
+  return invokeCommand<void>('timer_cancel')
 }
 
 export function quickAddSuggestions(

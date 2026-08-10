@@ -958,6 +958,47 @@ pub struct QuickAddSuggestionResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ActiveTimer {
+    pub engagement_id: String,
+    pub activity_id: String,
+    pub engagement_code: Option<String>,
+    pub engagement_name: String,
+    pub engagement_color_hex: Option<String>,
+    pub activity_code: Option<String>,
+    pub activity_name: String,
+    pub activity_color_hex: Option<String>,
+    pub start_date: String,
+    pub start_minute: i64,
+    pub started_at: i64,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimerStartInput {
+    pub engagement_id: String,
+    pub activity_id: String,
+    pub start_date: String,
+    pub start_minute: i64,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimerStopInput {
+    pub stop_date: String,
+    pub stop_minute: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimerStopResult {
+    pub created_entry_ids: Vec<String>,
+    pub touched_month_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IdResult {
     pub id: String,
 }

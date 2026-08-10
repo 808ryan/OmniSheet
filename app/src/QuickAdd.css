@@ -69,18 +69,166 @@ body.quick-add-window {
   font: inherit;
 }
 
+.quick-add-command-panel,
 .quick-add-llm-panel {
   min-width: 0;
   display: grid;
   gap: 0.5rem;
 }
 
+.quick-add-command-header,
 .quick-add-llm-header {
   min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+}
+
+.quick-add-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.quick-add-timer-mode-button,
+.quick-add-bulk-toggle,
+.quick-add-discard-button,
+.quick-add-stop-button {
+  border: 0;
+  color: var(--quick-add-muted);
+  font: inherit;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.quick-add-timer-mode-button {
+  width: 1.9rem;
+  height: 1.9rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.quick-add-timer-mode-icon {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.quick-add-timer-mode-button:hover:not(:disabled),
+.quick-add-timer-mode-button:focus-visible,
+.quick-add-timer-mode-button.is-active {
+  background: rgba(31, 122, 255, 0.1);
+  color: var(--quick-add-accent);
+}
+
+.quick-add-timer-mode-button:focus-visible,
+.quick-add-bulk-toggle:focus-visible,
+.quick-add-stop-button:focus-visible {
+  outline: 2px solid rgba(31, 122, 255, 0.34);
+  outline-offset: 2px;
+}
+
+.quick-add-discard-button {
+  padding: 0.28rem 0.18rem;
+  background: transparent;
+  font-size: 0.66rem;
+}
+
+.quick-add-discard-button:hover:not(:disabled),
+.quick-add-discard-button:focus-visible {
+  color: var(--quick-add-danger);
+}
+
+.quick-add-timer-mode-button:disabled,
+.quick-add-stop-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.quick-add-active-timer {
+  display: grid;
+  grid-template-columns: 0.22rem minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 0.58rem;
+  min-width: 0;
+  min-height: 2.7rem;
+  padding: 0.42rem 0.46rem;
+  border: 1px solid color-mix(in srgb, var(--quick-add-timer-color) 34%, var(--quick-add-hairline));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--quick-add-timer-color) 7%, rgba(255, 255, 255, 0.48));
+  box-shadow: var(--quick-add-inset);
+}
+
+.quick-add-active-timer-accent {
+  align-self: stretch;
+  border-radius: 999px;
+  background: var(--quick-add-timer-color);
+}
+
+.quick-add-active-timer-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.08rem;
+}
+
+.quick-add-active-timer-copy strong,
+.quick-add-active-timer-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-add-active-timer-copy strong {
+  font-size: 0.74rem;
+}
+
+.quick-add-active-timer-copy small {
+  color: var(--quick-add-muted);
+  font-size: 0.64rem;
+}
+
+.quick-add-active-timer time {
+  color: var(--quick-add-muted);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
+}
+
+.quick-add-stop-button {
+  min-height: 1.86rem;
+  padding: 0.3rem 0.56rem;
+  border-radius: 7px;
+  background: var(--quick-add-timer-color);
+  color: white;
+  font-size: 0.68rem;
+}
+
+.quick-add-stop-button:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+.quick-add-bulk-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.2rem 0.12rem;
+  background: transparent;
+  font-size: 0.68rem;
+  text-align: left;
+}
+
+.quick-add-bulk-toggle:hover,
+.quick-add-bulk-toggle:focus-visible {
+  color: var(--quick-add-accent);
 }
 
 .quick-add-section-title {

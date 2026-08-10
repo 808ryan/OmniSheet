@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
+    ActiveTimer, Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
     DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput, NormalizedEntry,
     OpenAiModelId, QuickAddSuggestion, TimelineDaySummary, TimelineEntry, TimelineTotalBreakdown,
     TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
@@ -197,6 +197,18 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS active_timer (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        engagement_id TEXT NOT NULL,
+        activity_id TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        start_minute INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+        FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS entry_warnings (
@@ -1540,6 +1552,82 @@ pub fn insert_manual_timeline_entry(
     )?;
 
     Ok(id)
+}
+
+pub fn get_active_timer(conn: &Connection) -> AppResult<Option<ActiveTimer>> {
+    conn.query_row(
+        r#"
+      SELECT
+        at.engagement_id,
+        at.activity_id,
+        e.code,
+        e.name,
+        e.color_hex,
+        a.code,
+        a.name,
+        a.color_hex,
+        at.start_date,
+        at.start_minute,
+        at.started_at,
+        at.description
+      FROM active_timer at
+      INNER JOIN engagements e ON e.id = at.engagement_id
+      INNER JOIN activities a ON a.id = at.activity_id
+      WHERE at.singleton_id = 1
+    "#,
+        [],
+        |row| {
+            Ok(ActiveTimer {
+                engagement_id: row.get(0)?,
+                activity_id: row.get(1)?,
+                engagement_code: row.get(2)?,
+                engagement_name: row.get(3)?,
+                engagement_color_hex: row.get(4)?,
+                activity_code: row.get(5)?,
+                activity_name: row.get(6)?,
+                activity_color_hex: row.get(7)?,
+                start_date: row.get(8)?,
+                start_minute: row.get(9)?,
+                started_at: row.get(10)?,
+                description: row.get(11)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(AppError::from)
+}
+
+pub fn insert_active_timer(
+    conn: &Connection,
+    engagement_id: &str,
+    activity_id: &str,
+    start_date: &str,
+    start_minute: i64,
+    description: &str,
+) -> AppResult<()> {
+    conn.execute(
+        r#"
+      INSERT INTO active_timer (
+        singleton_id, engagement_id, activity_id, start_date, start_minute, started_at, description
+      )
+      VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+    "#,
+        params![
+            engagement_id,
+            activity_id,
+            start_date,
+            start_minute,
+            current_unix_timestamp(),
+            description.trim(),
+        ],
+    )?;
+
+    Ok(())
+}
+
+pub fn clear_active_timer(conn: &Connection) -> AppResult<()> {
+    conn.execute("DELETE FROM active_timer WHERE singleton_id = 1", [])?;
+    Ok(())
 }
 
 pub fn add_warning(

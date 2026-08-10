@@ -282,8 +282,8 @@
   --quick-add-scroll-lane: 0.75rem;
   border-top: 1px solid rgba(158, 176, 205, 0.38);
   padding: 0.62rem 0 0;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 0.5rem;
   min-height: 0;
   height: 100%;
@@ -305,6 +305,131 @@
   font-size: 0.88rem;
   font-weight: 700;
   line-height: 1.2;
+}
+
+.quick-add-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.quick-add-start-timer-button {
+  width: 1.65rem;
+  height: 1.65rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  box-shadow: none;
+}
+
+.quick-add-start-timer-icon {
+  width: 0.94rem;
+  height: 0.94rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.quick-add-start-timer-button:hover:not(:disabled),
+.quick-add-start-timer-button:focus-visible,
+.quick-add-start-timer-button.is-active {
+  border-color: rgba(31, 122, 255, 0.18);
+  background: rgba(31, 122, 255, 0.08);
+  color: var(--accent);
+}
+
+.quick-add-active-timer {
+  display: grid;
+  grid-template-columns: 0.22rem minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  min-height: 2.55rem;
+  padding: 0.38rem 0.42rem;
+  border: 1px solid color-mix(in srgb, var(--quick-add-timer-color) 34%, var(--outline));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--quick-add-timer-color) 7%, rgba(255, 255, 255, 0.78));
+  box-shadow: var(--glass-inset);
+}
+
+.quick-add-active-timer-accent {
+  align-self: stretch;
+  border-radius: 999px;
+  background: var(--quick-add-timer-color);
+}
+
+.quick-add-active-timer-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.05rem;
+}
+
+.quick-add-active-timer-copy strong,
+.quick-add-active-timer-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-add-active-timer-copy strong {
+  font-size: 0.72rem;
+}
+
+.quick-add-active-timer-copy small {
+  color: var(--ink-soft);
+  font-size: 0.63rem;
+}
+
+.quick-add-active-timer time {
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
+}
+
+.quick-add-stop-timer-button {
+  min-height: 1.72rem;
+  padding: 0.26rem 0.48rem;
+  border: 0;
+  border-radius: 7px;
+  background: var(--quick-add-timer-color);
+  color: white;
+  font-size: 0.66rem;
+  font-weight: 740;
+  box-shadow: none;
+}
+
+.quick-add-discard-timer-button {
+  min-height: 1.65rem;
+  padding: 0.22rem 0.16rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.63rem;
+  font-weight: 720;
+  box-shadow: none;
+}
+
+.quick-add-discard-timer-button:hover:not(:disabled),
+.quick-add-discard-timer-button:focus-visible {
+  color: var(--danger);
+}
+
+.quick-add-stop-timer-button:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+.quick-add-browse-label {
+  margin: 0.18rem 0 -0.18rem;
+  color: var(--ink-soft);
+  font-size: 0.66rem;
+  font-weight: 720;
 }
 
 .quick-add-settings-button {
@@ -374,6 +499,7 @@
   position: relative;
   min-height: 0;
   height: 100%;
+  flex: 1 1 auto;
   overflow: visible;
 }
 
@@ -1765,6 +1891,8 @@ button.danger:hover:not(:disabled) {
 .timeline-canvas {
   position: relative;
   min-height: 100%;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .timeline-hour-mark {
@@ -1985,6 +2113,8 @@ button.danger:hover:not(:disabled) {
 .week-timeline-body {
   position: relative;
   isolation: isolate;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .week-timeline-hour-mark {
@@ -2158,6 +2288,116 @@ button.danger:hover:not(:disabled) {
   transition: none;
   pointer-events: none;
   z-index: 3;
+}
+
+.timeline-block.active-timer-preview {
+  border: 2px dashed var(--timeline-block-accent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0.22)),
+    var(--timeline-block-fill);
+  cursor: default;
+  pointer-events: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 2px 7px rgba(15, 23, 42, 0.08);
+  transform: none;
+}
+
+.timeline-block.active-timer-preview::before {
+  opacity: 0.72;
+}
+
+.timeline-block.active-timer-preview:hover {
+  transform: none;
+}
+
+.timeline-create-preview {
+  position: absolute;
+  z-index: 5;
+  min-height: 15px;
+  padding: 0.18rem 0.42rem;
+  overflow: hidden;
+  border: 2px dashed rgba(31, 122, 255, 0.72);
+  border-radius: 9px;
+  background: rgba(31, 122, 255, 0.12);
+  color: #174ea6;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.52);
+}
+
+.timeline-create-preview span {
+  display: block;
+  overflow: hidden;
+  font-size: 0.68rem;
+  font-weight: 760;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-create-popover {
+  position: fixed;
+  z-index: 1700;
+  width: min(360px, calc(100vw - 24px));
+  padding: 0.72rem;
+  border: 1px solid var(--outline-strong);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--ink);
+  box-shadow:
+    0 22px 52px rgba(16, 24, 40, 0.24),
+    var(--glass-inset);
+  backdrop-filter: blur(20px) saturate(1.08);
+  -webkit-backdrop-filter: blur(20px) saturate(1.08);
+}
+
+.timeline-create-popover-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+  margin-bottom: 0.62rem;
+}
+
+.timeline-create-popover-header > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.12rem;
+}
+
+.timeline-create-popover-header strong {
+  font-size: 0.84rem;
+}
+
+.timeline-create-popover-header span:not(.control-icon) {
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+}
+
+.timeline-create-popover-close {
+  width: 1.7rem;
+  height: 1.7rem;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  box-shadow: none;
+}
+
+.timeline-create-popover-close:hover,
+.timeline-create-popover-close:focus-visible {
+  background: rgba(31, 122, 255, 0.08);
+  color: var(--accent);
+}
+
+.timeline-create-popover .activity-command-results {
+  max-height: min(15rem, 35vh);
 }
 
 .timeline-block-label {
