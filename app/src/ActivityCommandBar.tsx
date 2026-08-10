@@ -1,12 +1,16 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type {
+  FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react'
 
-import { PlusIcon, SearchIcon } from './InterfaceIcons'
+import { ChevronDownIcon, PlusIcon, SearchIcon } from './InterfaceIcons'
 import {
   formatEntityDisplayLabel,
   formatEntityPrimaryLabel,
 } from './lib/quickEntry'
-import type { QuickEntryActivityView } from './lib/quickEntry'
+import type { QuickEntryActivityView, QuickEntryDragState } from './lib/quickEntry'
 import './ActivityCommandBar.css'
 
 const DEFAULT_RESULT_LIMIT = 7
@@ -28,9 +32,23 @@ interface ActivityCommandBarProps {
   clearAfterSubmit?: boolean
   resultLimit?: number
   resultsMaterial?: 'translucent' | 'opaque'
+  resultsPresentation?: 'popover' | 'inline'
   actionIcon?: 'plus'
   onSubmit: (activity: QuickEntryActivityView, durationMinutes: number) => void | Promise<void>
   onCancel?: () => void
+  onOpenChange?: (isOpen: boolean) => void
+  resultDragState?: QuickEntryDragState | null
+  onResultPointerDown?: (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    activity: QuickEntryActivityView,
+    durationMinutes: number,
+  ) => void
+  onResultPointerMove?: (event: ReactPointerEvent<HTMLButtonElement>) => void
+  onResultPointerUp?: (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    activity: QuickEntryActivityView,
+  ) => void
+  onResultPointerCancel?: (event: ReactPointerEvent<HTMLButtonElement>) => void
 }
 
 export function ActivityCommandBar({
@@ -48,9 +66,16 @@ export function ActivityCommandBar({
   clearAfterSubmit = true,
   resultLimit = DEFAULT_RESULT_LIMIT,
   resultsMaterial = 'translucent',
+  resultsPresentation = 'popover',
   actionIcon,
   onSubmit,
   onCancel,
+  onOpenChange,
+  resultDragState,
+  onResultPointerDown,
+  onResultPointerMove,
+  onResultPointerUp,
+  onResultPointerCancel,
 }: ActivityCommandBarProps) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const listboxId = useId()
@@ -76,6 +101,10 @@ export function ActivityCommandBar({
     })
     return () => window.cancelAnimationFrame(frame)
   }, [autoFocus])
+
+  useEffect(() => {
+    onOpenChange?.(isOpen)
+  }, [isOpen, onOpenChange])
 
   const selectedDurationMinutes = fixedDurationMinutes ?? durationMinutes
 
@@ -126,10 +155,16 @@ export function ActivityCommandBar({
   }
 
   const activeResult = results[resolvedActiveIndex] ?? null
+  const supportsResultDurationDrag = Boolean(
+    onResultPointerDown
+    && onResultPointerMove
+    && onResultPointerUp
+    && onResultPointerCancel,
+  )
 
   return (
     <form
-      className={`activity-command results-${resultsMaterial}`}
+      className={`activity-command results-${resultsMaterial} presentation-${resultsPresentation} ${isOpen ? 'is-open' : ''}`}
       onSubmit={onFormSubmit}
       onFocus={() => setIsOpen(true)}
       onBlur={(event) => {
@@ -165,17 +200,20 @@ export function ActivityCommandBar({
           />
         </div>
         {showDuration && fixedDurationMinutes === undefined ? (
-          <select
-            className="activity-command-duration"
-            value={durationMinutes}
-            onChange={(event) => setDurationMinutes(Number(event.target.value))}
-            disabled={disabled}
-            aria-label="Entry duration"
-          >
-            {DURATION_OPTIONS.map((minutes) => (
-              <option key={minutes} value={minutes}>{formatDuration(minutes)}</option>
-            ))}
-          </select>
+          <span className="activity-command-duration-shell">
+            <select
+              className="activity-command-duration"
+              value={durationMinutes}
+              onChange={(event) => setDurationMinutes(Number(event.target.value))}
+              disabled={disabled}
+              aria-label="Entry duration"
+            >
+              {DURATION_OPTIONS.map((minutes) => (
+                <option key={minutes} value={minutes}>{formatDuration(minutes)}</option>
+              ))}
+            </select>
+            <ChevronDownIcon className="activity-command-duration-icon" />
+          </span>
         ) : showDuration && fixedDurationMinutes !== undefined ? (
           <span className="activity-command-fixed-duration">
             {formatDuration(fixedDurationMinutes)}
@@ -189,6 +227,9 @@ export function ActivityCommandBar({
             <p className="activity-command-empty">{emptyMessage}</p>
           ) : results.map((item, index) => {
             const isActive = index === resolvedActiveIndex
+            const isDurationDragging =
+              resultDragState?.activityId === item.activity.id
+              && resultDragState.engagementId === item.engagement.id
             const activityLabel = formatEntityPrimaryLabel(
               item.activity.name,
               item.activity.code,
@@ -207,11 +248,25 @@ export function ActivityCommandBar({
                 type="button"
                 role="option"
                 aria-selected={isActive}
-                aria-label={`${actionLabel} ${activityLabel} for ${engagementLabel}`}
-                className={`activity-command-result ${isActive ? 'is-active' : ''}`}
+                aria-label={supportsResultDurationDrag
+                  ? `${actionLabel} ${activityLabel}, ${engagementLabel}, for ${formatDuration(selectedDurationMinutes)}. Drag right to increase duration.`
+                  : `${actionLabel} ${activityLabel} for ${engagementLabel}`}
+                className={`activity-command-result ${isActive ? 'is-active' : ''} ${supportsResultDurationDrag ? 'supports-duration-drag' : ''} ${isDurationDragging ? 'is-duration-dragging' : ''}`}
                 onMouseDown={(event) => event.preventDefault()}
                 onMouseEnter={() => setActiveIndex(index)}
-                onClick={() => submitActivity(item)}
+                onClick={(event) => {
+                  if (!supportsResultDurationDrag || event.detail === 0) {
+                    submitActivity(item)
+                  }
+                }}
+                onPointerDown={supportsResultDurationDrag
+                  ? (event) => onResultPointerDown?.(event, item, selectedDurationMinutes)
+                  : undefined}
+                onPointerMove={supportsResultDurationDrag ? onResultPointerMove : undefined}
+                onPointerUp={supportsResultDurationDrag
+                  ? (event) => onResultPointerUp?.(event, item)
+                  : undefined}
+                onPointerCancel={supportsResultDurationDrag ? onResultPointerCancel : undefined}
                 disabled={disabled}
               >
                 <span
@@ -224,12 +279,14 @@ export function ActivityCommandBar({
                   <small>{engagementLabel}</small>
                 </span>
                 <span
-                  className={`activity-command-result-action ${actionIcon ? 'is-icon' : ''}`}
+                  className={`activity-command-result-action ${actionIcon && !isDurationDragging ? 'is-icon' : ''} ${isDurationDragging ? 'is-duration' : ''}`}
                   aria-hidden="true"
                 >
-                  {actionIcon === 'plus'
-                    ? <PlusIcon className="activity-command-result-action-icon" />
-                    : actionLabel}
+                  {isDurationDragging
+                    ? formatDuration(resultDragState?.durationMinutes ?? selectedDurationMinutes)
+                    : actionIcon === 'plus'
+                      ? <PlusIcon className="activity-command-result-action-icon" />
+                      : actionLabel}
                 </span>
               </button>
             )

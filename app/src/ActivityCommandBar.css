@@ -62,12 +62,20 @@
   transform: translateY(-50%);
 }
 
-.activity-command-duration,
+.activity-command-duration-shell,
 .activity-command-fixed-duration {
   flex: 0 0 auto;
-  min-width: 4.25rem;
+  min-width: 4.15rem;
+}
+
+.activity-command-duration-shell {
+  position: relative;
+  display: grid;
+}
+
+.activity-command-duration,
+.activity-command-fixed-duration {
   min-height: 2.2rem;
-  padding: 0.42rem 0.5rem;
   border: 1px solid var(--border, rgba(97, 112, 132, 0.25));
   border-radius: 0.62rem;
   background: var(--surface-raised, rgba(255, 255, 255, 0.84));
@@ -77,10 +85,55 @@
   font-weight: 700;
 }
 
+.activity-command-duration {
+  width: 100%;
+  min-width: 0;
+  padding: 0.42rem 1.15rem;
+  appearance: none;
+  cursor: pointer;
+  text-align: center;
+  text-align-last: center;
+}
+
+.activity-command-duration:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent, #0f7e8e) 34%, var(--border, rgba(97, 112, 132, 0.25)));
+}
+
+.activity-command-duration:focus {
+  border-color: var(--accent, #0f7e8e);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #0f7e8e) 18%, transparent);
+}
+
+.activity-command-duration:disabled {
+  cursor: default;
+}
+
+.activity-command-duration:disabled + .activity-command-duration-icon {
+  opacity: 0.48;
+}
+
+.activity-command-duration-icon {
+  position: absolute;
+  top: 50%;
+  right: 0.48rem;
+  width: 0.65rem;
+  height: 0.65rem;
+  color: var(--text-muted, #657184);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
 .activity-command-fixed-duration {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0.42rem 0.5rem;
 }
 
 .activity-command-results {
@@ -109,6 +162,30 @@
   -webkit-backdrop-filter: none;
 }
 
+.activity-command.presentation-inline.is-open {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.activity-command.presentation-inline .activity-command-results,
+.activity-command.presentation-inline.results-opaque .activity-command-results {
+  position: static;
+  z-index: auto;
+  align-content: start;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  padding: 0.12rem 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .activity-command-result {
   position: relative;
   display: grid;
@@ -133,6 +210,16 @@
 .activity-command-result:focus-visible {
   outline: 2px solid var(--accent, #0f7e8e);
   outline-offset: -2px;
+}
+
+.activity-command-result.supports-duration-drag {
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.activity-command-result.is-duration-dragging {
+  cursor: ew-resize;
 }
 
 .activity-command-result-accent {
@@ -176,6 +263,12 @@
   height: 1.45rem;
   display: grid;
   place-items: center;
+}
+
+.activity-command-result-action.is-duration {
+  min-width: 2rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .activity-command-result-action-icon {
