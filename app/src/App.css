@@ -186,6 +186,7 @@
 }
 
 .sidebar-capture.is-llm-collapsed {
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0.55rem;
 }
 

@@ -1505,6 +1505,7 @@ function App() {
       preferences: quickAddPreferences,
       suggestions: [],
       suggestedKeys: [],
+      includeHiddenShortcuts: true,
     }).orderedActivities,
     [engagements, quickAddPreferences],
   )
@@ -1604,7 +1605,7 @@ function App() {
       resizeObserver?.disconnect()
       window.removeEventListener('resize', scheduleUpdate)
     }
-  }, [quickAddActivityGroups, updateQuickAddScrollMetrics])
+  }, [isLlmEntryCollapsed, quickAddActivityGroups, updateQuickAddScrollMetrics])
   const reportingDayIndexes = useMemo(() => (
     buildReportingDisplayAllDayIndexes(weeklySummary)
   ), [weeklySummary])

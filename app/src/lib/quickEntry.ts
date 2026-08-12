@@ -61,6 +61,7 @@ interface BuildQuickEntryModelInput {
   suggestions: QuickAddSuggestion[]
   suggestedKeys?: string[]
   search?: string
+  includeHiddenShortcuts?: boolean
 }
 
 export function quickEntryActivityKey(engagementId: string, activityId: string): string {
@@ -181,6 +182,7 @@ export function buildQuickEntryModel({
   suggestions,
   suggestedKeys,
   search = '',
+  includeHiddenShortcuts = false,
 }: BuildQuickEntryModelInput): QuickEntryModel {
   const quickAddPreferences = sanitizeQuickAddPreferences(preferences, engagements)
   const suggestionByKey = new Map<string, QuickAddSuggestion>()
@@ -226,6 +228,7 @@ export function buildQuickEntryModel({
     allActivities,
     suggestedActivities,
     quickAddPreferences,
+    includeHiddenShortcuts,
   )
   const visibleActivities = filterQuickEntryActivities(orderedActivities, search)
   const groups = groupQuickEntryActivities(visibleActivities)
@@ -340,6 +343,7 @@ function orderQuickEntryActivities(
   allActivities: QuickEntryActivityView[],
   suggestedActivities: QuickEntryActivityView[],
   quickAddPreferences: QuickAddPreferences,
+  includeHiddenShortcuts: boolean,
 ): QuickEntryActivityView[] {
   const hiddenEngagementIds = new Set(quickAddPreferences.hiddenEngagementIds)
   const hiddenActivityIds = new Set(quickAddPreferences.hiddenActivityIds)
@@ -365,8 +369,11 @@ function orderQuickEntryActivities(
   const groups = new Map<string, QuickEntryActivityGroup>()
   for (const item of allActivities) {
     if (
-      hiddenEngagementIds.has(item.engagement.id)
-      || hiddenActivityIds.has(item.activity.id)
+      !includeHiddenShortcuts
+      && (
+        hiddenEngagementIds.has(item.engagement.id)
+        || hiddenActivityIds.has(item.activity.id)
+      )
     ) {
       continue
     }
