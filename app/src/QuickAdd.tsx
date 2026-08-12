@@ -258,6 +258,7 @@ function QuickAdd() {
       preferences: quickAddPreferences,
       suggestions: [],
       suggestedKeys: [],
+      includeHiddenShortcuts: true,
     }).orderedActivities,
     [engagements, quickAddPreferences],
   )
