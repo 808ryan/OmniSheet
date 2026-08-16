@@ -11,7 +11,7 @@ import { createPortal, flushSync } from 'react-dom'
 import { emit, listen } from '@tauri-apps/api/event'
 
 import { ActivityCommandBar } from './ActivityCommandBar'
-import { TimerIcon } from './InterfaceIcons'
+import { StopIcon, TimerIcon, TrashIcon } from './InterfaceIcons'
 import {
   activityDelete,
   activityUpsert,
@@ -44,6 +44,7 @@ import {
   timerGetActive,
   timerStart,
   timerStop,
+  timerUpdateActive,
   transcribeAudioClip,
   timelineCreateEntry,
   timelineDeleteEntry,
@@ -264,6 +265,15 @@ interface EntryDraft {
   startTime: string
   endTime: string
   preserveEndOfDay: boolean
+}
+
+interface ActiveTimerDraft {
+  startedAt: number
+  startDate: string
+  startMinute: number
+  engagementId: string
+  activityId: string
+  description: string
 }
 
 type EntryAutoSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
@@ -1053,9 +1063,13 @@ function App() {
   const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([])
   const [weekTimeline, setWeekTimeline] = useState<TimelineWeekView | null>(null)
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
+  const [selectedActiveTimerDate, setSelectedActiveTimerDate] = useState<string | null>(null)
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
   const [entryAutoSaveStatus, setEntryAutoSaveStatus] = useState<EntryAutoSaveStatus>('idle')
+  const [activeTimerDraft, setActiveTimerDraft] = useState<ActiveTimerDraft | null>(null)
+  const [activeTimerAutoSaveStatus, setActiveTimerAutoSaveStatus] =
+    useState<EntryAutoSaveStatus>('idle')
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
@@ -1086,9 +1100,13 @@ function App() {
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
   const selectedDateRef = useRef(selectedDate)
   const selectedEntryIdRef = useRef<string | null>(selectedEntryId)
+  const activeTimerRef = useRef<ActiveTimer | null>(activeTimer)
   const entryDraftAutoSaveTimeoutRef = useRef<number | null>(null)
   const entryDraftAutoSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const entryDraftLastSavedKeyRef = useRef<string | null>(null)
+  const activeTimerDraftAutoSaveTimeoutRef = useRef<number | null>(null)
+  const activeTimerDraftSaveChainRef = useRef<Promise<boolean>>(Promise.resolve(true))
+  const activeTimerDraftLastSavedKeyRef = useRef<string | null>(null)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
   const timelineCreateDragStateRef = useRef<TimelineCreateDragState | null>(null)
   const timelineMutationInFlightRef = useRef(false)
@@ -1347,6 +1365,7 @@ function App() {
     () => loadedTimelineEntries.find((entry) => entry.id === selectedEntryId) ?? null,
     [loadedTimelineEntries, selectedEntryId],
   )
+  const isActiveTimerSelected = Boolean(activeTimer && selectedActiveTimerDate)
   const selectedEntryHasMultiEventSource = (selectedEntry?.sourceMessageEntryCount ?? 0) > 1
   const visibleMonthSummaries = useMemo(
     () => monthSummaryCache[visibleMonth] ?? [],
@@ -2142,6 +2161,20 @@ function App() {
     return engagement?.activities ?? []
   }, [engagements, entryDraft])
 
+  const activeTimerAvailableEngagements = useMemo(
+    () => engagements.filter((engagement) => engagement.activities.length > 0),
+    [engagements],
+  )
+  const activeTimerAvailableActivities = useMemo(() => {
+    if (!activeTimerDraft?.engagementId) {
+      return [] as Activity[]
+    }
+
+    return engagements.find(
+      (engagement) => engagement.id === activeTimerDraft.engagementId,
+    )?.activities ?? []
+  }, [activeTimerDraft, engagements])
+
   const engagementColorById = useMemo(() => {
     const values = new Map<string, string | null>()
     for (const engagement of engagements) {
@@ -2721,7 +2754,10 @@ function App() {
     let cancelled = false
     let unlisten: (() => void) | null = null
 
-    void listen(TIMER_CHANGED_EVENT, () => {
+    void listen<{ origin?: string }>(TIMER_CHANGED_EVENT, (event) => {
+      if (event.payload?.origin === 'main-live-timer-editor') {
+        return
+      }
       void loadActiveTimer()
     }).then((nextUnlisten) => {
       if (cancelled) {
@@ -3611,6 +3647,7 @@ function App() {
     entryDraftLastSavedKeyRef.current = null
     setEntryAutoSaveStatus('idle')
     setSelectedEntryId(null)
+    setSelectedActiveTimerDate(null)
     setHighlightedEntryId(null)
     setEntryDraft(null)
     setTimelineContextMenu(null)
@@ -4315,6 +4352,33 @@ function App() {
   useEffect(() => {
     selectedEntryIdRef.current = selectedEntryId
   }, [selectedEntryId])
+
+  useEffect(() => {
+    activeTimerRef.current = activeTimer
+
+    if (!activeTimer) {
+      if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+        activeTimerDraftAutoSaveTimeoutRef.current = null
+      }
+      activeTimerDraftLastSavedKeyRef.current = null
+      setActiveTimerDraft(null)
+      setActiveTimerAutoSaveStatus('idle')
+      setSelectedActiveTimerDate(null)
+      return
+    }
+
+    setActiveTimerDraft((previous) => {
+      if (previous && isActiveTimerDraftForTimer(previous, activeTimer)) {
+        return previous
+      }
+
+      const nextDraft = buildActiveTimerDraft(activeTimer)
+      activeTimerDraftLastSavedKeyRef.current = serializeActiveTimerDraft(nextDraft)
+      setActiveTimerAutoSaveStatus('saved')
+      return nextDraft
+    })
+  }, [activeTimer])
 
   useEffect(() => {
     timelineEntriesRef.current = loadedTimelineEntries
@@ -5610,6 +5674,7 @@ function App() {
     if (options?.syncSelectedDate) {
       updateSelectedDate(entry.date, { clearSelection: false })
     }
+    setSelectedActiveTimerDate(null)
     setHighlightedEntryId(null)
     setSelectedEntryId(entry.id)
     entryDraftLastSavedKeyRef.current = serializeEntryDraft(nextDraft)
@@ -5642,6 +5707,39 @@ function App() {
     }
 
     onSelectEntry(entry, { syncSelectedDate: true })
+  }
+
+  const onSelectActiveTimerBlock = (
+    entry: TimelineEntry,
+    options?: {
+      syncSelectedDate?: boolean
+    },
+  ) => {
+    if (!activeTimer || !isActiveTimerPreviewEntry(entry)) {
+      return
+    }
+
+    if (options?.syncSelectedDate) {
+      updateSelectedDate(entry.date, { clearSelection: false })
+    }
+    if (entryDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
+      entryDraftAutoSaveTimeoutRef.current = null
+    }
+    entryDraftLastSavedKeyRef.current = null
+    setEntryAutoSaveStatus('idle')
+    setSelectedEntryId(null)
+    setHighlightedEntryId(null)
+    setEntryDraft(null)
+    setTimelineContextMenu(null)
+    setSelectedActiveTimerDate(entry.date)
+
+    if (!activeTimerDraft || !isActiveTimerDraftForTimer(activeTimerDraft, activeTimer)) {
+      const nextDraft = buildActiveTimerDraft(activeTimer)
+      activeTimerDraftLastSavedKeyRef.current = serializeActiveTimerDraft(nextDraft)
+      setActiveTimerAutoSaveStatus('saved')
+      setActiveTimerDraft(nextDraft)
+    }
   }
 
   const onStartTimelineDrag = (
@@ -5928,6 +6026,102 @@ function App() {
     ],
   )
 
+  const saveActiveTimerDraftSnapshot = useCallback(
+    async (draft: ActiveTimerDraft): Promise<boolean> => {
+      const currentTimer = activeTimerRef.current
+      if (!currentTimer || !isActiveTimerDraftForTimer(draft, currentTimer)) {
+        return false
+      }
+      if (!draft.engagementId || !draft.activityId) {
+        setErrorMessage('A running timer requires an engagement and activity.')
+        setActiveTimerAutoSaveStatus('error')
+        return false
+      }
+
+      setActiveTimerAutoSaveStatus('saving')
+      setErrorMessage(null)
+
+      try {
+        const updatedTimer = await timerUpdateActive({
+          engagementId: draft.engagementId,
+          activityId: draft.activityId,
+          description: draft.description,
+        })
+        if (!activeTimerRef.current || !isActiveTimerDraftForTimer(draft, activeTimerRef.current)) {
+          return false
+        }
+
+        activeTimerRef.current = updatedTimer
+        setActiveTimer(updatedTimer)
+        activeTimerDraftLastSavedKeyRef.current = serializeActiveTimerDraft(draft)
+        setActiveTimerAutoSaveStatus('saved')
+        await emit(TIMER_CHANGED_EVENT, { origin: 'main-live-timer-editor' })
+        return true
+      } catch (error) {
+        if (activeTimerRef.current && isActiveTimerDraftForTimer(draft, activeTimerRef.current)) {
+          setActiveTimerAutoSaveStatus('error')
+          setErrorMessage(formatActionErrorMessage(error))
+        }
+        return false
+      }
+    },
+    [],
+  )
+
+  const queueActiveTimerDraftSave = useCallback(
+    (draft: ActiveTimerDraft) => {
+      activeTimerDraftSaveChainRef.current = activeTimerDraftSaveChainRef.current
+        .catch(() => false)
+        .then(() => saveActiveTimerDraftSnapshot(draft))
+      return activeTimerDraftSaveChainRef.current
+    },
+    [saveActiveTimerDraftSnapshot],
+  )
+
+  useEffect(() => {
+    if (!activeTimerDraft) {
+      return undefined
+    }
+
+    const draftKey = serializeActiveTimerDraft(activeTimerDraft)
+    if (draftKey === activeTimerDraftLastSavedKeyRef.current) {
+      return undefined
+    }
+
+    if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+    }
+
+    activeTimerDraftAutoSaveTimeoutRef.current = window.setTimeout(() => {
+      const draftToSave = activeTimerDraft
+      activeTimerDraftAutoSaveTimeoutRef.current = null
+      void queueActiveTimerDraftSave(draftToSave)
+    }, 700)
+
+    return () => {
+      if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+        activeTimerDraftAutoSaveTimeoutRef.current = null
+      }
+    }
+  }, [activeTimerDraft, queueActiveTimerDraftSave])
+
+  const flushActiveTimerDraft = useCallback(async (): Promise<boolean> => {
+    if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+      activeTimerDraftAutoSaveTimeoutRef.current = null
+    }
+
+    if (
+      activeTimerDraft
+      && serializeActiveTimerDraft(activeTimerDraft) !== activeTimerDraftLastSavedKeyRef.current
+    ) {
+      return queueActiveTimerDraftSave(activeTimerDraft)
+    }
+
+    return activeTimerDraftSaveChainRef.current.catch(() => false)
+  }, [activeTimerDraft, queueActiveTimerDraftSave])
+
   const startActivityTimer = useCallback(
     (engagement: Engagement, activity: Activity) => {
       if (timelineMutationInFlightRef.current || activeTimer) {
@@ -5956,10 +6150,6 @@ function App() {
       return
     }
 
-    const stoppedActivityName = formatEntityDisplayLabel(
-      activeTimer.activityName,
-      activeTimer.activityCode,
-    )
     const now = new Date()
     const elapsedHours = (now.getTime() - activeTimer.startedAt * 1000) / 3_600_000
     if (
@@ -5971,11 +6161,22 @@ function App() {
     const date = formatDate(now)
 
     void runTimelineMutation(async () => {
+      if (!await flushActiveTimerDraft()) {
+        return
+      }
+      const timerToStop = activeTimerRef.current ?? activeTimer
+      const stoppedActivityName = formatEntityDisplayLabel(
+        timerToStop.activityName,
+        timerToStop.activityCode,
+      )
       const result = await timerStop({
         stopDate: date,
         stopMinute: now.getHours() * HOUR_IN_MINUTES + now.getMinutes(),
       })
+      activeTimerRef.current = null
       setActiveTimer(null)
+      setSelectedActiveTimerDate(null)
+      setActiveTimerDraft(null)
       setActiveView('timeline')
       updateSelectedDate(date, { clearSelection: false })
       setSelectedEntryId(null)
@@ -5999,6 +6200,7 @@ function App() {
     })
   }, [
     activeTimer,
+    flushActiveTimerDraft,
     invalidateMonthSummaries,
     loadQuickAddSuggestions,
     loadTimeline,
@@ -6019,8 +6221,16 @@ function App() {
     }
 
     void runTimelineMutation(async () => {
+      if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+        activeTimerDraftAutoSaveTimeoutRef.current = null
+      }
+      await activeTimerDraftSaveChainRef.current.catch(() => false)
       await timerCancel()
+      activeTimerRef.current = null
       setActiveTimer(null)
+      setSelectedActiveTimerDate(null)
+      setActiveTimerDraft(null)
       setSuccessMessage('Timer discarded.')
       await emit(TIMER_CHANGED_EVENT)
     })
@@ -7777,6 +7987,161 @@ function App() {
           ? 'Not saved'
           : ''
 
+  const activeTimerAutoSaveStatusLabel =
+    activeTimerAutoSaveStatus === 'saving'
+      ? 'Saving...'
+      : activeTimerAutoSaveStatus === 'saved'
+        ? 'Saved'
+        : activeTimerAutoSaveStatus === 'error'
+          ? 'Not saved'
+          : ''
+
+  const liveTimerEditorPanel = activeTimer && activeTimerDraft && isActiveTimerSelected ? (
+    <aside className="timeline-editor live-timer-editor">
+      <div className="timeline-editor-header live-timer-editor-header">
+        <div className="live-timer-editor-heading">
+          <h3>Edit Entry</h3>
+          <span className="live-timer-editor-status" aria-label={`Timer live for ${formatActiveTimerElapsed(activeTimer, timelineClock)}`}>
+            <span className="live-timer-status-dot" aria-hidden="true" />
+            <span>LIVE</span>
+            <span aria-hidden="true">·</span>
+            <time>{formatActiveTimerElapsed(activeTimer, timelineClock)}</time>
+          </span>
+        </div>
+        <button
+          type="button"
+          className="timeline-editor-close"
+          aria-label="Close edit entry"
+          title="Close edit entry"
+          onClick={clearTimelineSelection}
+          disabled={isBusy}
+        >
+          <span className="control-icon close-icon" aria-hidden="true" />
+        </button>
+      </div>
+
+      <form
+        className="stack live-timer-editor-form"
+        onSubmit={(event) => {
+          event.preventDefault()
+          void flushActiveTimerDraft()
+        }}
+      >
+        <label>
+          Date
+          <output className="live-timer-readonly-value">
+            <time dateTime={activeTimer.startDate}>{activeTimer.startDate}</time>
+          </output>
+        </label>
+        <label>
+          Engagement
+          <select
+            value={activeTimerDraft.engagementId}
+            onChange={(event) => {
+              const engagementId = event.target.value
+              const engagement = activeTimerAvailableEngagements.find(
+                (candidate) => candidate.id === engagementId,
+              )
+              setActiveTimerDraft((previous) => previous
+                ? {
+                    ...previous,
+                    engagementId,
+                    activityId: engagement?.activities[0]?.id ?? '',
+                  }
+                : previous)
+            }}
+            disabled={isBusy}
+          >
+            {activeTimerAvailableEngagements.map((engagement) => (
+              <option key={engagement.id} value={engagement.id}>
+                {formatEntityDisplayLabel(engagement.name, engagement.code)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Activity
+          <select
+            value={activeTimerDraft.activityId}
+            onChange={(event) => setActiveTimerDraft((previous) => previous
+              ? {
+                  ...previous,
+                  activityId: event.target.value,
+                }
+              : previous)}
+            disabled={isBusy}
+          >
+            {activeTimerAvailableActivities.map((activity) => (
+              <option key={activity.id} value={activity.id}>
+                {formatEntityDisplayLabel(activity.name, activity.code)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="live-timer-time-grid">
+          <label>
+            Start
+            <output className="live-timer-readonly-value">
+              <time>{minuteToLabel(activeTimer.startMinute)}</time>
+            </output>
+          </label>
+          <label>
+            End
+            <output className="live-timer-readonly-value is-running">
+              <span className="live-timer-status-dot" aria-hidden="true" />
+              <strong>Running now</strong>
+            </output>
+          </label>
+        </div>
+        <label>
+          Description
+          <textarea
+            aria-label="Live timer description"
+            rows={4}
+            value={activeTimerDraft.description}
+            onChange={(event) => setActiveTimerDraft((previous) => previous
+              ? {
+                  ...previous,
+                  description: event.target.value,
+                }
+              : previous)}
+            disabled={isBusy}
+          />
+        </label>
+        <div className="live-timer-entry-actions">
+          <p
+            className={`timeline-entry-save-status ${activeTimerAutoSaveStatus}`}
+            aria-live="polite"
+          >
+            {activeTimerAutoSaveStatusLabel}
+          </p>
+          <span className="live-timer-entry-action-buttons">
+            <button
+              type="button"
+              className="live-timer-action-button is-discard"
+              onClick={discardCurrentTimer}
+              disabled={isBusy}
+              aria-label="Discard running timer"
+              title="Discard running timer"
+            >
+              <TrashIcon className="live-timer-action-icon" />
+            </button>
+            <button
+              type="button"
+              className="live-timer-action-button is-stop"
+              onClick={stopCurrentTimer}
+              disabled={isBusy}
+              aria-label="Stop and save timer"
+              title="Stop and save timer"
+            >
+              <StopIcon className="live-timer-action-icon live-timer-stop-icon" />
+            </button>
+          </span>
+        </div>
+      </form>
+    </aside>
+  ) : null
+
   const timelineEditorPanel = (
     <aside className={`timeline-editor ${entryDraft ? '' : 'is-empty'}`}>
       <div className="timeline-editor-header">
@@ -7950,8 +8315,16 @@ function App() {
           <p>
             Confidence: {(selectedEntry.confidence * 100).toFixed(0)}%
           </p>
-          <p>Source: {selectedEntry.source}</p>
-          {selectedEntry.source !== 'manual' ? (
+          <p className={selectedEntry.source === 'timer' ? 'entry-source-timer' : undefined}>
+            Source:{' '}
+            {selectedEntry.source === 'timer' ? (
+              <span>
+                <TimerIcon className="entry-source-timer-icon" />
+                Timer
+              </span>
+            ) : selectedEntry.source}
+          </p>
+          {selectedEntry.source !== 'manual' && selectedEntry.source !== 'timer' ? (
             <p>User Submission: {selectedEntry.userSubmissionText || 'Unavailable'}</p>
           ) : null}
           <p>Description: {selectedEntry.description}</p>
@@ -7990,6 +8363,7 @@ function App() {
       ) : null}
     </aside>
   )
+  const activeTimelineEditorPanel = liveTimerEditorPanel ?? timelineEditorPanel
 
   const codesCreateModal = isCodesCreateModalOpen ? createPortal(
     <div
@@ -9686,23 +10060,31 @@ function App() {
                       'Engagement',
                     )}</small>
                   </span>
-                  <time>{formatActiveTimerElapsed(activeTimer, timelineClock)}</time>
-                  <button
-                    type="button"
-                    className="quick-add-discard-timer-button"
-                    onClick={discardCurrentTimer}
-                    disabled={isBusy}
-                  >
-                    Discard
-                  </button>
-                  <button
-                    type="button"
-                    className="quick-add-stop-timer-button"
-                    onClick={stopCurrentTimer}
-                    disabled={isBusy}
-                  >
-                    Stop
-                  </button>
+                  <span className="quick-add-active-timer-controls">
+                    <time>{formatActiveTimerElapsed(activeTimer, timelineClock)}</time>
+                    <span className="quick-add-active-timer-actions">
+                      <button
+                        type="button"
+                        className="quick-add-discard-timer-button"
+                        onClick={discardCurrentTimer}
+                        disabled={isBusy}
+                        aria-label="Discard running timer"
+                        title="Discard running timer"
+                      >
+                        <TrashIcon className="quick-add-timer-action-icon" />
+                      </button>
+                      <button
+                        type="button"
+                        className="quick-add-stop-timer-button"
+                        onClick={stopCurrentTimer}
+                        disabled={isBusy}
+                        aria-label="Stop and save timer"
+                        title="Stop and save timer"
+                      >
+                        <StopIcon className="quick-add-timer-action-icon quick-add-timer-stop-icon" />
+                      </button>
+                    </span>
+                  </span>
                 </div>
               ) : null}
 
@@ -10102,8 +10484,11 @@ function App() {
                       const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
                       const needsReview = reviewLabel !== null
                       const isActiveTimerPreview = isActiveTimerPreviewEntry(entry)
+                      const isTimerEntry = entry.source === 'timer'
                       const isSelectedBlock =
-                        selectedEntryId === entry.id || highlightedEntryId === entry.id
+                        isActiveTimerPreview
+                          ? selectedActiveTimerDate === entry.date
+                          : selectedEntryId === entry.id || highlightedEntryId === entry.id
                       const isDragPreview =
                         timelineDragState?.isDragging
                         && timelineDragState.surface === 'day'
@@ -10122,9 +10507,10 @@ function App() {
 
                       if (isActiveTimerPreview) {
                         return (
-                          <div
+                          <button
+                            type="button"
                             key={entry.id}
-                            className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier}`}
+                            className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier} ${isSelectedBlock ? 'selected' : ''}`}
                             style={{
                               top: positionedEntry.top,
                               height: positionedEntry.height,
@@ -10132,13 +10518,16 @@ function App() {
                               width: `${positionedEntry.widthPercent}%`,
                               ...buildTimelineBlockCssVariables(blockPalette),
                             } as CSSProperties}
-                            aria-hidden="true"
+                            onClick={() => onSelectActiveTimerBlock(entry)}
+                            title={`${blockLabel.fullLabel}\nLive timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.`}
+                            aria-label={`${blockLabel.fullLabel}. Live timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.`}
                           >
                             <TimelineBlockContent
-                              label={`${blockLabel.label} — Running`}
+                              label={blockLabel.label}
                               durationLabel={formatQuickBlockDuration(entry.durationMinutes)}
+                              status="live"
                             />
-                          </div>
+                          </button>
                         )
                       }
 
@@ -10204,12 +10593,12 @@ function App() {
                             blockLabel.fullLabel,
                             entry.description,
                             reviewLabel,
-                          )}
-                          aria-label={buildTimelineBlockAriaLabel(
+                          ) + (isTimerEntry ? '\nCaptured with timer.' : '')}
+                          aria-label={`${buildTimelineBlockAriaLabel(
                             blockLabel.fullLabel,
                             entry.description,
                             reviewLabel,
-                          )}
+                          )}${isTimerEntry ? '. Captured with timer.' : ''}`}
                           aria-haspopup="menu"
                         >
                           <TimelineBlockContent
@@ -10227,7 +10616,7 @@ function App() {
                 </div>
               </div>
 
-              {timelineEditorPanel}
+              {activeTimelineEditorPanel}
             </div>
           </section>
         ) : null}
@@ -10308,7 +10697,7 @@ function App() {
               <p className="mini-calendar-error">{weekTimelineError}</p>
             ) : null}
 
-            <div className={`timeline-layout week-timeline-layout ${selectedEntry ? 'has-editor' : 'full-width'}`}>
+            <div className={`timeline-layout week-timeline-layout ${selectedEntry || isActiveTimerSelected ? 'has-editor' : 'full-width'}`}>
               <div
                 className={`timeline-grid week-timeline-grid ${(timelineDragState?.isDragging && timelineDragState.surface === 'week') ? 'dragging' : ''}`}
                 style={{
@@ -10530,8 +10919,11 @@ function App() {
                         const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
                         const needsReview = reviewLabel !== null
                         const isActiveTimerPreview = isActiveTimerPreviewEntry(entry)
+                        const isTimerEntry = entry.source === 'timer'
                         const isSelectedBlock =
-                          selectedEntryId === entry.id || highlightedEntryId === entry.id
+                          isActiveTimerPreview
+                            ? selectedActiveTimerDate === entry.date
+                            : selectedEntryId === entry.id || highlightedEntryId === entry.id
                         const isDragPreview =
                           timelineDragState?.isDragging
                           && timelineDragState.surface === 'week'
@@ -10550,9 +10942,10 @@ function App() {
 
                         if (isActiveTimerPreview) {
                           return (
-                            <div
+                            <button
+                              type="button"
                               key={entry.id}
-                              className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier}`}
+                              className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier} ${isSelectedBlock ? 'selected' : ''}`}
                               style={{
                                 top: positionedEntry.top,
                                 height: positionedEntry.height,
@@ -10560,13 +10953,16 @@ function App() {
                                 width: positionedEntry.width,
                                 ...buildTimelineBlockCssVariables(blockPalette),
                               } as CSSProperties}
-                              aria-hidden="true"
+                              onClick={() => onSelectActiveTimerBlock(entry, { syncSelectedDate: true })}
+                              title={`${blockLabel.fullLabel}\nLive timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.`}
+                              aria-label={`${blockLabel.fullLabel}. Live timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.`}
                             >
                               <TimelineBlockContent
-                                label={`${blockLabel.label} — Running`}
+                                label={blockLabel.label}
                                 durationLabel={formatQuickBlockDuration(entry.durationMinutes)}
+                                status="live"
                               />
-                            </div>
+                            </button>
                           )
                         }
 
@@ -10632,12 +11028,12 @@ function App() {
                               blockLabel.fullLabel,
                               entry.description,
                               reviewLabel,
-                            )}
-                            aria-label={buildTimelineBlockAriaLabel(
+                            ) + (isTimerEntry ? '\nCaptured with timer.' : '')}
+                            aria-label={`${buildTimelineBlockAriaLabel(
                               blockLabel.fullLabel,
                               entry.description,
                               reviewLabel,
-                            )}
+                            )}${isTimerEntry ? '. Captured with timer.' : ''}`}
                             aria-haspopup="menu"
                           >
                             <TimelineBlockContent
@@ -10656,7 +11052,7 @@ function App() {
                 </div>
               </div>
 
-              {selectedEntry ? timelineEditorPanel : null}
+              {selectedEntry || isActiveTimerSelected ? activeTimelineEditorPanel : null}
             </div>
           </section>
         ) : null}
@@ -12861,13 +13257,21 @@ function WarningBadge({ type }: { type: WarningType }) {
 function TimelineBlockContent({
   label,
   durationLabel = null,
+  status = null,
 }: {
   label: string
   durationLabel?: string | null
+  status?: 'live' | null
 }) {
   return (
-    <span className="timeline-block-content">
+    <span className={`timeline-block-content ${status ? `has-${status}-status` : ''}`}>
       <span className="timeline-block-label">{label}</span>
+      {status === 'live' ? (
+        <span className="timeline-block-live-badge">
+          <span className="timeline-block-live-dot" aria-hidden="true" />
+          LIVE
+        </span>
+      ) : null}
       {durationLabel ? (
         <span className="timeline-block-duration-badge">{durationLabel}</span>
       ) : null}
@@ -12911,6 +13315,34 @@ function buildEntryDraft(entry: TimelineEntry): EntryDraft {
     startTime: minuteToTimeInput(entry.startMinute),
     ...endState,
   }
+}
+
+function buildActiveTimerDraft(timer: ActiveTimer): ActiveTimerDraft {
+  return {
+    startedAt: timer.startedAt,
+    startDate: timer.startDate,
+    startMinute: timer.startMinute,
+    engagementId: timer.engagementId,
+    activityId: timer.activityId,
+    description: timer.description,
+  }
+}
+
+function isActiveTimerDraftForTimer(draft: ActiveTimerDraft, timer: ActiveTimer): boolean {
+  return draft.startedAt === timer.startedAt
+    && draft.startDate === timer.startDate
+    && draft.startMinute === timer.startMinute
+}
+
+function serializeActiveTimerDraft(draft: ActiveTimerDraft): string {
+  return JSON.stringify([
+    draft.startedAt,
+    draft.startDate,
+    draft.startMinute,
+    draft.engagementId,
+    draft.activityId,
+    draft.description,
+  ])
 }
 
 function serializeEntryDraft(entryDraft: EntryDraft): string {

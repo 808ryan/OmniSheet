@@ -35,8 +35,8 @@ use crate::models::{
     TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
     TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekStartDay,
     TimelineWeekView, TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote,
-    TimerStartInput, TimerStopInput, TimerStopResult, TranscribeAudioInput, TranscribeAudioResult,
-    TranscriptionModelId, Warning, WarningType,
+    TimerStartInput, TimerStopInput, TimerStopResult, TimerUpdateInput, TranscribeAudioInput,
+    TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -5503,6 +5503,37 @@ pub fn timer_start(
 }
 
 #[tauri::command]
+pub fn timer_update_active(
+    state: State<'_, AppState>,
+    input: TimerUpdateInput,
+) -> Result<ActiveTimer, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    if db::get_active_timer(&connection)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("no timer is running".to_string());
+    }
+
+    let engagement_id = input.engagement_id.trim();
+    let activity_id = input.activity_id.trim();
+    if engagement_id.is_empty() || activity_id.is_empty() {
+        return Err("a running timer requires an engagement and activity".to_string());
+    }
+    validate_manual_create_refs(&connection, Some(engagement_id), Some(activity_id))?;
+
+    if !db::update_active_timer(&connection, engagement_id, activity_id, &input.description)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("no timer is running".to_string());
+    }
+
+    db::get_active_timer(&connection)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "timer could not be loaded after updating".to_string())
+}
+
+#[tauri::command]
 pub fn timer_cancel(state: State<'_, AppState>) -> Result<(), String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
     db::clear_active_timer(&connection).map_err(|error| error.to_string())
@@ -5528,7 +5559,7 @@ pub fn timer_stop(
         let mut touched_month_keys = HashSet::<String>::new();
 
         for (date, start_minute, end_minute) in windows {
-            let result = create_manual_timeline_entry(
+            let result = create_timer_timeline_entry(
                 &connection,
                 TimelineCreateInput {
                     date: date.clone(),
@@ -5636,6 +5667,21 @@ fn create_manual_timeline_entry(
     connection: &Connection,
     input: TimelineCreateInput,
 ) -> Result<IdResult, String> {
+    create_timeline_entry_with_source(connection, input, false)
+}
+
+fn create_timer_timeline_entry(
+    connection: &Connection,
+    input: TimelineCreateInput,
+) -> Result<IdResult, String> {
+    create_timeline_entry_with_source(connection, input, true)
+}
+
+fn create_timeline_entry_with_source(
+    connection: &Connection,
+    input: TimelineCreateInput,
+    is_timer_entry: bool,
+) -> Result<IdResult, String> {
     let date = input.date.trim();
     let (start_minute, end_minute, duration_minutes) =
         validate_manual_update_window(input.start_minute, input.end_minute)?;
@@ -5644,7 +5690,12 @@ fn create_manual_timeline_entry(
 
     validate_manual_create_refs(connection, engagement_id.as_deref(), activity_id.as_deref())?;
 
-    let id = db::insert_manual_timeline_entry(
+    let insert_entry = if is_timer_entry {
+        db::insert_timer_timeline_entry
+    } else {
+        db::insert_manual_timeline_entry
+    };
+    let id = insert_entry(
         connection,
         date,
         start_minute,
@@ -9441,9 +9492,9 @@ mod tests {
         apply_timeline_preferences_to_weekly_summary, build_export_metadata_maps,
         build_summary_export_hours_and_notes_sheet_columns,
         build_summary_export_hours_sheet_columns, build_timer_entry_windows, capture_source_label,
-        compute_gap_fill_free_intervals, create_manual_timeline_entry, dedupe_prepared_entries,
-        default_reporting_state, default_summary_layout_state, derive_key_status_level,
-        distribute_gap_fill_minutes, llm_attempt_event_status,
+        compute_gap_fill_free_intervals, create_manual_timeline_entry, create_timer_timeline_entry,
+        dedupe_prepared_entries, default_reporting_state, default_summary_layout_state,
+        derive_key_status_level, distribute_gap_fill_minutes, llm_attempt_event_status,
         message_has_contextual_day_or_date_cue, message_has_explicit_clock_time_cue,
         message_has_implicit_recent_duration_cue, message_has_relative_duration_cue,
         normalize_calendar_bulk_ignored_keywords, normalize_confidence, normalize_llm_entry,
@@ -9652,6 +9703,18 @@ mod tests {
         assert_eq!(timer.start_date, "2026-08-09");
         assert_eq!(timer.start_minute, 600);
         assert_eq!(timer.description, "Control testing");
+
+        assert!(db::update_active_timer(
+            &connection,
+            &engagement_id,
+            &activity_id,
+            "Updated timer description",
+        )
+        .expect("timer should update"));
+        let updated_timer = db::get_active_timer(&connection)
+            .expect("updated timer should load")
+            .expect("updated timer should exist");
+        assert_eq!(updated_timer.description, "Updated timer description");
 
         db::clear_active_timer(&connection).expect("timer should clear");
         assert!(db::get_active_timer(&connection)
@@ -10454,6 +10517,35 @@ mod tests {
             Some(activity_id.as_str())
         );
         assert!(!saved_entry.warning_flags.contains(&WarningType::Unmatched));
+    }
+
+    #[test]
+    fn timer_create_preserves_timer_source() {
+        let connection = test_connection();
+        let (engagement_id, activity_id) = create_test_engagement_with_activity(&connection);
+
+        let result = create_timer_timeline_entry(
+            &connection,
+            TimelineCreateInput {
+                date: "2026-04-02".to_string(),
+                start_minute: 9 * 60,
+                end_minute: 10 * 60,
+                engagement_id: Some(engagement_id),
+                activity_id: Some(activity_id),
+                description: Some("Captured live".to_string()),
+            },
+        )
+        .expect("timer create succeeds");
+
+        let saved_entry = db::list_timeline_entries(&connection, "2026-04-02")
+            .expect("entries load")
+            .into_iter()
+            .find(|entry| entry.id == result.id)
+            .expect("entry exists");
+
+        assert_eq!(saved_entry.source, "timer");
+        assert_eq!(saved_entry.description, "Captured live");
+        assert_eq!(saved_entry.user_submission_text, "Timer Entry");
     }
 
     #[test]
