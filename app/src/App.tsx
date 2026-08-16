@@ -6160,7 +6160,7 @@ function App() {
         invalidateMonthSummaries([monthKeyFromDate(selection.date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
         if (createdEntry) {
-          setSelectedEntryId(createdEntry.id)
+          onSelectEntry(createdEntry)
           setHighlightedEntryId(createdEntry.id)
           if (selection.surface === 'day') {
             scrollDayTimelineToEntry(createdEntry)
@@ -6175,6 +6175,7 @@ function App() {
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
+      onSelectEntry,
       runTimelineMutation,
       scrollDayTimelineToEntry,
       timelineCreateSelection,
