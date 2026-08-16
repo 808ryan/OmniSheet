@@ -40,7 +40,6 @@ import {
 import type { QuickEntryDragState } from './lib/quickEntry'
 import { isTauriRuntime } from './lib/runtime'
 import { formatDate } from './lib/time'
-import type { QuickEntryScrollMetrics } from './QuickEntryScrollIndicator'
 import type {
   ActiveTimer,
   Activity,
@@ -49,7 +48,6 @@ import type {
   QuickAddSuggestion,
   SettingsStatus,
 } from './lib/types'
-import { QuickEntryTileList } from './QuickEntryTileList'
 import './QuickAdd.css'
 
 type QuickAddStatus = 'idle' | 'loading' | 'submitting' | 'success' | 'error'
@@ -77,21 +75,12 @@ function QuickAdd() {
       ? 'Loading Quick Entry...'
       : 'Quick Add requires the Tauri desktop runtime.',
   )
-  const [dataError, setDataError] = useState<string | null>(null)
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickEntryDragState | null>(null)
-  const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickEntryScrollMetrics>({
-    canScroll: false,
-    thumbTopPct: 0,
-    thumbHeightPct: 100,
-  })
 
   const quickBlockDragStateRef = useRef<QuickEntryDragState | null>(null)
   const quickAddPaletteRef = useRef<HTMLElement | null>(null)
   const quickAddLlmPanelRef = useRef<HTMLElement | null>(null)
   const quickAddStatusRef = useRef<HTMLParagraphElement | null>(null)
-  const quickAddTilesPanelRef = useRef<HTMLElement | null>(null)
-  const quickAddTilesHeaderRef = useRef<HTMLDivElement | null>(null)
-  const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
   const lastQuickAddWindowHeightRef = useRef<number | null>(null)
   const statusRef = useRef(status)
 
@@ -130,8 +119,6 @@ function QuickAdd() {
 
     setStatus((previous) => previous === 'submitting' ? previous : 'loading')
     setStatusMessage((previous) => statusRef.current === 'submitting' ? previous : 'Loading Quick Entry...')
-    setDataError(null)
-
     try {
       const [nextSettingsStatus, nextEngagements, nextSuggestions, nextActiveTimer] = await Promise.all([
         settingsGetStatus(),
@@ -150,7 +137,6 @@ function QuickAdd() {
       setStatusMessage((previous) => statusRef.current === 'submitting' ? previous : '')
     } catch (error) {
       const messageText = extractErrorMessage(error)
-      setDataError(messageText)
       setStatus('error')
       setStatusMessage(messageText)
     }
@@ -243,7 +229,6 @@ function QuickAdd() {
       preferences: quickAddPreferences,
       suggestions: quickAddSuggestionItems,
       suggestedKeys: quickAddSuggestedKeys,
-      search: '',
     }),
     [
       engagements,
@@ -258,56 +243,11 @@ function QuickAdd() {
       preferences: quickAddPreferences,
       suggestions: [],
       suggestedKeys: [],
-      includeHiddenShortcuts: true,
+      includeDefaultHiddenActivities: true,
     }).orderedActivities,
     [engagements, quickAddPreferences],
   )
   const shouldShowStatus = status !== 'idle' && statusMessage.trim().length > 0
-
-  const updateQuickAddScrollMetrics = useCallback(() => {
-    const node = quickAddScrollRef.current
-
-    if (!node) {
-      setQuickAddScrollMetrics((previous) => (
-        previous.canScroll
-          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
-          : previous
-      ))
-      return
-    }
-
-    const maxScrollTop = Math.max(node.scrollHeight - node.clientHeight, 0)
-    const canScroll = maxScrollTop > 1
-
-    if (!canScroll || node.scrollHeight <= 0 || node.clientHeight <= 0) {
-      setQuickAddScrollMetrics((previous) => (
-        previous.canScroll
-          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
-          : previous
-      ))
-      return
-    }
-
-    const thumbHeightPct = Math.min(100, Math.max((node.clientHeight / node.scrollHeight) * 100, 18))
-    const maxThumbTopPct = Math.max(100 - thumbHeightPct, 0)
-    const thumbTopPct = Math.min(maxThumbTopPct, Math.max(0, (node.scrollTop / maxScrollTop) * maxThumbTopPct))
-
-    setQuickAddScrollMetrics((previous) => {
-      if (
-        previous.canScroll === canScroll
-        && previous.thumbTopPct === thumbTopPct
-        && previous.thumbHeightPct === thumbHeightPct
-      ) {
-        return previous
-      }
-
-      return {
-        canScroll,
-        thumbTopPct,
-        thumbHeightPct,
-      }
-    })
-  }, [])
 
   const resizeQuickAddWindowToContent = useCallback(() => {
     if (!tauriRuntime) {
@@ -316,36 +256,19 @@ function QuickAdd() {
 
     const palette = quickAddPaletteRef.current
     const llmPanel = quickAddLlmPanelRef.current
-    const tilesPanel = quickAddTilesPanelRef.current
-    const tilesHeader = quickAddTilesHeaderRef.current
 
-    if (!palette || !llmPanel || !tilesPanel || !tilesHeader) {
+    if (!palette || !llmPanel) {
       return
     }
 
     const paletteStyles = window.getComputedStyle(palette)
-    const tilesPanelStyles = window.getComputedStyle(tilesPanel)
-    const tileList = quickAddScrollRef.current?.querySelector<HTMLElement>('.quick-add-list')
-    const tileFallback = tilesPanel.querySelector<HTMLElement>('.quick-add-empty, .quick-add-error')
-    const tileBodyHeight = tileList?.getBoundingClientRect().height
-      ?? tileFallback?.getBoundingClientRect().height
-      ?? 0
-    const topLevelRows = shouldShowStatus ? 3 : 2
+    const topLevelRows = shouldShowStatus ? 2 : 1
     const topLevelGap = parseCssPixels(paletteStyles.rowGap || paletteStyles.gap)
-    const tilesPanelGap = parseCssPixels(tilesPanelStyles.rowGap || tilesPanelStyles.gap)
-    const tilesPanelHeight =
-      parseCssPixels(tilesPanelStyles.borderTopWidth) +
-      parseCssPixels(tilesPanelStyles.paddingTop) +
-      parseCssPixels(tilesPanelStyles.paddingBottom) +
-      tilesHeader.getBoundingClientRect().height +
-      tilesPanelGap +
-      tileBodyHeight
     const targetHeight = Math.ceil(clampNumber(
       parseCssPixels(paletteStyles.paddingTop) +
         parseCssPixels(paletteStyles.paddingBottom) +
         llmPanel.getBoundingClientRect().height +
         (quickAddStatusRef.current?.getBoundingClientRect().height ?? 0) +
-        tilesPanelHeight +
         topLevelGap * Math.max(topLevelRows - 1, 0),
       QUICK_ADD_MIN_WINDOW_HEIGHT,
       QUICK_ADD_MAX_WINDOW_HEIGHT,
@@ -359,64 +282,23 @@ function QuickAdd() {
 
     lastQuickAddWindowHeightRef.current = targetHeight
     void quickAddResizeWindow(targetHeight)
-      .then(() => {
-        window.requestAnimationFrame(updateQuickAddScrollMetrics)
-      })
       .catch((error) => {
         console.warn('Failed to resize Quick Add window', error)
       })
-  }, [shouldShowStatus, tauriRuntime, updateQuickAddScrollMetrics])
+  }, [shouldShowStatus, tauriRuntime])
 
   useLayoutEffect(() => {
     const frame = window.requestAnimationFrame(resizeQuickAddWindowToContent)
     return () => window.cancelAnimationFrame(frame)
   }, [
     activeTimer,
-    dataError,
     isBulkEntryOpen,
     isTimerSelectionMode,
-    quickEntryModel.groups,
+    quickEntryModel.orderedActivities,
     resizeQuickAddWindowToContent,
     status,
     statusMessage,
   ])
-
-  useLayoutEffect(() => {
-    const node = quickAddScrollRef.current
-    if (!node) {
-      return undefined
-    }
-
-    let animationFrame: number | null = null
-    const scheduleUpdate = () => {
-      if (animationFrame !== null) {
-        window.cancelAnimationFrame(animationFrame)
-      }
-
-      animationFrame = window.requestAnimationFrame(updateQuickAddScrollMetrics)
-    }
-
-    scheduleUpdate()
-
-    const resizeObserver = typeof ResizeObserver === 'undefined'
-      ? null
-      : new ResizeObserver(scheduleUpdate)
-
-    resizeObserver?.observe(node)
-    if (node.firstElementChild) {
-      resizeObserver?.observe(node.firstElementChild)
-    }
-
-    window.addEventListener('resize', scheduleUpdate)
-
-    return () => {
-      if (animationFrame !== null) {
-        window.cancelAnimationFrame(animationFrame)
-      }
-      resizeObserver?.disconnect()
-      window.removeEventListener('resize', scheduleUpdate)
-    }
-  }, [quickEntryModel.groups, updateQuickAddScrollMetrics])
 
   const setQuickBlockDragStateWithRef = useCallback(
     (updater: (previous: QuickEntryDragState | null) => QuickEntryDragState | null) => {
@@ -582,9 +464,6 @@ function QuickAdd() {
     if (!activeTimer || statusRef.current === 'submitting') {
       return
     }
-    if (!window.confirm(`Discard the running timer for ${activeTimer.activityName}?`)) {
-      return
-    }
 
     setStatus('submitting')
     setStatusMessage('Discarding timer...')
@@ -732,13 +611,6 @@ function QuickAdd() {
     : settingsStatus.hasOpenAiKey
       ? 'Send entry'
       : MISSING_OPENAI_KEY_HINT
-  const emptyMessage = status === 'loading'
-    ? 'Loading activities...'
-    : quickEntryModel.allActivities.length === 0
-      ? 'No active activities yet.'
-      : quickEntryModel.orderedActivities.length === 0
-        ? 'All Quick Entry items are hidden.'
-        : 'No activities to show.'
   return (
     <main
       ref={quickAddPaletteRef}
@@ -829,13 +701,21 @@ function QuickAdd() {
         <ActivityCommandBar
           key={isTimerSelectionMode ? 'tray-timer-command' : 'tray-entry-command'}
           activities={activityCommandItems}
+          defaultActivities={quickEntryModel.orderedActivities}
           disabled={status === 'submitting' || status === 'loading'}
           autoFocus
+          alwaysShowResults
           placeholder={isTimerSelectionMode ? 'Choose activity to start' : 'Search activities'}
           ariaLabel={isTimerSelectionMode ? 'Choose an activity to start tracking' : 'Search for an activity to add'}
           actionLabel={isTimerSelectionMode ? 'Start' : 'Add'}
           actionIcon="plus"
+          defaultEmptyMessage={status === 'loading'
+            ? 'Loading activities...'
+            : quickEntryModel.allActivities.length === 0
+              ? 'No active activities yet.'
+              : 'No activities are shown by default. Search to find any active activity.'}
           resultsMaterial="opaque"
+          resultsPresentation="inline"
           showDuration={!isTimerSelectionMode}
           contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
           onCancel={() => setIsTimerSelectionMode(false)}
@@ -930,27 +810,6 @@ function QuickAdd() {
           {statusMessage}
         </p>
       ) : null}
-
-      <section ref={quickAddTilesPanelRef} className="quick-add-tiles-panel" aria-label="Quick Entry">
-        <div ref={quickAddTilesHeaderRef} className="quick-add-tiles-header">
-          <h2 className="quick-add-section-title">Activities</h2>
-        </div>
-        <QuickEntryTileList
-          groups={quickEntryModel.groups}
-          dragState={quickBlockDragState}
-          emptyMessage={emptyMessage}
-          errorMessage={dataError}
-          disabled={status === 'submitting' || status === 'loading'}
-          scrollRef={quickAddScrollRef}
-          scrollMetrics={quickAddScrollMetrics}
-          onScroll={updateQuickAddScrollMetrics}
-          onPointerDown={onQuickBlockActivityPointerDown}
-          onPointerMove={onQuickBlockActivityPointerMove}
-          onPointerUp={onQuickBlockActivityPointerUp}
-          onPointerCancel={onQuickBlockActivityPointerCancel}
-          onCreate={createQuickBlockEntry}
-        />
-      </section>
     </main>
   )
 }
