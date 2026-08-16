@@ -45,6 +45,11 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #0f7e8e) 18%, transparent);
 }
 
+.activity-command-search-shell input::placeholder {
+  color: var(--text-muted, #657184);
+  opacity: 0.78;
+}
+
 .activity-command-search-icon {
   position: absolute;
   z-index: 1;
@@ -199,7 +204,12 @@
   border-radius: 0.48rem;
   background: transparent;
   color: var(--text, #18202b);
+  cursor: pointer;
   text-align: left;
+}
+
+.activity-command-result:disabled {
+  cursor: default;
 }
 
 .activity-command-result:hover,
@@ -292,24 +302,30 @@
   body.quick-add-window .activity-command-search-shell input,
   body.quick-add-window .activity-command-duration,
   body.quick-add-window .activity-command-fixed-duration {
-    background: rgba(31, 37, 48, 0.94);
-    color: #eef3f8;
+    background: var(--surface-raised, rgba(31, 37, 48, 0.68));
+    color: var(--text, #eef3f8);
   }
 
-  body.quick-add-window .activity-command-results {
+  body.quick-add-window .activity-command:not(.presentation-inline) .activity-command-results {
     background: #202631;
     color: #eef3f8;
     box-shadow: 0 16px 34px rgba(0, 0, 0, 0.42);
   }
 
-
-  body.quick-add-window .activity-command.results-opaque .activity-command-results {
+  body.quick-add-window .activity-command.results-opaque:not(.presentation-inline) .activity-command-results {
     border-color: rgba(255, 255, 255, 0.16);
     background: rgba(32, 38, 49, 0.99);
   }
 
+  body.quick-add-window .activity-command.presentation-inline .activity-command-results,
+  body.quick-add-window .activity-command.presentation-inline.results-opaque .activity-command-results {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
   body.quick-add-window .activity-command-result {
-    color: #eef3f8;
+    color: var(--text, #eef3f8);
   }
 }
 

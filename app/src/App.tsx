@@ -11,7 +11,7 @@ import { createPortal, flushSync } from 'react-dom'
 import { emit, listen } from '@tauri-apps/api/event'
 
 import { ActivityCommandBar } from './ActivityCommandBar'
-import { StopIcon, TimerIcon, TrashIcon } from './InterfaceIcons'
+import { PlusIcon, StopIcon, TimerIcon, TrashIcon } from './InterfaceIcons'
 import {
   activityDelete,
   activityUpsert,
@@ -61,8 +61,6 @@ import {
   QUICK_ADD_SUBMITTED_EVENT,
   TIMER_CHANGED_EVENT,
 } from './lib/events'
-import { QuickEntryScrollIndicator } from './QuickEntryScrollIndicator'
-import type { QuickEntryScrollMetrics } from './QuickEntryScrollIndicator'
 import { SegmentedControl } from './SegmentedControl'
 import {
   buildDefaultSummaryLayoutState,
@@ -99,7 +97,6 @@ import {
   QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
   QUICK_ENTRY_DRAG_ACTIVATION_PX,
   quickEntryActivityKey as quickAddActivityKey,
-  quickEntryDurationProgress,
   quickEntryDurationFromDrag,
   resolveQuickEntryCreateWindow,
   sanitizeQuickAddPreferences,
@@ -1033,18 +1030,12 @@ function App() {
   const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
   const [activeTimer, setActiveTimer] = useState<ActiveTimer | null>(null)
   const [isTimerSelectionMode, setIsTimerSelectionMode] = useState(false)
-  const [isSidebarActivitySearchOpen, setIsSidebarActivitySearchOpen] = useState(false)
   const [isQuickAddSettingsOpen, setIsQuickAddSettingsOpen] = useState(false)
   const [quickAddSettingsDraft, setQuickAddSettingsDraft] = useState<QuickAddPreferences | null>(null)
   const [quickAddSettingsDragState, setQuickAddSettingsDragState] =
     useState<QuickAddSettingsDragState | null>(null)
   const [quickAddSettingsDropCommitKeys, setQuickAddSettingsDropCommitKeys] = useState<string[]>([])
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickEntryDragState | null>(null)
-  const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickEntryScrollMetrics>({
-    canScroll: false,
-    thumbTopPct: 0,
-    thumbHeightPct: 100,
-  })
   const [isCalendarBulkModalOpen, setIsCalendarBulkModalOpen] = useState(false)
   const [calendarBulkTab, setCalendarBulkTab] = useState<CalendarBulkTab>('submission')
   const [calendarSelectedFileName, setCalendarSelectedFileName] = useState<string | null>(null)
@@ -1111,7 +1102,6 @@ function App() {
   const timelineCreateDragStateRef = useRef<TimelineCreateDragState | null>(null)
   const timelineMutationInFlightRef = useRef(false)
   const quickBlockDragStateRef = useRef<QuickEntryDragState | null>(null)
-  const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
   const quickAddSettingsDraftRef = useRef<QuickAddPreferences | null>(null)
   const quickAddSettingsDragStateRef = useRef<QuickAddSettingsDragState | null>(null)
   const quickAddSettingsRowRefs = useRef<Record<string, HTMLElement | null>>({})
@@ -1506,7 +1496,6 @@ function App() {
       preferences: quickAddPreferences,
       suggestions: quickAddSuggestionItems,
       suggestedKeys: quickAddSuggestedKeys,
-      search: '',
     }),
     [
       engagements,
@@ -1517,14 +1506,13 @@ function App() {
   )
   const allQuickAddActivities = quickEntryModel.allActivities
   const orderedQuickAddActivities = quickEntryModel.orderedActivities
-  const quickAddActivityGroups = quickEntryModel.groups
   const activityCommandItems = useMemo(
     () => buildQuickEntryModel({
       engagements,
       preferences: quickAddPreferences,
       suggestions: [],
       suggestedKeys: [],
-      includeHiddenShortcuts: true,
+      includeDefaultHiddenActivities: true,
     }).orderedActivities,
     [engagements, quickAddPreferences],
   )
@@ -1539,92 +1527,6 @@ function App() {
       return next.length === previous.length ? previous : next
     })
   }, [quickEntryModel.activityByKey])
-  const updateQuickAddScrollMetrics = useCallback(() => {
-    const node = quickAddScrollRef.current
-
-    if (!node) {
-      setQuickAddScrollMetrics((previous) => (
-        previous.canScroll
-          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
-          : previous
-      ))
-      return
-    }
-
-    const scrollFrame = node.parentElement as HTMLElement | null
-    const maxScrollTop = Math.max(node.scrollHeight - node.clientHeight, 0)
-    const canScroll = maxScrollTop > 1
-
-    if (!canScroll || node.scrollHeight <= 0 || node.clientHeight <= 0) {
-      scrollFrame?.style.setProperty('--quick-add-scroll-thumb-top', '0%')
-      scrollFrame?.style.setProperty('--quick-add-scroll-thumb-height', '100%')
-      setQuickAddScrollMetrics((previous) => (
-        previous.canScroll
-          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
-          : previous
-      ))
-      return
-    }
-
-    const thumbHeightPct = Math.min(100, Math.max((node.clientHeight / node.scrollHeight) * 100, 18))
-    const maxThumbTopPct = Math.max(100 - thumbHeightPct, 0)
-    const thumbTopPct = Math.min(maxThumbTopPct, Math.max(0, (node.scrollTop / maxScrollTop) * maxThumbTopPct))
-
-    scrollFrame?.style.setProperty('--quick-add-scroll-thumb-top', `${thumbTopPct}%`)
-    scrollFrame?.style.setProperty('--quick-add-scroll-thumb-height', `${thumbHeightPct}%`)
-
-    setQuickAddScrollMetrics((previous) => {
-      if (
-        previous.canScroll === canScroll
-        && previous.thumbTopPct === thumbTopPct
-        && previous.thumbHeightPct === thumbHeightPct
-      ) {
-        return previous
-      }
-
-      return {
-        canScroll,
-        thumbTopPct,
-        thumbHeightPct,
-      }
-    })
-  }, [])
-  useLayoutEffect(() => {
-    updateQuickAddScrollMetrics()
-
-    const node = quickAddScrollRef.current
-    if (!node) {
-      return undefined
-    }
-
-    let animationFrame: number | null = null
-    const scheduleUpdate = () => {
-      if (animationFrame !== null) {
-        window.cancelAnimationFrame(animationFrame)
-      }
-
-      animationFrame = window.requestAnimationFrame(updateQuickAddScrollMetrics)
-    }
-
-    const resizeObserver = typeof ResizeObserver === 'undefined'
-      ? null
-      : new ResizeObserver(scheduleUpdate)
-
-    resizeObserver?.observe(node)
-    if (node.firstElementChild) {
-      resizeObserver?.observe(node.firstElementChild)
-    }
-
-    window.addEventListener('resize', scheduleUpdate)
-
-    return () => {
-      if (animationFrame !== null) {
-        window.cancelAnimationFrame(animationFrame)
-      }
-      resizeObserver?.disconnect()
-      window.removeEventListener('resize', scheduleUpdate)
-    }
-  }, [isLlmEntryCollapsed, quickAddActivityGroups, updateQuickAddScrollMetrics])
   const reportingDayIndexes = useMemo(() => (
     buildReportingDisplayAllDayIndexes(weeklySummary)
   ), [weeklySummary])
@@ -6216,9 +6118,6 @@ function App() {
     if (timelineMutationInFlightRef.current || !activeTimer) {
       return
     }
-    if (!window.confirm(`Discard the running timer for ${activeTimer.activityName}?`)) {
-      return
-    }
 
     void runTimelineMutation(async () => {
       if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
@@ -8905,7 +8804,7 @@ function App() {
         <header className="calendar-bulk-header quick-add-settings-header">
           <div>
             <h3 id="quick-add-settings-title">Quick Entry Settings</h3>
-            <p>Rearrange or hide engagements/activities to customize how it appears.</p>
+            <p>Choose which activities appear before you search. Hidden activities remain searchable.</p>
           </div>
           <div className="calendar-bulk-header-actions">
             <button
@@ -8944,7 +8843,7 @@ function App() {
         </header>
 
         <div className="quick-add-settings-body">
-          <section className="quick-add-settings-list" aria-label="Quick Entry order and visibility">
+          <section className="quick-add-settings-list" aria-label="Default Quick Entry order and visibility">
             {quickAddSettingsEngagements.length === 0 ? (
               <p className="quick-add-settings-empty">No active engagements.</p>
             ) : (
@@ -9039,9 +8938,9 @@ function App() {
                         <button
                           type="button"
                           className={`quick-add-visibility-button ${engagementHidden ? 'is-hidden' : ''}`}
-                          aria-label={`${engagementHidden ? 'Show' : 'Hide'} ${engagementLabel}`}
+                          aria-label={`${engagementHidden ? 'Show' : 'Hide'} ${engagementLabel} by default`}
                           aria-pressed={!engagementHidden}
-                          title={engagementHidden ? 'Show in Quick Entry' : 'Hide from Quick Entry'}
+                          title={engagementHidden ? 'Show in default list' : 'Hide from default list'}
                           onClick={() => toggleQuickAddEngagementVisibility(engagement.id)}
                           disabled={isBusy}
                         >
@@ -9059,13 +8958,13 @@ function App() {
                           const activityLabel = formatEntityDisplayLabel(activity.name, activity.code)
                           const activityEffectivelyHidden = engagementHidden || activityHidden
                           const activityVisibilityLabel = engagementHidden
-                            ? `${activityLabel} hidden because ${engagementLabel} is hidden`
-                            : `${activityHidden ? 'Show' : 'Hide'} ${activityLabel}`
+                            ? `${activityLabel} is not shown by default because ${engagementLabel} is hidden`
+                            : `${activityHidden ? 'Show' : 'Hide'} ${activityLabel} by default`
                           const activityVisibilityTitle = engagementHidden
-                            ? 'Hidden because engagement is hidden'
+                            ? 'Not shown by default because engagement is hidden'
                             : activityHidden
-                              ? 'Show in Quick Entry'
-                              : 'Hide from Quick Entry'
+                              ? 'Show in default list'
+                              : 'Hide from default list'
                           const activityKey = quickAddSettingsActivityKey(engagement.id, activity.id)
                           const activityDragPresentation = getQuickAddSettingsDragPresentation(activityKey)
                           const activityColor = activity.colorHex ?? engagementColor
@@ -9165,63 +9064,50 @@ function App() {
           <aside className="quick-add-settings-preview-panel" aria-label="Quick Entry preview">
             <div className="quick-add-settings-preview-header">
               <h4>Live Preview</h4>
-              <span>{quickAddShownActivityCount} visible</span>
+              <span>{quickAddShownActivityCount} shown by default</span>
             </div>
             <div className="quick-add-panel quick-add-settings-preview">
               {quickAddSettingsPreviewGroups.length === 0 ? (
                 <p className="quick-add-empty">
-                  {allQuickAddActivities.length === 0 ? 'No active activities yet.' : 'All Quick Entry items are hidden.'}
+                  {allQuickAddActivities.length === 0
+                    ? 'No active activities yet.'
+                    : 'No activities are shown by default.'}
                 </p>
               ) : (
-                <div className="quick-add-scroll-frame">
-                  <div className="quick-add-scroll">
-                    <div className="quick-add-list">
-                      {quickAddSettingsPreviewGroups.map((group) => {
-                        const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
-
-                        return (
-                          <section
-                            key={group.engagement.id}
-                            className="quick-add-group"
-                            style={{
-                              '--quick-add-color': engagementColor,
-                            } as CSSProperties}
-                          >
-                            <div className="quick-add-group-header">
-                              <span>{formatEntityPrimaryLabel(
-                                group.engagement.name,
-                                group.engagement.code,
-                                'Engagement',
-                              )}</span>
-                            </div>
-                            <div className="quick-add-grid">
-                              {group.activities.map(({ activity }) => {
-                                const activityColor = activity.colorHex ?? engagementColor
-                                const activityLabel = activity.name || activity.code
-
-                                return (
-                                  <div
-                                    key={activity.id}
-                                    className="quick-add-tile quick-add-settings-preview-tile"
-                                    role="button"
-                                    aria-disabled="true"
-                                    style={{
-                                      '--quick-add-color': activityColor,
-                                      '--quick-add-duration-progress': '0%',
-                                    } as CSSProperties}
-                                  >
-                                    <span className="quick-add-tile-main">
-                                      <strong>{activityLabel}</strong>
-                                    </span>
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          </section>
-                        )
-                      })}
-                    </div>
-                  </div>
+                <div className="quick-add-settings-preview-list">
+                  {quickAddSettingsPreviewGroups.flatMap((group) => (
+                    group.activities.map(({ activity, engagement }) => (
+                      <div
+                        key={`${engagement.id}:${activity.id}`}
+                        className="activity-command-result quick-add-settings-preview-result"
+                      >
+                        <span
+                          className="activity-command-result-accent"
+                          style={{
+                            backgroundColor: activity.colorHex
+                              ?? engagement.colorHex
+                              ?? TIMELINE_NEUTRAL_COLOR,
+                          }}
+                          aria-hidden="true"
+                        />
+                        <span className="activity-command-result-copy">
+                          <strong>{formatEntityPrimaryLabel(
+                            activity.name,
+                            activity.code,
+                            'Activity',
+                          )}</strong>
+                          <small>{formatEntityDisplayLabel(
+                            engagement.name,
+                            engagement.code,
+                            'Engagement',
+                          )}</small>
+                        </span>
+                        <span className="activity-command-result-action is-icon" aria-hidden="true">
+                          <PlusIcon className="activity-command-result-action-icon" />
+                        </span>
+                      </div>
+                    ))
+                  ))}
                 </div>
               )}
             </div>
@@ -10088,14 +9974,23 @@ function App() {
                 </div>
               ) : null}
 
+              {quickAddSuggestionsError ? (
+                <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
+              ) : null}
+
               <ActivityCommandBar
                 key={isTimerSelectionMode ? 'sidebar-timer-command' : 'sidebar-entry-command'}
                 activities={activityCommandItems}
+                defaultActivities={orderedQuickAddActivities}
                 disabled={isBusy}
                 autoFocus={isTimerSelectionMode}
+                alwaysShowResults
                 placeholder={isTimerSelectionMode ? 'Choose activity to start' : 'Search activities'}
                 ariaLabel={isTimerSelectionMode ? 'Choose an activity to start tracking' : 'Search for an activity to add'}
                 actionLabel={isTimerSelectionMode ? 'Start' : 'Add'}
+                defaultEmptyMessage={allQuickAddActivities.length === 0
+                  ? 'No active activities yet.'
+                  : 'No activities are shown by default. Search to find any active activity.'}
                 actionIcon="plus"
                 resultsMaterial="opaque"
                 resultsPresentation="inline"
@@ -10103,7 +9998,6 @@ function App() {
                 showDuration={!isTimerSelectionMode}
                 contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
                 onCancel={() => setIsTimerSelectionMode(false)}
-                onOpenChange={setIsSidebarActivitySearchOpen}
                 resultDragState={isTimerSelectionMode ? null : quickBlockDragState}
                 onResultPointerDown={isTimerSelectionMode
                   ? undefined
@@ -10135,126 +10029,6 @@ function App() {
                   createQuickBlockEntry(item.engagement, item.activity, durationMinutes)
                 }}
               />
-
-              {!isSidebarActivitySearchOpen ? (
-                <>
-                  <p className="quick-add-browse-label">Activity shortcuts</p>
-                  {quickAddSuggestionsError ? (
-                    <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
-                  ) : null}
-                  {quickAddActivityGroups.length === 0 ? (
-                    <p className="quick-add-empty">
-                      {allQuickAddActivities.length === 0
-                        ? 'No active activities yet.'
-                        : orderedQuickAddActivities.length === 0
-                          ? 'All Quick Entry items are hidden.'
-                          : 'No activity shortcuts to show.'}
-                    </p>
-                  ) : (
-                    <div className="quick-add-scroll-frame">
-                  <div
-                    ref={quickAddScrollRef}
-                    className="quick-add-scroll"
-                    onScroll={updateQuickAddScrollMetrics}
-                  >
-                    <div className="quick-add-list">
-                      {quickAddActivityGroups.map((group) => {
-                        const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
-
-                        return (
-                          <section
-                            key={group.engagement.id}
-                            className="quick-add-group"
-                            style={{
-                              '--quick-add-color': engagementColor,
-                            } as CSSProperties}
-                          >
-                            <div
-                              className="quick-add-group-header"
-                              title={formatEntityDisplayLabel(
-                                group.engagement.name,
-                                group.engagement.code,
-                                'Engagement',
-                              )}
-                            >
-                              <span>{formatEntityPrimaryLabel(
-                                group.engagement.name,
-                                group.engagement.code,
-                                'Engagement',
-                              )}</span>
-                            </div>
-                            <div className="quick-add-grid">
-                              {group.activities.map(({ activity, engagement }) => {
-                                const activityColor = activity.colorHex ?? engagementColor
-                                const isDraggingActivity =
-                                  quickBlockDragState?.activityId === activity.id
-                                  && quickBlockDragState.engagementId === engagement.id
-                                const durationMinutes = isDraggingActivity
-                                  ? quickBlockDragState.durationMinutes
-                                  : TIMELINE_MANUAL_CREATE_DURATION_MINUTES
-                                const activityLabel = activity.name || activity.code
-                                const fullActivityLabel = formatEntityDisplayLabel(activity.name, activity.code)
-
-                                return (
-                                  <button
-                                    key={activity.id}
-                                    type="button"
-                                    className={`quick-add-tile ${isDraggingActivity ? 'dragging' : ''}`}
-                                    onPointerDown={(event) =>
-                                      onQuickBlockActivityPointerDown(event, engagement, activity)
-                                    }
-                                    onPointerMove={onQuickBlockActivityPointerMove}
-                                    onPointerUp={(event) =>
-                                      onQuickBlockActivityPointerUp(event, engagement, activity)
-                                    }
-                                    onPointerCancel={onQuickBlockActivityPointerCancel}
-                                    onKeyDown={(event) => {
-                                      if (event.key === 'Enter' || event.key === ' ') {
-                                        event.preventDefault()
-                                        createQuickBlockEntry(
-                                          engagement,
-                                          activity,
-                                          TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
-                                        )
-                                      }
-                                    }}
-                                    aria-label={`Add ${fullActivityLabel} for ${formatQuickBlockDuration(durationMinutes)}`}
-                                    title={fullActivityLabel}
-                                    style={{
-                                      '--quick-add-color': activityColor,
-                                      '--quick-add-duration-progress': `${quickEntryDurationProgress(durationMinutes)}%`,
-                                    } as CSSProperties}
-                                  >
-                                    <span className="quick-add-tile-main">
-                                      <strong>{activityLabel}</strong>
-                                    </span>
-                                    {isDraggingActivity ? (
-                                      <span className="quick-add-duration">
-                                        {formatQuickBlockDuration(durationMinutes)}
-                                      </span>
-                                    ) : null}
-                                    {isDraggingActivity ? (
-                                      <span className="quick-add-duration-track" aria-hidden="true">
-                                        <span />
-                                      </span>
-                                    ) : null}
-                                  </button>
-                                )
-                              })}
-                            </div>
-                          </section>
-                        )
-                      })}
-                    </div>
-                  </div>
-                  <QuickEntryScrollIndicator
-                    scrollRef={quickAddScrollRef}
-                    metrics={quickAddScrollMetrics}
-                  />
-                    </div>
-                  )}
-                </>
-              ) : null}
             </div>
 
           </section>

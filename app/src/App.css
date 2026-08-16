@@ -280,7 +280,6 @@
 }
 
 .quick-add-panel {
-  --quick-add-scroll-lane: 0.75rem;
   border-top: 1px solid rgba(158, 176, 205, 0.38);
   padding: 0.62rem 0 0;
   display: flex;
@@ -291,7 +290,6 @@
   background: transparent;
   box-shadow: none;
   overflow: visible;
-  container-type: inline-size;
 }
 
 .quick-add-header {
@@ -457,13 +455,6 @@
   color: var(--ink);
 }
 
-.quick-add-browse-label {
-  margin: 0.18rem 0 -0.18rem;
-  color: var(--ink-soft);
-  font-size: 0.66rem;
-  font-weight: 720;
-}
-
 .quick-add-settings-button {
   width: 1.45rem;
   height: 1.45rem;
@@ -523,229 +514,6 @@
   border-color: rgba(31, 122, 255, 0.52);
   outline: 2px solid rgba(31, 122, 255, 0.14);
   outline-offset: 0;
-}
-
-.quick-add-scroll-frame {
-  --quick-add-scroll-thumb-top: 0%;
-  --quick-add-scroll-thumb-height: 100%;
-  position: relative;
-  min-height: 0;
-  height: 100%;
-  flex: 1 1 auto;
-  overflow: visible;
-}
-
-.quick-add-scroll {
-  width: calc(100% + var(--quick-add-scroll-lane));
-  width: calc(100cqw + var(--quick-add-scroll-lane));
-  min-height: 0;
-  height: 100%;
-  margin-right: calc(-1 * var(--quick-add-scroll-lane));
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  padding-right: 0;
-  box-sizing: border-box;
-  scrollbar-width: none;
-}
-
-.quick-add-scroll::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-
-.quick-add-scroll-indicator {
-  position: absolute;
-  top: 0.16rem;
-  right: -0.56rem;
-  bottom: 0.16rem;
-  width: 0.22rem;
-  border-radius: 999px;
-  background: rgba(16, 34, 63, 0.08);
-  cursor: pointer;
-  opacity: 0.88;
-  pointer-events: auto;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-.quick-add-scroll-indicator span {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: var(--quick-add-scroll-thumb-top);
-  height: var(--quick-add-scroll-thumb-height);
-  min-height: 1.35rem;
-  border-radius: 999px;
-  background: rgba(16, 34, 63, 0.34);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.34);
-  will-change: top, height;
-  cursor: grab;
-  transition:
-    height 120ms ease,
-    background-color 120ms ease;
-}
-
-.quick-add-scroll-frame:hover .quick-add-scroll-indicator span {
-  background: rgba(16, 34, 63, 0.44);
-}
-
-.quick-add-scroll-indicator.dragging span {
-  background: rgba(16, 34, 63, 0.54);
-  cursor: grabbing;
-}
-
-.quick-add-list {
-  width: 100%;
-  width: 100cqw;
-  box-sizing: border-box;
-  display: grid;
-  gap: 0.52rem;
-  align-content: start;
-}
-
-.quick-add-group {
-  position: relative;
-  display: grid;
-  gap: 0.28rem;
-  min-width: 0;
-  padding-left: 0;
-}
-
-.quick-add-group::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0.1rem;
-  bottom: 0.1rem;
-  width: 2.5px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--quick-add-color) 56%, rgba(158, 176, 205, 0.3));
-}
-
-.quick-add-group-header {
-  min-width: 0;
-  padding: 0 0.12rem 0 0.48rem;
-  color: var(--ink-soft);
-}
-
-.quick-add-group-header span,
-.quick-add-tile-main strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quick-add-group-header span {
-  display: block;
-  font-size: 0.68rem;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.quick-add-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.34rem;
-  margin-left: 0.48rem;
-}
-
-.quick-add-tile {
-  position: relative;
-  width: 100%;
-  height: 2.62rem;
-  min-width: 0;
-  border-radius: 10px;
-  border: 1.25px solid color-mix(in srgb, var(--quick-add-color) 34%, rgba(158, 176, 205, 0.58));
-  padding: 0 0.55rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.78);
-  color: var(--ink);
-  box-shadow: var(--glass-inset);
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  transition:
-    border-color 120ms ease,
-    background-color 120ms ease,
-    box-shadow 120ms ease,
-    transform 120ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-.quick-add-tile:hover:not(:disabled),
-.quick-add-tile.dragging {
-  border-color: color-mix(in srgb, var(--quick-add-color) 56%, rgba(158, 176, 205, 0.58));
-  background: color-mix(in srgb, var(--quick-add-color) 8%, rgba(255, 255, 255, 0.9));
-  box-shadow:
-    0 6px 14px rgba(16, 24, 40, 0.06),
-    var(--glass-inset);
-  transform: translateY(-1px);
-}
-
-.quick-add-tile:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--quick-add-color) 42%, var(--accent));
-  outline-offset: 2px;
-}
-
-.quick-add-tile-main {
-  min-width: 0;
-  position: relative;
-  z-index: 1;
-  max-width: 100%;
-}
-
-.quick-add-tile-main strong {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  font-size: 0.72rem;
-  font-weight: 500;
-  line-height: 1.08;
-  text-align: center;
-}
-
-.quick-add-duration {
-  position: absolute;
-  top: 0.34rem;
-  right: 0.36rem;
-  z-index: 1;
-  min-width: 1.65rem;
-  border-radius: 999px;
-  padding: 0.1rem 0.24rem;
-  background: rgba(255, 255, 255, 0.74);
-  color: var(--ink-soft);
-  font-size: 0.62rem;
-  font-weight: 800;
-  line-height: 1;
-  text-align: center;
-  white-space: nowrap;
-  box-shadow: inset 0 0 0 1px rgba(158, 176, 205, 0.24);
-}
-
-.quick-add-duration-track {
-  position: absolute;
-  left: 0.5rem;
-  right: 0.5rem;
-  bottom: 0.26rem;
-  height: 0.16rem;
-  border-radius: 999px;
-  background: rgba(16, 34, 63, 0.08);
-  overflow: hidden;
-}
-
-.quick-add-duration-track span {
-  display: block;
-  width: var(--quick-add-duration-progress);
-  height: 100%;
-  border-radius: inherit;
-  background: var(--quick-add-color);
 }
 
 .quick-add-empty,
@@ -3365,20 +3133,19 @@ button.danger:hover:not(:disabled) {
   box-shadow: none;
 }
 
-.quick-add-settings-preview .quick-add-scroll-frame {
+.quick-add-settings-preview-list {
+  flex: 1 1 auto;
   min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 0.08rem;
+  padding: 0.08rem 0.12rem 0.3rem 0;
+  overscroll-behavior: contain;
 }
 
-.quick-add-settings-preview .quick-add-scroll {
-  max-height: none;
-}
-
-.quick-add-settings-preview .quick-add-tile {
+.quick-add-settings-preview-result {
   pointer-events: none;
-}
-
-.quick-add-settings-preview-tile {
-  cursor: default;
 }
 
 .quick-add-settings-empty {

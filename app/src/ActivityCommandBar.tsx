@@ -19,12 +19,15 @@ const DURATION_OPTIONS = [15, 30, 45, 60, 90, 120] as const
 
 interface ActivityCommandBarProps {
   activities: QuickEntryActivityView[]
+  defaultActivities?: QuickEntryActivityView[]
   disabled?: boolean
   autoFocus?: boolean
+  alwaysShowResults?: boolean
   placeholder?: string
   ariaLabel?: string
   actionLabel?: string
   emptyMessage?: string
+  defaultEmptyMessage?: string
   initialDurationMinutes?: number
   fixedDurationMinutes?: number
   showDuration?: boolean
@@ -53,12 +56,15 @@ interface ActivityCommandBarProps {
 
 export function ActivityCommandBar({
   activities,
+  defaultActivities,
   disabled = false,
   autoFocus = false,
+  alwaysShowResults = false,
   placeholder = 'Search activities',
   ariaLabel = 'Search activities',
   actionLabel = 'Add',
   emptyMessage = 'No matching activities.',
+  defaultEmptyMessage,
   initialDurationMinutes = 30,
   fixedDurationMinutes,
   showDuration = true,
@@ -84,11 +90,13 @@ export function ActivityCommandBar({
   const [isOpen, setIsOpen] = useState(autoFocus)
   const [activeIndex, setActiveIndex] = useState(0)
 
-  const results = useMemo(
-    () => rankActivityCommandResults(activities, query).slice(0, Math.max(1, resultLimit)),
-    [activities, query, resultLimit],
-  )
+  const hasQuery = normalizeSearchText(query).length > 0
+  const results = useMemo(() => {
+    const sourceActivities = hasQuery ? activities : (defaultActivities ?? activities)
+    return rankActivityCommandResults(sourceActivities, query).slice(0, Math.max(1, resultLimit))
+  }, [activities, defaultActivities, hasQuery, query, resultLimit])
   const resolvedActiveIndex = Math.min(activeIndex, Math.max(0, results.length - 1))
+  const shouldShowResults = alwaysShowResults || isOpen
 
   useEffect(() => {
     if (!autoFocus) {
@@ -103,8 +111,8 @@ export function ActivityCommandBar({
   }, [autoFocus])
 
   useEffect(() => {
-    onOpenChange?.(isOpen)
-  }, [isOpen, onOpenChange])
+    onOpenChange?.(shouldShowResults)
+  }, [onOpenChange, shouldShowResults])
 
   const selectedDurationMinutes = fixedDurationMinutes ?? durationMinutes
 
@@ -164,7 +172,7 @@ export function ActivityCommandBar({
 
   return (
     <form
-      className={`activity-command results-${resultsMaterial} presentation-${resultsPresentation} ${isOpen ? 'is-open' : ''}`}
+      className={`activity-command results-${resultsMaterial} presentation-${resultsPresentation} ${shouldShowResults ? 'is-open' : ''}`}
       onSubmit={onFormSubmit}
       onFocus={() => setIsOpen(true)}
       onBlur={(event) => {
@@ -183,7 +191,7 @@ export function ActivityCommandBar({
             role="combobox"
             aria-label={ariaLabel}
             aria-autocomplete="list"
-            aria-expanded={isOpen}
+            aria-expanded={shouldShowResults}
             aria-controls={listboxId}
             aria-activedescendant={
               isOpen && activeResult ? `${listboxId}-${activeResult.activity.id}` : undefined
@@ -221,12 +229,14 @@ export function ActivityCommandBar({
         ) : null}
       </div>
 
-      {isOpen ? (
+      {shouldShowResults ? (
         <div className="activity-command-results" id={listboxId} role="listbox">
           {results.length === 0 ? (
-            <p className="activity-command-empty">{emptyMessage}</p>
+            <p className="activity-command-empty">
+              {!hasQuery && defaultEmptyMessage ? defaultEmptyMessage : emptyMessage}
+            </p>
           ) : results.map((item, index) => {
-            const isActive = index === resolvedActiveIndex
+            const isActive = isOpen && index === resolvedActiveIndex
             const isDurationDragging =
               resultDragState?.activityId === item.activity.id
               && resultDragState.engagementId === item.engagement.id
