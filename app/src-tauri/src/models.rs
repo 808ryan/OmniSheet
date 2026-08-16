@@ -985,6 +985,14 @@ pub struct TimerStartInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TimerUpdateInput {
+    pub engagement_id: String,
+    pub activity_id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TimerStopInput {
     pub stop_date: String,
     pub stop_minute: i64,

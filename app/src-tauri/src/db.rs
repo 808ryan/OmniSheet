@@ -1309,6 +1309,56 @@ pub fn insert_manual_timeline_entry(
     engagement_id: Option<&str>,
     activity_id: Option<&str>,
 ) -> AppResult<String> {
+    insert_timeline_entry_with_source(
+        conn,
+        date,
+        start_minute,
+        end_minute,
+        duration_minutes,
+        description,
+        engagement_id,
+        activity_id,
+        "manual",
+        "Manual Entry",
+    )
+}
+
+pub fn insert_timer_timeline_entry(
+    conn: &Connection,
+    date: &str,
+    start_minute: i64,
+    end_minute: i64,
+    duration_minutes: i64,
+    description: &str,
+    engagement_id: Option<&str>,
+    activity_id: Option<&str>,
+) -> AppResult<String> {
+    insert_timeline_entry_with_source(
+        conn,
+        date,
+        start_minute,
+        end_minute,
+        duration_minutes,
+        description,
+        engagement_id,
+        activity_id,
+        "timer",
+        "Timer Entry",
+    )
+}
+
+fn insert_timeline_entry_with_source(
+    conn: &Connection,
+    date: &str,
+    start_minute: i64,
+    end_minute: i64,
+    duration_minutes: i64,
+    description: &str,
+    engagement_id: Option<&str>,
+    activity_id: Option<&str>,
+    source: &str,
+    user_submission_text: &str,
+) -> AppResult<String> {
     let id = Uuid::new_v4().to_string();
     let now = current_unix_timestamp();
 
@@ -1320,7 +1370,7 @@ pub fn insert_manual_timeline_entry(
         used_activity_fallback, used_temporal_fallback, duration_defaulted,
         fallback_summary, source_message_entry_index, source_message_entry_count, created_at, updated_at
       )
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'Manual Entry', 'manual', NULL, 1.0, 0, 0, 0, NULL, NULL, NULL, ?9, ?9)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, 1.0, 0, 0, 0, NULL, NULL, NULL, ?11, ?11)
     "#,
         params![
             id,
@@ -1331,6 +1381,8 @@ pub fn insert_manual_timeline_entry(
             end_minute,
             duration_minutes,
             description.trim(),
+            user_submission_text,
+            source,
             now,
         ],
     )?;
@@ -1407,6 +1459,26 @@ pub fn insert_active_timer(
     )?;
 
     Ok(())
+}
+
+pub fn update_active_timer(
+    conn: &Connection,
+    engagement_id: &str,
+    activity_id: &str,
+    description: &str,
+) -> AppResult<bool> {
+    let updated_count = conn.execute(
+        r#"
+      UPDATE active_timer
+      SET engagement_id = ?1,
+          activity_id = ?2,
+          description = ?3
+      WHERE singleton_id = 1
+    "#,
+        params![engagement_id, activity_id, description.trim()],
+    )?;
+
+    Ok(updated_count > 0)
 }
 
 pub fn clear_active_timer(conn: &Connection) -> AppResult<()> {

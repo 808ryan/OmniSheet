@@ -347,9 +347,9 @@
 
 .quick-add-active-timer {
   display: grid;
-  grid-template-columns: 0.22rem minmax(0, 1fr) auto auto auto;
+  grid-template-columns: 0.22rem minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.42rem;
   min-width: 0;
   min-height: 2.55rem;
   padding: 0.38rem 0.42rem;
@@ -388,42 +388,73 @@
 }
 
 .quick-add-active-timer time {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
   color: var(--ink-soft);
   font-size: 0.68rem;
   font-variant-numeric: tabular-nums;
   font-weight: 760;
+  line-height: 1;
 }
 
-.quick-add-stop-timer-button {
-  min-height: 1.72rem;
-  padding: 0.26rem 0.48rem;
+.quick-add-active-timer-controls {
+  display: inline-flex;
+  align-self: center;
+  align-items: center;
+  height: 1.8rem;
+  gap: 0.32rem;
+}
+
+.quick-add-active-timer-actions {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  gap: 0.12rem;
+}
+
+.quick-add-stop-timer-button,
+.quick-add-discard-timer-button {
+  width: 1.8rem;
+  height: 1.8rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
   border: 0;
   border-radius: 7px;
-  background: var(--quick-add-timer-color);
-  color: white;
-  font-size: 0.66rem;
-  font-weight: 740;
+  background: transparent;
   box-shadow: none;
+  line-height: 0;
 }
 
 .quick-add-discard-timer-button {
-  min-height: 1.65rem;
-  padding: 0.22rem 0.16rem;
-  border: 0;
-  background: transparent;
   color: var(--ink-soft);
-  font-size: 0.63rem;
-  font-weight: 720;
-  box-shadow: none;
+}
+
+.quick-add-stop-timer-button {
+  color: var(--ink-soft);
+}
+
+.quick-add-timer-action-icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+.quick-add-timer-stop-icon {
+  width: 0.9rem;
+  height: 0.9rem;
 }
 
 .quick-add-discard-timer-button:hover:not(:disabled),
 .quick-add-discard-timer-button:focus-visible {
+  background: var(--danger-soft);
   color: var(--danger);
 }
 
-.quick-add-stop-timer-button:hover:not(:disabled) {
-  filter: brightness(0.94);
+.quick-add-stop-timer-button:hover:not(:disabled),
+.quick-add-stop-timer-button:focus-visible {
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink);
 }
 
 .quick-add-browse-label {
@@ -818,6 +849,11 @@
 @media (prefers-reduced-motion: reduce) {
   .segmented-control-indicator {
     transition: none;
+  }
+
+  .timeline-block-live-dot,
+  .live-timer-status-dot {
+    animation: none;
   }
 }
 
@@ -2256,6 +2292,11 @@ button.danger:hover:not(:disabled) {
   transform: translateY(-1px);
 }
 
+.timeline-block:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .timeline-grid.dragging .timeline-block {
   cursor: grabbing;
 }
@@ -2292,24 +2333,23 @@ button.danger:hover:not(:disabled) {
 }
 
 .timeline-block.active-timer-preview {
-  border: 2px dashed var(--timeline-block-accent);
+  border: 1px solid var(--timeline-block-border);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0.22)),
     var(--timeline-block-fill);
-  cursor: default;
-  pointer-events: none;
+  cursor: pointer;
+  pointer-events: auto;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.5),
     0 2px 7px rgba(15, 23, 42, 0.08);
-  transform: none;
 }
 
 .timeline-block.active-timer-preview::before {
-  opacity: 0.72;
+  opacity: 0.9;
 }
 
 .timeline-block.active-timer-preview:hover {
-  transform: none;
+  transform: translateY(-1px);
 }
 
 .timeline-create-preview {
@@ -2424,6 +2464,56 @@ button.danger:hover:not(:disabled) {
   z-index: 1;
 }
 
+.timeline-block-content.has-live-status .timeline-block-label {
+  padding-right: 6.15rem;
+}
+
+.timeline-block-live-badge {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.timeline-block-live-badge {
+  right: 3rem;
+  gap: 0.22rem;
+  border: 1px solid rgba(180, 35, 24, 0.2);
+  border-radius: 999px;
+  padding: 0.13rem 0.3rem;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--danger);
+  font-size: 0.58rem;
+  font-weight: 850;
+  line-height: 1;
+  letter-spacing: 0.045em;
+}
+
+.timeline-block-live-dot,
+.live-timer-status-dot {
+  width: 0.38rem;
+  height: 0.38rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.32);
+  animation: live-timer-pulse 2.2s ease-out infinite;
+}
+
+@keyframes live-timer-pulse {
+  0%, 45% {
+    box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.3);
+  }
+
+  70%, 100% {
+    box-shadow: 0 0 0 5px rgba(180, 35, 24, 0);
+  }
+}
+
 .timeline-block-duration-badge {
   position: absolute;
   top: 50%;
@@ -2464,6 +2554,10 @@ button.danger:hover:not(:disabled) {
 
 .timeline-block.tier-3.duration-active .timeline-block-label {
   padding-right: 2.45rem;
+}
+
+.timeline-block.tier-3 .timeline-block-content.has-live-status .timeline-block-label {
+  padding-right: 5.8rem;
 }
 
 .timeline-block.tier-3 .timeline-block-duration-badge {
@@ -2541,6 +2635,131 @@ button.danger:hover:not(:disabled) {
 
 .timeline-editor-header h3 {
   margin: 0;
+}
+
+.live-timer-editor {
+  align-content: start;
+  border-color: rgba(180, 35, 24, 0.2);
+  background:
+    linear-gradient(180deg, rgba(180, 35, 24, 0.035), transparent 7rem),
+    var(--surface-alt);
+}
+
+.live-timer-editor-header {
+  align-items: flex-start;
+}
+
+.live-timer-editor-heading {
+  display: grid;
+  min-width: 0;
+  gap: 0.24rem;
+}
+
+.live-timer-editor-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  gap: 0.3rem;
+  color: var(--danger);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+}
+
+.live-timer-editor-form {
+  align-content: start;
+}
+
+.live-timer-time-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.live-timer-readonly-value {
+  min-height: 2.5rem;
+  margin-top: 0.34rem;
+  padding: 0.46rem 0.56rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid var(--control-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.54);
+  color: var(--ink);
+  font-size: 0.76rem;
+  box-shadow: var(--glass-inset);
+}
+
+.live-timer-readonly-value time,
+.live-timer-readonly-value strong {
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
+}
+
+.live-timer-readonly-value.is-running {
+  color: var(--danger);
+}
+
+.live-timer-entry-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.live-timer-entry-action-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+}
+
+.live-timer-action-button {
+  width: 2.3rem;
+  height: 2.3rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--ink-soft);
+  box-shadow: var(--glass-inset);
+}
+
+.live-timer-action-button.is-discard:hover:not(:disabled),
+.live-timer-action-button.is-discard:focus-visible {
+  border-color: rgba(180, 35, 24, 0.26);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.live-timer-action-button.is-stop:hover:not(:disabled),
+.live-timer-action-button.is-stop:focus-visible {
+  border-color: var(--outline-strong);
+  background: var(--control-fill-hover);
+  color: var(--ink);
+}
+
+.live-timer-action-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.live-timer-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.live-timer-action-icon {
+  width: 1.08rem;
+  height: 1.08rem;
+}
+
+.live-timer-stop-icon {
+  width: 0.98rem;
+  height: 0.98rem;
 }
 
 .timeline-editor-close {
@@ -2665,6 +2884,23 @@ button.danger:hover:not(:disabled) {
   padding-top: 0.7rem;
   font-size: 0.85rem;
   color: var(--ink-soft);
+}
+
+.entry-source-timer > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 720;
+}
+
+.entry-source-timer-icon {
+  width: 0.82rem;
+  height: 0.82rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .calendar-bulk-backdrop {

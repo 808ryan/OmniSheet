@@ -418,6 +418,12 @@ export interface TimerStartInput {
   description?: string | null
 }
 
+export interface TimerUpdateInput {
+  engagementId: string
+  activityId: string
+  description: string
+}
+
 export interface TimerStopInput {
   stopDate: string
   stopMinute: number

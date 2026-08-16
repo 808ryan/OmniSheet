@@ -8,7 +8,7 @@ import type {
 import { emit, listen } from '@tauri-apps/api/event'
 
 import { ActivityCommandBar } from './ActivityCommandBar'
-import { TimerIcon } from './InterfaceIcons'
+import { StopIcon, TimerIcon, TrashIcon } from './InterfaceIcons'
 import {
   engagementList,
   interpretTextMessage,
@@ -798,23 +798,31 @@ function QuickAdd() {
               <strong>{activeTimer.activityName || activeTimer.activityCode}</strong>
               <small>{activeTimer.engagementName || activeTimer.engagementCode}</small>
             </span>
-            <time>{activeTimerElapsedLabel}</time>
-            <button
-              type="button"
-              className="quick-add-discard-button"
-              onClick={() => void discardCurrentTimer()}
-              disabled={status === 'submitting'}
-            >
-              Discard
-            </button>
-            <button
-              type="button"
-              className="quick-add-stop-button"
-              onClick={() => void stopCurrentTimer()}
-              disabled={status === 'submitting'}
-            >
-              Stop
-            </button>
+            <span className="quick-add-active-timer-controls">
+              <time>{activeTimerElapsedLabel}</time>
+              <span className="quick-add-active-timer-actions">
+                <button
+                  type="button"
+                  className="quick-add-discard-button"
+                  onClick={() => void discardCurrentTimer()}
+                  disabled={status === 'submitting'}
+                  aria-label="Discard running timer"
+                  title="Discard running timer"
+                >
+                  <TrashIcon className="quick-add-timer-action-icon" />
+                </button>
+                <button
+                  type="button"
+                  className="quick-add-stop-button"
+                  onClick={() => void stopCurrentTimer()}
+                  disabled={status === 'submitting'}
+                  aria-label="Stop and save timer"
+                  title="Stop and save timer"
+                >
+                  <StopIcon className="quick-add-timer-action-icon quick-add-timer-stop-icon" />
+                </button>
+              </span>
+            </span>
           </div>
         ) : null}
 

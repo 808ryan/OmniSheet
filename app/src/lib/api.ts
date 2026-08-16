@@ -45,6 +45,7 @@ import type {
   TimerStartInput,
   TimerStopInput,
   TimerStopResult,
+  TimerUpdateInput,
 } from './types'
 
 export class AppCommandError extends Error implements AppCommandErrorShape {
@@ -356,6 +357,10 @@ export function timerGetActive(): Promise<ActiveTimer | null> {
 
 export function timerStart(input: TimerStartInput): Promise<ActiveTimer> {
   return invokeCommand<ActiveTimer>('timer_start', { input })
+}
+
+export function timerUpdateActive(input: TimerUpdateInput): Promise<ActiveTimer> {
+  return invokeCommand<ActiveTimer>('timer_update_active', { input })
 }
 
 export function timerStop(input: TimerStopInput): Promise<TimerStopResult> {
