@@ -988,6 +988,8 @@ pub struct TimerStartInput {
 pub struct TimerUpdateInput {
     pub engagement_id: String,
     pub activity_id: String,
+    pub start_date: String,
+    pub start_minute: i64,
     pub description: String,
 }
 
