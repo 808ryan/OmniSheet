@@ -83,6 +83,7 @@ import {
   REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH,
 } from './lib/reporting'
 import {
+  dateMinuteToLocalDate,
   formatDate,
   joinTags,
   minuteToLabel,
@@ -271,6 +272,16 @@ interface ActiveTimerDraft {
   engagementId: string
   activityId: string
   description: string
+}
+
+interface ActiveTimerDragState {
+  entryId: string
+  pointerId: number
+  initialClientY: number
+  originalStartMinute: number
+  originalEndMinute: number
+  previewStartMinute: number
+  isDragging: boolean
 }
 
 type EntryAutoSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
@@ -1061,6 +1072,7 @@ function App() {
   const [activeTimerDraft, setActiveTimerDraft] = useState<ActiveTimerDraft | null>(null)
   const [activeTimerAutoSaveStatus, setActiveTimerAutoSaveStatus] =
     useState<EntryAutoSaveStatus>('idle')
+  const [activeTimerDragState, setActiveTimerDragState] = useState<ActiveTimerDragState | null>(null)
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
@@ -1098,6 +1110,8 @@ function App() {
   const activeTimerDraftAutoSaveTimeoutRef = useRef<number | null>(null)
   const activeTimerDraftSaveChainRef = useRef<Promise<boolean>>(Promise.resolve(true))
   const activeTimerDraftLastSavedKeyRef = useRef<string | null>(null)
+  const activeTimerDragStateRef = useRef<ActiveTimerDragState | null>(null)
+  const selectNextLoadedActiveTimerRef = useRef(false)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
   const timelineCreateDragStateRef = useRef<TimelineCreateDragState | null>(null)
   const timelineMutationInFlightRef = useRef(false)
@@ -1356,6 +1370,10 @@ function App() {
     [loadedTimelineEntries, selectedEntryId],
   )
   const isActiveTimerSelected = Boolean(activeTimer && selectedActiveTimerDate)
+  const displayedActiveTimer = useMemo(
+    () => applyActiveTimerDraft(activeTimer, activeTimerDraft),
+    [activeTimer, activeTimerDraft],
+  )
   const selectedEntryHasMultiEventSource = (selectedEntry?.sourceMessageEntryCount ?? 0) > 1
   const visibleMonthSummaries = useMemo(
     () => monthSummaryCache[visibleMonth] ?? [],
@@ -1815,8 +1833,11 @@ function App() {
       + TIMELINE_CANVAS_BOTTOM_PADDING
   )
   const activeTimerDayPreviewEntry = useMemo(
-    () => buildActiveTimerPreviewEntry(activeTimer, selectedDate, timelineClock),
-    [activeTimer, selectedDate, timelineClock],
+    () => applyActiveTimerDragPreview(
+      buildActiveTimerPreviewEntry(displayedActiveTimer, selectedDate, timelineClock),
+      activeTimerDragState,
+    ),
+    [activeTimerDragState, displayedActiveTimer, selectedDate, timelineClock],
   )
   const timelineCreatePreview = useMemo<TimelineCreateSelection | null>(() => {
     if (!timelineCreateDragState?.isDragging) {
@@ -1915,9 +1936,12 @@ function App() {
   )
   const activeTimerWeekPreviewEntries = useMemo(
     () => weekTimelineDays
-      .map((day) => buildActiveTimerPreviewEntry(activeTimer, day.date, timelineClock))
+      .map((day) => applyActiveTimerDragPreview(
+        buildActiveTimerPreviewEntry(displayedActiveTimer, day.date, timelineClock),
+        activeTimerDragState,
+      ))
       .filter((entry): entry is TimelineEntry => entry !== null),
-    [activeTimer, timelineClock, weekTimelineDays],
+    [activeTimerDragState, displayedActiveTimer, timelineClock, weekTimelineDays],
   )
   const weekTimelineEntries = useMemo(
     () => weekTimeline?.entries ?? [],
@@ -2660,7 +2684,14 @@ function App() {
       if (event.payload?.origin === 'main-live-timer-editor') {
         return
       }
-      void loadActiveTimer()
+      if (!activeTimerRef.current) {
+        selectNextLoadedActiveTimerRef.current = true
+      }
+      void loadActiveTimer().then((timer) => {
+        if (!timer) {
+          selectNextLoadedActiveTimerRef.current = false
+        }
+      })
     }).then((nextUnlisten) => {
       if (cancelled) {
         nextUnlisten()
@@ -3530,6 +3561,17 @@ function App() {
     [],
   )
 
+  const setActiveTimerDragStateWithRef = useCallback(
+    (updater: (previous: ActiveTimerDragState | null) => ActiveTimerDragState | null) => {
+      setActiveTimerDragState((previous) => {
+        const next = updater(previous)
+        activeTimerDragStateRef.current = next
+        return next
+      })
+    },
+    [],
+  )
+
   const setQuickBlockDragStateWithRef = useCallback(
     (updater: (previous: QuickEntryDragState | null) => QuickEntryDragState | null) => {
       setQuickBlockDragState((previous) => {
@@ -3556,8 +3598,9 @@ function App() {
     setTimelineCreateSelection(null)
     timelineCreateDragStateRef.current = null
     setTimelineCreateDragState(null)
+    setActiveTimerDragStateWithRef(() => null)
     setTimelineDragStateWithRef(() => null)
-  }, [setTimelineDragStateWithRef])
+  }, [setActiveTimerDragStateWithRef, setTimelineDragStateWithRef])
 
   const requestTimelineAutoCenter = useCallback((date: string) => {
     pendingAutoCenterDateRef.current = date
@@ -4267,11 +4310,12 @@ function App() {
       setActiveTimerDraft(null)
       setActiveTimerAutoSaveStatus('idle')
       setSelectedActiveTimerDate(null)
+      setActiveTimerDragStateWithRef(() => null)
       return
     }
 
     setActiveTimerDraft((previous) => {
-      if (previous && isActiveTimerDraftForTimer(previous, activeTimer)) {
+      if (previous && activeTimerDraftMatchesTimer(previous, activeTimer)) {
         return previous
       }
 
@@ -4280,7 +4324,7 @@ function App() {
       setActiveTimerAutoSaveStatus('saved')
       return nextDraft
     })
-  }, [activeTimer])
+  }, [activeTimer, setActiveTimerDragStateWithRef])
 
   useEffect(() => {
     timelineEntriesRef.current = loadedTimelineEntries
@@ -5611,18 +5655,13 @@ function App() {
     onSelectEntry(entry, { syncSelectedDate: true })
   }
 
-  const onSelectActiveTimerBlock = (
-    entry: TimelineEntry,
-    options?: {
-      syncSelectedDate?: boolean
-    },
+  const selectActiveTimer = useCallback((
+    timer: ActiveTimer,
+    date: string,
+    options?: { syncSelectedDate?: boolean },
   ) => {
-    if (!activeTimer || !isActiveTimerPreviewEntry(entry)) {
-      return
-    }
-
     if (options?.syncSelectedDate) {
-      updateSelectedDate(entry.date, { clearSelection: false })
+      updateSelectedDate(date, { clearSelection: false })
     }
     if (entryDraftAutoSaveTimeoutRef.current !== null) {
       window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
@@ -5634,14 +5673,77 @@ function App() {
     setHighlightedEntryId(null)
     setEntryDraft(null)
     setTimelineContextMenu(null)
-    setSelectedActiveTimerDate(entry.date)
+    setSelectedActiveTimerDate(date)
 
-    if (!activeTimerDraft || !isActiveTimerDraftForTimer(activeTimerDraft, activeTimer)) {
-      const nextDraft = buildActiveTimerDraft(activeTimer)
+    setActiveTimerDraft((previous) => {
+      if (previous && activeTimerDraftMatchesTimer(previous, timer)) {
+        return previous
+      }
+
+      const nextDraft = buildActiveTimerDraft(timer)
       activeTimerDraftLastSavedKeyRef.current = serializeActiveTimerDraft(nextDraft)
       setActiveTimerAutoSaveStatus('saved')
-      setActiveTimerDraft(nextDraft)
+      return nextDraft
+    })
+  }, [updateSelectedDate])
+
+  const onSelectActiveTimerBlock = (
+    entry: TimelineEntry,
+    options?: {
+      syncSelectedDate?: boolean
+    },
+  ) => {
+    if (suppressTimelineClickRef.current) {
+      suppressTimelineClickRef.current = false
+      return
     }
+
+    if (!activeTimer || !isActiveTimerPreviewEntry(entry)) {
+      return
+    }
+
+    selectActiveTimer(activeTimer, entry.date, options)
+  }
+
+  useEffect(() => {
+    if (!activeTimer || !selectNextLoadedActiveTimerRef.current) {
+      return
+    }
+
+    selectNextLoadedActiveTimerRef.current = false
+    setActiveView('timeline')
+    selectActiveTimer(activeTimer, activeTimer.startDate, { syncSelectedDate: true })
+    requestTimelineAutoCenter(activeTimer.startDate)
+  }, [activeTimer, requestTimelineAutoCenter, selectActiveTimer])
+
+  const onStartActiveTimerDrag = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    entry: TimelineEntry,
+  ) => {
+    if (
+      event.button !== 0
+      || !activeTimer
+      || !isActiveTimerPreviewEntry(entry)
+      || entry.date !== activeTimer.startDate
+      || isBusy
+      || timelineMutationInFlightRef.current
+      || isTimelineDeleteBusy
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    suppressTimelineClickRef.current = false
+    selectActiveTimer(activeTimer, entry.date, { syncSelectedDate: true })
+    setActiveTimerDragStateWithRef(() => ({
+      entryId: entry.id,
+      pointerId: event.pointerId,
+      initialClientY: event.clientY,
+      originalStartMinute: entry.startMinute,
+      originalEndMinute: entry.endMinute,
+      previewStartMinute: entry.startMinute,
+      isDragging: false,
+    }))
   }
 
   const onStartTimelineDrag = (
@@ -5947,6 +6049,8 @@ function App() {
         const updatedTimer = await timerUpdateActive({
           engagementId: draft.engagementId,
           activityId: draft.activityId,
+          startDate: draft.startDate,
+          startMinute: draft.startMinute,
           description: draft.description,
         })
         if (!activeTimerRef.current || !isActiveTimerDraftForTimer(draft, activeTimerRef.current)) {
@@ -6024,6 +6128,115 @@ function App() {
     return activeTimerDraftSaveChainRef.current.catch(() => false)
   }, [activeTimerDraft, queueActiveTimerDraftSave])
 
+  const activeTimerDragPointerId = activeTimerDragState?.pointerId ?? null
+
+  useEffect(() => {
+    if (activeTimerDragPointerId === null) {
+      return
+    }
+
+    const finishDrag = (pointerId: number, shouldCommit: boolean) => {
+      const current = activeTimerDragStateRef.current
+      if (!current || current.pointerId !== pointerId) {
+        return
+      }
+
+      if (current.isDragging) {
+        suppressTimelineClickRef.current = true
+      }
+
+      if (
+        shouldCommit
+        && current.isDragging
+        && current.previewStartMinute !== current.originalStartMinute
+      ) {
+        const currentTimer = activeTimerRef.current
+        if (currentTimer) {
+          setActiveTimerDraft((previous) => {
+            const nextDraft = previous && isActiveTimerDraftForTimer(previous, currentTimer)
+              ? { ...previous, startMinute: current.previewStartMinute }
+              : {
+                  ...buildActiveTimerDraft(currentTimer),
+                  startMinute: current.previewStartMinute,
+                }
+            setActiveTimerAutoSaveStatus('saving')
+            return nextDraft
+          })
+          setSelectedActiveTimerDate(currentTimer.startDate)
+        }
+      }
+
+      setActiveTimerDragStateWithRef(() => null)
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const current = activeTimerDragStateRef.current
+      if (!current || event.pointerId !== current.pointerId) {
+        return
+      }
+
+      const deltaY = event.clientY - current.initialClientY
+      if (!current.isDragging && Math.abs(deltaY) < TIMELINE_DRAG_ACTIVATION_PX) {
+        return
+      }
+
+      const nextStartMinute = Math.min(
+        current.originalEndMinute - TIMELINE_DRAG_SNAP_MINUTES,
+        Math.max(
+          0,
+          snapMinute(
+            current.originalStartMinute + deltaY / PIXELS_PER_MINUTE,
+            TIMELINE_DRAG_SNAP_MINUTES,
+          ),
+        ),
+      )
+
+      setActiveTimerDragStateWithRef((previous) => {
+        if (!previous || previous.pointerId !== event.pointerId) {
+          return previous
+        }
+
+        if (previous.isDragging && previous.previewStartMinute === nextStartMinute) {
+          return previous
+        }
+
+        return {
+          ...previous,
+          previewStartMinute: nextStartMinute,
+          isDragging: true,
+        }
+      })
+    }
+
+    const handlePointerUp = (event: PointerEvent) => finishDrag(event.pointerId, true)
+    const handlePointerCancel = (event: PointerEvent) => finishDrag(event.pointerId, false)
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+
+      const current = activeTimerDragStateRef.current
+      if (!current) {
+        return
+      }
+
+      event.preventDefault()
+      finishDrag(current.pointerId, false)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerCancel)
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerCancel)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [activeTimerDragPointerId, setActiveTimerDragStateWithRef])
+
   const startActivityTimer = useCallback(
     (engagement: Engagement, activity: Activity) => {
       if (timelineMutationInFlightRef.current || activeTimer) {
@@ -6038,13 +6251,17 @@ function App() {
           startDate: formatDate(now),
           startMinute: now.getHours() * HOUR_IN_MINUTES + now.getMinutes(),
         })
+        activeTimerRef.current = timer
         setActiveTimer(timer)
         setIsTimerSelectionMode(false)
+        setActiveView('timeline')
+        selectActiveTimer(timer, timer.startDate, { syncSelectedDate: true })
+        requestTimelineAutoCenter(timer.startDate)
         setSuccessMessage(`Tracking ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
         await emit(TIMER_CHANGED_EVENT)
       })
     },
-    [activeTimer, runTimelineMutation],
+    [activeTimer, requestTimelineAutoCenter, runTimelineMutation, selectActiveTimer],
   )
 
   const stopCurrentTimer = useCallback(() => {
@@ -6053,7 +6270,10 @@ function App() {
     }
 
     const now = new Date()
-    const elapsedHours = (now.getTime() - activeTimer.startedAt * 1000) / 3_600_000
+    const elapsedHours = activeTimerElapsedMilliseconds(
+      applyActiveTimerDraft(activeTimer, activeTimerDraft) ?? activeTimer,
+      now,
+    ) / 3_600_000
     if (
       elapsedHours >= 12
       && !window.confirm(`This timer has been running for ${Math.floor(elapsedHours)} hours. Save the full range?`)
@@ -6102,6 +6322,7 @@ function App() {
     })
   }, [
     activeTimer,
+    activeTimerDraft,
     flushActiveTimerDraft,
     invalidateMonthSummaries,
     loadQuickAddSuggestions,
@@ -7900,11 +8121,11 @@ function App() {
       <div className="timeline-editor-header live-timer-editor-header">
         <div className="live-timer-editor-heading">
           <h3>Edit Entry</h3>
-          <span className="live-timer-editor-status" aria-label={`Timer live for ${formatActiveTimerElapsed(activeTimer, timelineClock)}`}>
+          <span className="live-timer-editor-status" aria-label={`Timer live for ${formatActiveTimerElapsed(displayedActiveTimer ?? activeTimer, timelineClock)}`}>
             <span className="live-timer-status-dot" aria-hidden="true" />
             <span>LIVE</span>
             <span aria-hidden="true">·</span>
-            <time>{formatActiveTimerElapsed(activeTimer, timelineClock)}</time>
+            <time>{formatActiveTimerElapsed(displayedActiveTimer ?? activeTimer, timelineClock)}</time>
           </span>
         </div>
         <button
@@ -7980,9 +8201,31 @@ function App() {
         <div className="live-timer-time-grid">
           <label>
             Start
-            <output className="live-timer-readonly-value">
-              <time>{minuteToLabel(activeTimer.startMinute)}</time>
-            </output>
+            <span className="time-input-shell">
+              <input
+                type="time"
+                step={60}
+                value={minuteToTimeInput(activeTimerDraft.startMinute)}
+                max={activeTimerDraft.startDate === todayDate
+                  ? minuteToTimeInput(currentTimelineMinute)
+                  : undefined}
+                onChange={(event) => {
+                  const nextStartMinute = timeInputToMinute(event.target.value)
+                  setActiveTimerDraft((previous) => previous
+                    ? {
+                        ...previous,
+                        startMinute: Math.min(
+                          MINUTES_IN_DAY - 1,
+                          Math.max(0, nextStartMinute),
+                        ),
+                      }
+                    : previous)
+                }}
+                disabled={isBusy}
+                aria-label="Live timer start time"
+              />
+              <span className="control-icon clock-icon" aria-hidden="true" />
+            </span>
           </label>
           <label>
             End
@@ -9814,7 +10057,7 @@ function App() {
                 aria-controls="llm-entry-body"
                 title={isLlmEntryCollapsed ? 'Expand bulk entry' : 'Collapse bulk entry'}
               >
-                <span>Bulk entry with AI</span>
+                <span>Bulk Entry</span>
                 <span
                   className={`control-icon ${isLlmEntryCollapsed ? 'chevron-down' : 'chevron-up'}`}
                   aria-hidden="true"
@@ -9947,7 +10190,7 @@ function App() {
                     )}</small>
                   </span>
                   <span className="quick-add-active-timer-controls">
-                    <time>{formatActiveTimerElapsed(activeTimer, timelineClock)}</time>
+                    <time>{formatActiveTimerElapsed(displayedActiveTimer ?? activeTimer, timelineClock)}</time>
                     <span className="quick-add-active-timer-actions">
                       <button
                         type="button"
@@ -10280,11 +10523,15 @@ function App() {
                       const blockPalette = buildTimelineBlockPalette(blockColor)
 
                       if (isActiveTimerPreview) {
+                        const canAdjustStart = entry.date === activeTimer?.startDate
+                        const isAdjustingStart =
+                          activeTimerDragState?.entryId === entry.id
+                          && activeTimerDragState.isDragging
                         return (
                           <button
                             type="button"
                             key={entry.id}
-                            className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier} ${isSelectedBlock ? 'selected' : ''}`}
+                            className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier} ${isSelectedBlock ? 'selected' : ''} ${canAdjustStart ? 'can-move-start' : ''} ${isAdjustingStart ? 'is-adjusting-start' : ''}`}
                             style={{
                               top: positionedEntry.top,
                               height: positionedEntry.height,
@@ -10293,8 +10540,11 @@ function App() {
                               ...buildTimelineBlockCssVariables(blockPalette),
                             } as CSSProperties}
                             onClick={() => onSelectActiveTimerBlock(entry)}
-                            title={`${blockLabel.fullLabel}\nLive timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.`}
-                            aria-label={`${blockLabel.fullLabel}. Live timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.`}
+                            onPointerDown={canAdjustStart
+                              ? (event) => onStartActiveTimerDrag(event, entry)
+                              : undefined}
+                            title={`${blockLabel.fullLabel}\nLive timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.${canAdjustStart ? '\nDrag vertically to adjust the start time.' : ''}`}
+                            aria-label={`${blockLabel.fullLabel}. Live timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.${canAdjustStart ? ' Drag vertically to adjust the start time.' : ''}`}
                           >
                             <TimelineBlockContent
                               label={blockLabel.label}
@@ -10715,11 +10965,15 @@ function App() {
                         const blockPalette = buildTimelineBlockPalette(blockColor)
 
                         if (isActiveTimerPreview) {
+                          const canAdjustStart = entry.date === activeTimer?.startDate
+                          const isAdjustingStart =
+                            activeTimerDragState?.entryId === entry.id
+                            && activeTimerDragState.isDragging
                           return (
                             <button
                               type="button"
                               key={entry.id}
-                              className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier} ${isSelectedBlock ? 'selected' : ''}`}
+                              className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier} ${isSelectedBlock ? 'selected' : ''} ${canAdjustStart ? 'can-move-start' : ''} ${isAdjustingStart ? 'is-adjusting-start' : ''}`}
                               style={{
                                 top: positionedEntry.top,
                                 height: positionedEntry.height,
@@ -10728,8 +10982,11 @@ function App() {
                                 ...buildTimelineBlockCssVariables(blockPalette),
                               } as CSSProperties}
                               onClick={() => onSelectActiveTimerBlock(entry, { syncSelectedDate: true })}
-                              title={`${blockLabel.fullLabel}\nLive timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.`}
-                              aria-label={`${blockLabel.fullLabel}. Live timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.`}
+                              onPointerDown={canAdjustStart
+                                ? (event) => onStartActiveTimerDrag(event, entry)
+                                : undefined}
+                              title={`${blockLabel.fullLabel}\nLive timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.${canAdjustStart ? '\nDrag vertically to adjust the start time.' : ''}`}
+                              aria-label={`${blockLabel.fullLabel}. Live timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.${canAdjustStart ? ' Drag vertically to adjust the start time.' : ''}`}
                             >
                               <TimelineBlockContent
                                 label={blockLabel.label}
@@ -12014,6 +12271,7 @@ function App() {
             fixedDurationMinutes={
               timelineCreateSelection.endMinute - timelineCreateSelection.startMinute
             }
+            showDuration={false}
             contextLabel="Type a few characters, then press Enter"
             clearAfterSubmit={false}
             resultLimit={6}
@@ -13104,8 +13362,30 @@ function buildActiveTimerDraft(timer: ActiveTimer): ActiveTimerDraft {
 
 function isActiveTimerDraftForTimer(draft: ActiveTimerDraft, timer: ActiveTimer): boolean {
   return draft.startedAt === timer.startedAt
+}
+
+function activeTimerDraftMatchesTimer(draft: ActiveTimerDraft, timer: ActiveTimer): boolean {
+  return isActiveTimerDraftForTimer(draft, timer)
     && draft.startDate === timer.startDate
     && draft.startMinute === timer.startMinute
+    && draft.engagementId === timer.engagementId
+    && draft.activityId === timer.activityId
+    && draft.description === timer.description
+}
+
+function applyActiveTimerDraft(
+  timer: ActiveTimer | null,
+  draft: ActiveTimerDraft | null,
+): ActiveTimer | null {
+  if (!timer || !draft || !isActiveTimerDraftForTimer(draft, timer)) {
+    return timer
+  }
+
+  return {
+    ...timer,
+    startDate: draft.startDate,
+    startMinute: draft.startMinute,
+  }
 }
 
 function serializeActiveTimerDraft(draft: ActiveTimerDraft): string {
@@ -13697,11 +13977,16 @@ function formatTimelineHoursCompact(minutes: number): string {
 function formatActiveTimerElapsed(timer: ActiveTimer, now: Date): string {
   const elapsedMinutes = Math.max(
     0,
-    Math.floor((now.getTime() - timer.startedAt * 1000) / 60_000),
+    Math.floor(activeTimerElapsedMilliseconds(timer, now) / 60_000),
   )
   const hours = Math.floor(elapsedMinutes / HOUR_IN_MINUTES)
   const minutes = elapsedMinutes % HOUR_IN_MINUTES
   return `${hours}:${`${minutes}`.padStart(2, '0')}`
+}
+
+function activeTimerElapsedMilliseconds(timer: ActiveTimer, now: Date): number {
+  const start = dateMinuteToLocalDate(timer.startDate, timer.startMinute)
+  return Math.max(0, now.getTime() - start.getTime())
 }
 
 function buildActiveTimerPreviewEntry(
@@ -14050,6 +14335,21 @@ function applyDragPreviewToTimelineEntries(
         }
       : entry,
   )
+}
+
+function applyActiveTimerDragPreview(
+  entry: TimelineEntry | null,
+  dragState: ActiveTimerDragState | null,
+): TimelineEntry | null {
+  if (!entry || !dragState?.isDragging || entry.id !== dragState.entryId) {
+    return entry
+  }
+
+  return {
+    ...entry,
+    startMinute: dragState.previewStartMinute,
+    durationMinutes: entry.endMinute - dragState.previewStartMinute,
+  }
 }
 
 function applyOptimisticTimelineEntryPreview(

@@ -421,6 +421,8 @@ export interface TimerStartInput {
 export interface TimerUpdateInput {
   engagementId: string
   activityId: string
+  startDate: string
+  startMinute: number
   description: string
 }
 

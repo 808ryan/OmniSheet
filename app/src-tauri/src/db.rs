@@ -1465,6 +1465,8 @@ pub fn update_active_timer(
     conn: &Connection,
     engagement_id: &str,
     activity_id: &str,
+    start_date: &str,
+    start_minute: i64,
     description: &str,
 ) -> AppResult<bool> {
     let updated_count = conn.execute(
@@ -1472,10 +1474,18 @@ pub fn update_active_timer(
       UPDATE active_timer
       SET engagement_id = ?1,
           activity_id = ?2,
-          description = ?3
+          start_date = ?3,
+          start_minute = ?4,
+          description = ?5
       WHERE singleton_id = 1
     "#,
-        params![engagement_id, activity_id, description.trim()],
+        params![
+            engagement_id,
+            activity_id,
+            start_date,
+            start_minute,
+            description.trim()
+        ],
     )?;
 
     Ok(updated_count > 0)

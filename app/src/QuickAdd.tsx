@@ -39,7 +39,7 @@ import {
 } from './lib/quickEntry'
 import type { QuickEntryDragState } from './lib/quickEntry'
 import { isTauriRuntime } from './lib/runtime'
-import { formatDate } from './lib/time'
+import { dateMinuteToLocalDate, formatDate } from './lib/time'
 import type {
   ActiveTimer,
   Activity,
@@ -431,7 +431,7 @@ function QuickAdd() {
     }
 
     const now = new Date()
-    const elapsedHours = (now.getTime() - activeTimer.startedAt * 1000) / 3_600_000
+    const elapsedHours = activeTimerElapsedMilliseconds(activeTimer, now) / 3_600_000
     if (
       elapsedHours >= 12
       && !window.confirm(`This timer has been running for ${Math.floor(elapsedHours)} hours. Save the full range?`)
@@ -480,7 +480,7 @@ function QuickAdd() {
   }, [activeTimer])
 
   const activeTimerElapsedLabel = activeTimer
-    ? formatElapsedTimer(Math.max(0, timerClock.getTime() - activeTimer.startedAt * 1000))
+    ? formatElapsedTimer(activeTimerElapsedMilliseconds(activeTimer, timerClock))
     : null
 
   const onQuickBlockActivityPointerDown = (
@@ -758,7 +758,7 @@ function QuickAdd() {
           aria-expanded={isBulkEntryOpen}
           aria-controls="quick-add-bulk-entry"
         >
-          <span>Bulk entry with AI</span>
+          <span>Bulk Entry</span>
           <span aria-hidden="true">{isBulkEntryOpen ? '−' : '+'}</span>
         </button>
 
@@ -835,6 +835,11 @@ function formatElapsedTimer(milliseconds: number): string {
   const minutes = Math.floor((totalSeconds % 3600) / 60)
   const seconds = totalSeconds % 60
   return [hours, minutes, seconds].map((value) => `${value}`.padStart(2, '0')).join(':')
+}
+
+function activeTimerElapsedMilliseconds(timer: ActiveTimer, now: Date): number {
+  const start = dateMinuteToLocalDate(timer.startDate, timer.startMinute)
+  return Math.max(0, now.getTime() - start.getTime())
 }
 
 function monthKeyFromDate(date: string): string {

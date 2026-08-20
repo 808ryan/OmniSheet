@@ -2120,6 +2120,17 @@ button.danger:hover:not(:disabled) {
   transform: translateY(-1px);
 }
 
+.timeline-block.active-timer-preview.can-move-start {
+  cursor: grab;
+  touch-action: none;
+}
+
+.timeline-block.active-timer-preview.is-adjusting-start {
+  z-index: 6;
+  cursor: grabbing;
+  transform: none;
+}
+
 .timeline-create-preview {
   position: absolute;
   z-index: 5;

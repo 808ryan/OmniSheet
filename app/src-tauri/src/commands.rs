@@ -5522,8 +5522,31 @@ pub fn timer_update_active(
     }
     validate_manual_create_refs(&connection, Some(engagement_id), Some(activity_id))?;
 
-    if !db::update_active_timer(&connection, engagement_id, activity_id, &input.description)
-        .map_err(|error| error.to_string())?
+    let start_date = input.start_date.trim();
+    let parsed_start_date =
+        parse_date(start_date).ok_or_else(|| "timer start date must be YYYY-MM-DD".to_string())?;
+    if !(0..MINUTES_IN_DAY).contains(&input.start_minute) {
+        return Err("timer start minute must be within the selected day".to_string());
+    }
+    let now = Local::now();
+    let current_time = now.time();
+    let current_minute = i64::from(TimeParts::hour(&current_time)) * 60
+        + i64::from(TimeParts::minute(&current_time));
+    if parsed_start_date > now.date_naive()
+        || (parsed_start_date == now.date_naive() && input.start_minute > current_minute)
+    {
+        return Err("timer start time cannot be in the future".to_string());
+    }
+
+    if !db::update_active_timer(
+        &connection,
+        engagement_id,
+        activity_id,
+        start_date,
+        input.start_minute,
+        &input.description,
+    )
+    .map_err(|error| error.to_string())?
     {
         return Err("no timer is running".to_string());
     }
@@ -9708,12 +9731,16 @@ mod tests {
             &connection,
             &engagement_id,
             &activity_id,
+            "2026-08-08",
+            570,
             "Updated timer description",
         )
         .expect("timer should update"));
         let updated_timer = db::get_active_timer(&connection)
             .expect("updated timer should load")
             .expect("updated timer should exist");
+        assert_eq!(updated_timer.start_date, "2026-08-08");
+        assert_eq!(updated_timer.start_minute, 570);
         assert_eq!(updated_timer.description, "Updated timer description");
 
         db::clear_active_timer(&connection).expect("timer should clear");

@@ -10,6 +10,12 @@ export function parseDate(value: string): Date {
   return new Date(year, (month ?? 1) - 1, day ?? 1)
 }
 
+export function dateMinuteToLocalDate(value: string, totalMinutes: number): Date {
+  const date = parseDate(value)
+  date.setHours(Math.floor(totalMinutes / 60), totalMinutes % 60, 0, 0)
+  return date
+}
+
 export function shiftDate(value: string, dayDelta: number): string {
   const date = parseDate(value)
   date.setDate(date.getDate() + dayDelta)
