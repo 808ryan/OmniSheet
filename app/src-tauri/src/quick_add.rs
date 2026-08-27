@@ -527,9 +527,7 @@ fn clamp_to_window_bounds(value: f64, min: f64, max: f64) -> f64 {
 fn build_quick_add_tray_icon() -> tauri::Result<Image<'static>> {
     #[cfg(target_os = "macos")]
     {
-        let source = Image::from_bytes(include_bytes!("../icons/icon.png"))?.to_owned();
-
-        Ok(build_macos_template_tray_icon(source))
+        Ok(Image::from_bytes(MACOS_TRAY_TEMPLATE_PNG)?.to_owned())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -538,71 +536,63 @@ fn build_quick_add_tray_icon() -> tauri::Result<Image<'static>> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn build_macos_template_tray_icon(source: Image<'static>) -> Image<'static> {
-    let width = source.width();
-    let height = source.height();
-    let center_x = (width as f32 - 1.0) / 2.0;
-    let center_y = (height as f32 - 1.0) / 2.0;
-    let center_cutout_radius = width.min(height) as f32 * 0.245;
-    let mut rgba = Vec::with_capacity(source.rgba().len());
-
-    for (index, pixel) in source.rgba().chunks_exact(4).enumerate() {
-        let x = (index as u32 % width) as f32;
-        let y = (index as u32 / width) as f32;
-        let dx = x - center_x;
-        let dy = y - center_y;
-        let distance = (dx * dx + dy * dy).sqrt();
-        let red = pixel[0];
-        let green = pixel[1];
-        let blue = pixel[2];
-        let alpha = pixel[3];
-        let keep_outer_logo = distance > center_cutout_radius;
-        let keep_clock_hand = is_clock_hand_pixel(red, green, blue, alpha);
-        let template_alpha = if keep_outer_logo || keep_clock_hand {
-            normalize_template_alpha(alpha)
-        } else {
-            0
-        };
-
-        rgba.extend_from_slice(&[0, 0, 0, template_alpha]);
-    }
-
-    Image::new_owned(rgba, width, height)
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn is_clock_hand_pixel(red: u8, green: u8, blue: u8, alpha: u8) -> bool {
-    let max_channel = red.max(green).max(blue);
-    let min_channel = red.min(green).min(blue);
-    let saturation = max_channel.saturating_sub(min_channel);
-    let luminance = (red as u32 * 299 + green as u32 * 587 + blue as u32 * 114) / 1000;
-
-    alpha > 40 && saturation > 32 && luminance < 170
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn normalize_template_alpha(alpha: u8) -> u8 {
-    if alpha < 64 {
-        alpha
-    } else {
-        255
-    }
-}
+#[cfg(any(target_os = "macos", test))]
+// Four-times the 18 pt macOS status-item height, with geometry tuned for template rendering.
+const MACOS_TRAY_TEMPLATE_PNG: &[u8] = include_bytes!("../icons/macos-tray-template.png");
 
 #[cfg(test)]
 mod tests {
-    use super::is_clock_hand_pixel;
+    use super::MACOS_TRAY_TEMPLATE_PNG;
+    use tauri::image::Image;
 
-    #[test]
-    fn clock_hand_detection_keeps_dark_teal_and_purple_hands() {
-        assert!(is_clock_hand_pixel(8, 91, 106, 255));
-        assert!(is_clock_hand_pixel(91, 50, 145, 255));
+    fn template_icon() -> Image<'static> {
+        Image::from_bytes(MACOS_TRAY_TEMPLATE_PNG)
+            .expect("macOS tray template should decode")
+            .to_owned()
+    }
+
+    fn alpha_at(image: &Image<'_>, x: u32, y: u32) -> u8 {
+        let index = ((y * image.width() + x) * 4 + 3) as usize;
+        image.rgba()[index]
     }
 
     #[test]
-    fn clock_hand_detection_drops_light_center_disk_pixels() {
-        assert!(!is_clock_hand_pixel(230, 234, 250, 255));
-        assert!(!is_clock_hand_pixel(91, 50, 145, 20));
+    fn macos_tray_template_uses_a_square_four_x_source() {
+        let image = template_icon();
+
+        assert_eq!((image.width(), image.height()), (72, 72));
+    }
+
+    #[test]
+    fn macos_tray_template_has_a_complete_inner_ring_and_clear_dial() {
+        let image = template_icon();
+
+        for (x, y) in [(31, 28), (41, 40), (31, 50), (20, 40)] {
+            assert!(alpha_at(&image, x, y) > 200, "ring missing at ({x}, {y})");
+        }
+        for (x, y) in [(25, 40), (28, 46), (36, 44)] {
+            assert!(
+                alpha_at(&image, x, y) < 32,
+                "dial should be transparent at ({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_tray_template_preserves_four_outer_segment_gaps() {
+        let image = template_icon();
+
+        for (x, y) in [(36, 18), (52, 33), (40, 60), (13, 54)] {
+            assert!(
+                alpha_at(&image, x, y) < 32,
+                "segment gap should be transparent at ({x}, {y})"
+            );
+        }
+        for (x, y) in [(12, 27), (46, 23), (51, 49), (25, 61)] {
+            assert!(
+                alpha_at(&image, x, y) > 200,
+                "segment should be opaque at ({x}, {y})"
+            );
+        }
     }
 }
