@@ -265,6 +265,15 @@ interface EntryDraft {
   preserveEndOfDay: boolean
 }
 
+interface PendingEntryDraftSave {
+  draft: EntryDraft
+  key: string
+  preview: TimelineEntry | null
+  previousEntry: TimelineEntry | null
+  startMinute: number
+  endMinute: number
+}
+
 interface ActiveTimerDraft {
   startedAt: number
   startDate: string
@@ -1068,6 +1077,8 @@ function App() {
   const [selectedActiveTimerDate, setSelectedActiveTimerDate] = useState<string | null>(null)
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
+  const [pendingEntryDraftSaves, setPendingEntryDraftSaves] =
+    useState<Map<string, PendingEntryDraftSave>>(() => new Map())
   const [entryAutoSaveStatus, setEntryAutoSaveStatus] = useState<EntryAutoSaveStatus>('idle')
   const [activeTimerDraft, setActiveTimerDraft] = useState<ActiveTimerDraft | null>(null)
   const [activeTimerAutoSaveStatus, setActiveTimerAutoSaveStatus] =
@@ -1103,10 +1114,13 @@ function App() {
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
   const selectedDateRef = useRef(selectedDate)
   const selectedEntryIdRef = useRef<string | null>(selectedEntryId)
+  const entryDraftRef = useRef<EntryDraft | null>(entryDraft)
   const activeTimerRef = useRef<ActiveTimer | null>(activeTimer)
   const entryDraftAutoSaveTimeoutRef = useRef<number | null>(null)
   const entryDraftAutoSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const entryDraftLastSavedKeyRef = useRef<string | null>(null)
+  const entryDraftQueuedKeyByIdRef = useRef<Map<string, string>>(new Map())
+  const enqueueEntryDraftSaveRef = useRef<(draft: EntryDraft) => void>(() => undefined)
   const activeTimerDraftAutoSaveTimeoutRef = useRef<number | null>(null)
   const activeTimerDraftSaveChainRef = useRef<Promise<boolean>>(Promise.resolve(true))
   const activeTimerDraftLastSavedKeyRef = useRef<string | null>(null)
@@ -1189,6 +1203,13 @@ function App() {
       && window.matchMedia(WEEK_TIMELINE_COMPACT_MEDIA_QUERY).matches
     ),
   )
+  const updateEntryDraft = useCallback((
+    updater: (previous: EntryDraft | null) => EntryDraft | null,
+  ) => {
+    const nextDraft = updater(entryDraftRef.current)
+    entryDraftRef.current = nextDraft
+    setEntryDraft(nextDraft)
+  }, [])
   const commitSummaryLayoutDragState = useCallback((next: SummaryLayoutDragState | null) => {
     summaryLayoutDragStateRef.current = next
     setSummaryLayoutDragState(next)
@@ -1504,6 +1525,21 @@ function App() {
     ),
     [activityById, engagementById, entryDraft, selectedEntry],
   )
+  const optimisticEntryDraftPreviews = useMemo(() => {
+    const previewsByEntryId = new Map<string, TimelineEntry>()
+
+    for (const pendingSave of pendingEntryDraftSaves.values()) {
+      if (pendingSave.preview) {
+        previewsByEntryId.set(pendingSave.preview.id, pendingSave.preview)
+      }
+    }
+
+    if (optimisticEntryDraftPreview) {
+      previewsByEntryId.set(optimisticEntryDraftPreview.id, optimisticEntryDraftPreview)
+    }
+
+    return [...previewsByEntryId.values()]
+  }, [optimisticEntryDraftPreview, pendingEntryDraftSaves])
   const quickAddPreferences = useMemo(
     () => sanitizeQuickAddPreferences(settingsStatus?.quickAddPreferences, engagements),
     [engagements, settingsStatus?.quickAddPreferences],
@@ -1873,12 +1909,12 @@ function App() {
     [timelineEntries, timelinePositioningPreferences, timelineWindow],
   )
   const optimisticTimelineEntries = useMemo(
-    () => applyOptimisticTimelineEntryPreview(
+    () => applyOptimisticTimelineEntryPreviews(
       timelineEntries,
-      optimisticEntryDraftPreview,
+      optimisticEntryDraftPreviews,
       (entry) => entry.date === selectedDate,
     ),
-    [optimisticEntryDraftPreview, selectedDate, timelineEntries],
+    [optimisticEntryDraftPreviews, selectedDate, timelineEntries],
   )
   const timelineEntriesForLayout = useMemo(
     () => applyDragPreviewToTimelineEntries(optimisticTimelineEntries, timelineDragState),
@@ -1952,12 +1988,12 @@ function App() {
     [weekTimelineDays],
   )
   const optimisticWeekTimelineEntries = useMemo(
-    () => applyOptimisticTimelineEntryPreview(
+    () => applyOptimisticTimelineEntryPreviews(
       weekTimelineEntries,
-      optimisticEntryDraftPreview,
+      optimisticEntryDraftPreviews,
       (entry) => weekTimelineDateSet.has(entry.date),
     ),
-    [optimisticEntryDraftPreview, weekTimelineDateSet, weekTimelineEntries],
+    [optimisticEntryDraftPreviews, weekTimelineDateSet, weekTimelineEntries],
   )
   const weekTimelineEntriesForLayout = useMemo(
     () => applyDragPreviewToTimelineEntries(optimisticWeekTimelineEntries, timelineDragState),
@@ -3584,12 +3620,19 @@ function App() {
   )
 
   const clearTimelineSelection = useCallback(() => {
+    const currentDraft = entryDraftRef.current
+    if (currentDraft) {
+      enqueueEntryDraftSaveRef.current(currentDraft)
+    }
+
     if (entryDraftAutoSaveTimeoutRef.current !== null) {
       window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
       entryDraftAutoSaveTimeoutRef.current = null
     }
     entryDraftLastSavedKeyRef.current = null
     setEntryAutoSaveStatus('idle')
+    selectedEntryIdRef.current = null
+    entryDraftRef.current = null
     setSelectedEntryId(null)
     setSelectedActiveTimerDate(null)
     setHighlightedEntryId(null)
@@ -4297,6 +4340,10 @@ function App() {
   useEffect(() => {
     selectedEntryIdRef.current = selectedEntryId
   }, [selectedEntryId])
+
+  useEffect(() => {
+    entryDraftRef.current = entryDraft
+  }, [entryDraft])
 
   useEffect(() => {
     activeTimerRef.current = activeTimer
@@ -5609,12 +5656,187 @@ function App() {
     onSetDate(nextDate)
   }
 
+  const saveEntryDraftSnapshot = useCallback(
+    async (pendingSave: PendingEntryDraftSave) => {
+      const {
+        draft,
+        endMinute,
+        key,
+        previousEntry,
+        startMinute,
+      } = pendingSave
+      const previousEntryDate = previousEntry?.date ?? selectedDateRef.current
+      const previousMonthKey = monthKeyFromDate(previousEntryDate)
+      const nextMonthKey = monthKeyFromDate(draft.date)
+      const nextEngagementId = draft.engagementId || null
+      const nextActivityId = draft.activityId || null
+      const shouldRefreshQuickAddSuggestions =
+        previousEntry?.engagementId !== nextEngagementId
+        || previousEntry?.activityId !== nextActivityId
+      const isCurrentDraftForSave = () => {
+        const currentDraft = entryDraftRef.current
+        return selectedEntryIdRef.current === draft.id
+          && currentDraft !== null
+          && serializeEntryDraft(currentDraft) === key
+      }
+      const clearCompletedPendingSave = () => {
+        if (entryDraftQueuedKeyByIdRef.current.get(draft.id) === key) {
+          entryDraftQueuedKeyByIdRef.current.delete(draft.id)
+        }
+
+        setPendingEntryDraftSaves((previous) => {
+          const currentPendingSave = previous.get(draft.id)
+          if (!currentPendingSave || currentPendingSave.key !== key) {
+            return previous
+          }
+
+          const next = new Map(previous)
+          next.delete(draft.id)
+          return next
+        })
+      }
+
+      if (isCurrentDraftForSave()) {
+        setEntryAutoSaveStatus('saving')
+        setSuccessMessage(null)
+        setErrorMessage(null)
+      }
+
+      try {
+        await timelineUpdateEntry({
+          id: draft.id,
+          engagementId: nextEngagementId,
+          activityId: nextActivityId,
+          mode: 'manual',
+          date: draft.date,
+          startMinute,
+          endMinute,
+          description: draft.description,
+        })
+
+        invalidateMonthSummaries([previousMonthKey, nextMonthKey])
+
+        const draftRemainsSelected = selectedEntryIdRef.current === draft.id
+        if (draftRemainsSelected) {
+          updateSelectedDate(draft.date, { clearSelection: false })
+        }
+
+        const visibleRefreshDate = draftRemainsSelected ? draft.date : selectedDateRef.current
+        const refreshTasks: Promise<unknown>[] = [
+          loadTimeline(visibleRefreshDate),
+          loadWeekTimeline(visibleRefreshDate),
+          loadWeeklySummary(visibleRefreshDate),
+        ]
+
+        if (shouldRefreshQuickAddSuggestions) {
+          refreshTasks.push(loadQuickAddSuggestions())
+        }
+
+        await Promise.all(refreshTasks)
+        clearCompletedPendingSave()
+
+        if (!isCurrentDraftForSave()) {
+          return
+        }
+
+        entryDraftRef.current = draft
+        entryDraftLastSavedKeyRef.current = key
+        setEntryDraft(draft)
+        setEntryAutoSaveStatus('saved')
+      } catch (error) {
+        clearCompletedPendingSave()
+        if (isCurrentDraftForSave()) {
+          setEntryAutoSaveStatus('error')
+        }
+        setErrorMessage(formatActionErrorMessage(error))
+      }
+    },
+    [
+      invalidateMonthSummaries,
+      loadTimeline,
+      loadWeekTimeline,
+      loadWeeklySummary,
+      loadQuickAddSuggestions,
+      updateSelectedDate,
+    ],
+  )
+
+  const enqueueEntryDraftSave = useCallback((draft: EntryDraft) => {
+    const savePlan = buildEntryDraftSavePlan(draft)
+    if (!savePlan.ok) {
+      if (selectedEntryIdRef.current === draft.id) {
+        setEntryAutoSaveStatus('error')
+      }
+      setSuccessMessage(null)
+      setErrorMessage(savePlan.errorMessage)
+      return
+    }
+
+    const queuedKey = entryDraftQueuedKeyByIdRef.current.get(draft.id)
+    if (savePlan.key === entryDraftLastSavedKeyRef.current && queuedKey === undefined) {
+      return
+    }
+
+    if (entryDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
+      entryDraftAutoSaveTimeoutRef.current = null
+    }
+
+    const previousEntry = timelineEntriesRef.current.find(
+      (entry) => entry.id === savePlan.normalizedDraft.id,
+    ) ?? null
+    const preview = previousEntry
+      ? buildOptimisticTimelineEntryPreview(
+          previousEntry,
+          savePlan.normalizedDraft,
+          engagementById,
+          activityById,
+        )
+      : null
+    const pendingSave: PendingEntryDraftSave = {
+      draft: savePlan.normalizedDraft,
+      key: savePlan.key,
+      preview,
+      previousEntry,
+      startMinute: savePlan.startMinute,
+      endMinute: savePlan.endMinute,
+    }
+
+    setPendingEntryDraftSaves((previous) => {
+      if (previous.get(draft.id)?.key === savePlan.key) {
+        return previous
+      }
+
+      const next = new Map(previous)
+      next.set(draft.id, pendingSave)
+      return next
+    })
+
+    if (queuedKey === savePlan.key) {
+      return
+    }
+
+    entryDraftQueuedKeyByIdRef.current.set(draft.id, savePlan.key)
+    entryDraftAutoSaveChainRef.current = entryDraftAutoSaveChainRef.current
+      .catch(() => undefined)
+      .then(() => saveEntryDraftSnapshot(pendingSave))
+  }, [activityById, engagementById, saveEntryDraftSnapshot])
+
+  useEffect(() => {
+    enqueueEntryDraftSaveRef.current = enqueueEntryDraftSave
+  }, [enqueueEntryDraftSave])
+
   const onSelectEntry = useCallback((
     entry: TimelineEntry,
     options?: {
       syncSelectedDate?: boolean
     },
   ) => {
+    const currentDraft = entryDraftRef.current
+    if (currentDraft && currentDraft.id !== entry.id) {
+      enqueueEntryDraftSave(currentDraft)
+    }
+
     const nextDraft = buildEntryDraft(entry)
     setTimelineContextMenu(null)
     if (options?.syncSelectedDate) {
@@ -5622,11 +5844,15 @@ function App() {
     }
     setSelectedActiveTimerDate(null)
     setHighlightedEntryId(null)
+    selectedEntryIdRef.current = entry.id
+    entryDraftRef.current = nextDraft
     setSelectedEntryId(entry.id)
     entryDraftLastSavedKeyRef.current = serializeEntryDraft(nextDraft)
-    setEntryAutoSaveStatus('saved')
+    setEntryAutoSaveStatus(
+      entryDraftQueuedKeyByIdRef.current.has(entry.id) ? 'saving' : 'saved',
+    )
     setEntryDraft(nextDraft)
-  }, [updateSelectedDate])
+  }, [enqueueEntryDraftSave, updateSelectedDate])
 
   const onSelectTimelineBlock = (entry: TimelineEntry) => {
     if (suppressTimelineClickRef.current) {
@@ -5660,6 +5886,11 @@ function App() {
     date: string,
     options?: { syncSelectedDate?: boolean },
   ) => {
+    const currentDraft = entryDraftRef.current
+    if (currentDraft) {
+      enqueueEntryDraftSave(currentDraft)
+    }
+
     if (options?.syncSelectedDate) {
       updateSelectedDate(date, { clearSelection: false })
     }
@@ -5669,6 +5900,8 @@ function App() {
     }
     entryDraftLastSavedKeyRef.current = null
     setEntryAutoSaveStatus('idle')
+    selectedEntryIdRef.current = null
+    entryDraftRef.current = null
     setSelectedEntryId(null)
     setHighlightedEntryId(null)
     setEntryDraft(null)
@@ -5685,7 +5918,7 @@ function App() {
       setActiveTimerAutoSaveStatus('saved')
       return nextDraft
     })
-  }, [updateSelectedDate])
+  }, [enqueueEntryDraftSave, updateSelectedDate])
 
   const onSelectActiveTimerBlock = (
     entry: TimelineEntry,
@@ -6830,89 +7063,6 @@ function App() {
     onCreateCalendarCandidateAtMinute(calendarSelectedDate, pointerMinute)
   }
 
-  const saveEntryDraftSnapshot = useCallback(
-    async (draft: EntryDraft) => {
-      if (selectedEntryIdRef.current !== draft.id) {
-        return
-      }
-
-      const savePlan = buildEntryDraftSavePlan(draft)
-      if (!savePlan.ok) {
-        setSuccessMessage(null)
-        setErrorMessage(savePlan.errorMessage)
-        setEntryAutoSaveStatus('error')
-        return
-      }
-
-      const currentEntry = timelineEntriesRef.current.find((entry) => entry.id === draft.id) ?? null
-      const previousEntryDate = currentEntry?.date ?? selectedDateRef.current
-      const previousMonthKey = monthKeyFromDate(previousEntryDate)
-      const nextMonthKey = monthKeyFromDate(savePlan.normalizedDraft.date)
-      const refreshDate = savePlan.normalizedDraft.date
-      const nextEngagementId = savePlan.normalizedDraft.engagementId || null
-      const nextActivityId = savePlan.normalizedDraft.activityId || null
-      const shouldRefreshQuickAddSuggestions =
-        currentEntry?.engagementId !== nextEngagementId
-        || currentEntry?.activityId !== nextActivityId
-
-      setEntryAutoSaveStatus('saving')
-      setSuccessMessage(null)
-      setErrorMessage(null)
-
-      try {
-        await timelineUpdateEntry({
-          id: savePlan.normalizedDraft.id,
-          engagementId: nextEngagementId,
-          activityId: nextActivityId,
-          mode: 'manual',
-          date: savePlan.normalizedDraft.date,
-          startMinute: savePlan.startMinute,
-          endMinute: savePlan.endMinute,
-          description: savePlan.normalizedDraft.description,
-        })
-
-        invalidateMonthSummaries([previousMonthKey, nextMonthKey])
-        updateSelectedDate(refreshDate, { clearSelection: false })
-        const refreshTasks: Promise<unknown>[] = [
-          loadTimeline(refreshDate),
-          loadWeekTimeline(refreshDate),
-          loadWeeklySummary(refreshDate),
-        ]
-
-        if (shouldRefreshQuickAddSuggestions) {
-          refreshTasks.push(loadQuickAddSuggestions())
-        }
-
-        await Promise.all(refreshTasks)
-
-        if (selectedEntryIdRef.current !== draft.id) {
-          return
-        }
-
-        entryDraftLastSavedKeyRef.current = savePlan.key
-        setEntryDraft((previous) =>
-          previous && previous.id === draft.id ? savePlan.normalizedDraft : previous,
-        )
-        setEntryAutoSaveStatus('saved')
-      } catch (error) {
-        if (selectedEntryIdRef.current !== draft.id) {
-          return
-        }
-
-        setEntryAutoSaveStatus('error')
-        setErrorMessage(formatActionErrorMessage(error))
-      }
-    },
-    [
-      invalidateMonthSummaries,
-      loadTimeline,
-      loadWeekTimeline,
-      loadWeeklySummary,
-      loadQuickAddSuggestions,
-      updateSelectedDate,
-    ],
-  )
-
   useEffect(() => {
     if (!entryDraft) {
       return undefined
@@ -6930,9 +7080,7 @@ function App() {
     entryDraftAutoSaveTimeoutRef.current = window.setTimeout(() => {
       const draftToSave = entryDraft
       entryDraftAutoSaveTimeoutRef.current = null
-      entryDraftAutoSaveChainRef.current = entryDraftAutoSaveChainRef.current
-        .catch(() => undefined)
-        .then(() => saveEntryDraftSnapshot(draftToSave))
+      enqueueEntryDraftSave(draftToSave)
     }, 700)
 
     return () => {
@@ -6941,7 +7089,7 @@ function App() {
         entryDraftAutoSaveTimeoutRef.current = null
       }
     }
-  }, [entryDraft, saveEntryDraftSnapshot])
+  }, [enqueueEntryDraftSave, entryDraft])
 
   const onSaveEntryDraft = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -6950,9 +7098,7 @@ function App() {
       return
     }
 
-    entryDraftAutoSaveChainRef.current = entryDraftAutoSaveChainRef.current
-      .catch(() => undefined)
-      .then(() => saveEntryDraftSnapshot(entryDraft))
+    enqueueEntryDraftSave(entryDraft)
   }
 
   const onDeleteTimelineEntry = (id: string) => {
@@ -8309,7 +8455,7 @@ function App() {
               type="date"
               value={entryDraft.date}
               onChange={(event) =>
-                setEntryDraft((previous) =>
+                updateEntryDraft((previous) =>
                   previous
                     ? {
                         ...previous,
@@ -8325,7 +8471,7 @@ function App() {
             <select
               value={entryDraft.engagementId}
               onChange={(event) =>
-                setEntryDraft((previous) =>
+                updateEntryDraft((previous) =>
                   previous
                     ? {
                         ...previous,
@@ -8349,7 +8495,7 @@ function App() {
             <select
               value={entryDraft.activityId}
               onChange={(event) =>
-                setEntryDraft((previous) =>
+                updateEntryDraft((previous) =>
                   previous
                     ? {
                         ...previous,
@@ -8375,7 +8521,7 @@ function App() {
                 step={60}
                 value={entryDraft.startTime}
                 onChange={(event) =>
-                  setEntryDraft((previous) =>
+                  updateEntryDraft((previous) =>
                     previous
                       ? {
                           ...previous,
@@ -8396,7 +8542,7 @@ function App() {
                 step={60}
                 value={entryDraft.endTime}
                 onChange={(event) =>
-                  setEntryDraft((previous) =>
+                  updateEntryDraft((previous) =>
                     previous
                       ? {
                           ...previous,
@@ -8417,7 +8563,7 @@ function App() {
               rows={4}
               value={entryDraft.description}
               onChange={(event) =>
-                setEntryDraft((previous) =>
+                updateEntryDraft((previous) =>
                   previous
                     ? {
                         ...previous,
@@ -14352,18 +14498,20 @@ function applyActiveTimerDragPreview(
   }
 }
 
-function applyOptimisticTimelineEntryPreview(
+function applyOptimisticTimelineEntryPreviews(
   entries: TimelineEntry[],
-  optimisticEntry: TimelineEntry | null,
+  optimisticEntries: TimelineEntry[],
   shouldIncludeEntry: (entry: TimelineEntry) => boolean,
 ): TimelineEntry[] {
-  if (!optimisticEntry || !shouldIncludeEntry(optimisticEntry)) {
-    return entries
-  }
+  return optimisticEntries.reduce((currentEntries, optimisticEntry) => {
+    if (!shouldIncludeEntry(optimisticEntry)) {
+      return currentEntries.filter((entry) => entry.id !== optimisticEntry.id)
+    }
 
-  return entries.some((entry) => entry.id === optimisticEntry.id)
-    ? replaceTimelineEntry(entries, optimisticEntry)
-    : entries
+    return currentEntries.some((entry) => entry.id === optimisticEntry.id)
+      ? replaceTimelineEntry(currentEntries, optimisticEntry)
+      : replaceTimelineEntry([...currentEntries, optimisticEntry], optimisticEntry)
+  }, entries)
 }
 
 function buildOptimisticTimelineEntryPreview(
