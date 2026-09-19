@@ -43,6 +43,7 @@ import {
   timerCancel,
   timerGetActive,
   timerStart,
+  timerStartFromEntry,
   timerStop,
   timerUpdateActive,
   transcribeAudioClip,
@@ -305,6 +306,18 @@ type EntryDraftSavePlan =
   }
   | {
     ok: false
+    errorMessage: string
+  }
+
+type EntryLiveEligibility =
+  | {
+    eligible: true
+    title: string
+    savePlan: Extract<EntryDraftSavePlan, { ok: true }>
+  }
+  | {
+    eligible: false
+    title: string
     errorMessage: string
   }
 
@@ -1086,6 +1099,7 @@ function App() {
   const [activeTimerDragState, setActiveTimerDragState] = useState<ActiveTimerDragState | null>(null)
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
+  const [isEntryLiveConversionBusy, setIsEntryLiveConversionBusy] = useState(false)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
   const [timelineCreateSelection, setTimelineCreateSelection] =
     useState<TimelineCreateSelection | null>(null)
@@ -6589,6 +6603,90 @@ function App() {
     })
   }, [activeTimer, runTimelineMutation])
 
+  const startSelectedEntryLive = useCallback(() => {
+    const draft = entryDraftRef.current
+    if (
+      !draft
+      || timelineMutationInFlightRef.current
+      || isTimelineDeleteBusy
+      || isEntryLiveConversionBusy
+    ) {
+      return
+    }
+
+    const eligibility = resolveEntryLiveEligibility(draft, activeTimerRef.current, new Date())
+    if (!eligibility.eligible) {
+      setErrorMessage(eligibility.errorMessage)
+      return
+    }
+    const { savePlan } = eligibility
+
+    void runTimelineMutation(async () => {
+      setIsEntryLiveConversionBusy(true)
+      try {
+        enqueueEntryDraftSave(savePlan.normalizedDraft)
+        await entryDraftAutoSaveChainRef.current.catch(() => undefined)
+
+        const result = await timerStartFromEntry({
+          entryId: savePlan.normalizedDraft.id,
+          engagementId: savePlan.normalizedDraft.engagementId,
+          activityId: savePlan.normalizedDraft.activityId,
+          startDate: savePlan.normalizedDraft.date,
+          startMinute: savePlan.startMinute,
+          description: savePlan.normalizedDraft.description,
+        })
+
+        entryDraftQueuedKeyByIdRef.current.delete(savePlan.normalizedDraft.id)
+        setPendingEntryDraftSaves((previous) => {
+          if (!previous.has(savePlan.normalizedDraft.id)) {
+            return previous
+          }
+
+          const next = new Map(previous)
+          next.delete(savePlan.normalizedDraft.id)
+          return next
+        })
+        entryDraftLastSavedKeyRef.current = null
+        entryDraftRef.current = null
+        selectedEntryIdRef.current = null
+        activeTimerRef.current = result.timer
+        setActiveTimer(result.timer)
+        setIsTimerSelectionMode(false)
+        selectActiveTimer(result.timer, result.timer.startDate, { syncSelectedDate: true })
+        requestTimelineAutoCenter(result.timer.startDate)
+
+        await Promise.all([
+          loadTimeline(result.timer.startDate),
+          loadWeekTimeline(result.timer.startDate),
+          loadWeeklySummary(result.timer.startDate),
+          loadQuickAddSuggestions(),
+        ])
+        invalidateMonthSummaries([
+          monthKeyFromDate(result.removedEntryDate),
+          monthKeyFromDate(result.timer.startDate),
+        ])
+        setSuccessMessage(
+          `Tracking ${formatEntityDisplayLabel(result.timer.activityName, result.timer.activityCode)}.`,
+        )
+        await emit(TIMER_CHANGED_EVENT)
+      } finally {
+        setIsEntryLiveConversionBusy(false)
+      }
+    })
+  }, [
+    enqueueEntryDraftSave,
+    invalidateMonthSummaries,
+    isEntryLiveConversionBusy,
+    isTimelineDeleteBusy,
+    loadQuickAddSuggestions,
+    loadTimeline,
+    loadWeekTimeline,
+    loadWeeklySummary,
+    requestTimelineAutoCenter,
+    runTimelineMutation,
+    selectActiveTimer,
+  ])
+
   const onQuickBlockActivityPointerDown = (
     event: ReactPointerEvent<HTMLButtonElement>,
     engagement: Engagement,
@@ -7102,7 +7200,11 @@ function App() {
   }
 
   const onDeleteTimelineEntry = (id: string) => {
-    if (isTimelineDeleteBusy) {
+    if (
+      isTimelineDeleteBusy
+      || isEntryLiveConversionBusy
+      || timelineMutationInFlightRef.current
+    ) {
       return
     }
 
@@ -8262,6 +8364,22 @@ function App() {
           ? 'Not saved'
           : ''
 
+  const entryLiveEligibility = resolveEntryLiveEligibility(
+    entryDraft,
+    activeTimer,
+    timelineClock,
+  )
+  const isEntryLiveButtonBusy = isBusy
+    || isTimelineDeleteBusy
+    || isEntryLiveConversionBusy
+  const entryLiveButtonTitle = isEntryLiveButtonBusy
+    ? 'Entry updates are in progress'
+    : entryLiveEligibility.title
+  const isEntryLiveButtonDisabled = isEntryLiveButtonBusy || !entryLiveEligibility.eligible
+  const entryLiveButtonAriaLabel = isEntryLiveButtonDisabled
+    ? `Make this entry live unavailable. ${entryLiveButtonTitle}`
+    : 'Make this entry live'
+
   const liveTimerEditorPanel = activeTimer && activeTimerDraft && isActiveTimerSelected ? (
     <aside className="timeline-editor live-timer-editor">
       <div className="timeline-editor-header live-timer-editor-header">
@@ -8435,16 +8553,29 @@ function App() {
       <div className="timeline-editor-header">
         <h3>Edit Entry</h3>
         {entryDraft ? (
-          <button
-            type="button"
-            className="timeline-editor-close"
-            aria-label="Close edit entry"
-            title="Close edit entry"
-            onClick={clearTimelineSelection}
-            disabled={isTimelineDeleteBusy}
-          >
-            <span className="control-icon close-icon" aria-hidden="true" />
-          </button>
+          <div className="timeline-editor-header-actions">
+            <span className="timeline-editor-live-button-help" title={entryLiveButtonTitle}>
+              <button
+                type="button"
+                className="timeline-editor-live-button"
+                aria-label={entryLiveButtonAriaLabel}
+                onClick={startSelectedEntryLive}
+                disabled={isEntryLiveButtonDisabled}
+              >
+                <TimerIcon className="timeline-editor-live-icon" />
+              </button>
+            </span>
+            <button
+              type="button"
+              className="timeline-editor-close"
+              aria-label="Close edit entry"
+              title="Close edit entry"
+              onClick={clearTimelineSelection}
+              disabled={isTimelineDeleteBusy || isEntryLiveConversionBusy}
+            >
+              <span className="control-icon close-icon" aria-hidden="true" />
+            </button>
+          </div>
         ) : null}
       </div>
       {entryDraft ? (
@@ -8454,6 +8585,7 @@ function App() {
             <input
               type="date"
               value={entryDraft.date}
+              disabled={isEntryLiveConversionBusy}
               onChange={(event) =>
                 updateEntryDraft((previous) =>
                   previous
@@ -8470,6 +8602,7 @@ function App() {
             Engagement
             <select
               value={entryDraft.engagementId}
+              disabled={isEntryLiveConversionBusy}
               onChange={(event) =>
                 updateEntryDraft((previous) =>
                   previous
@@ -8494,6 +8627,7 @@ function App() {
             Activity
             <select
               value={entryDraft.activityId}
+              disabled={isEntryLiveConversionBusy}
               onChange={(event) =>
                 updateEntryDraft((previous) =>
                   previous
@@ -8520,6 +8654,7 @@ function App() {
                 type="time"
                 step={60}
                 value={entryDraft.startTime}
+                disabled={isEntryLiveConversionBusy}
                 onChange={(event) =>
                   updateEntryDraft((previous) =>
                     previous
@@ -8541,6 +8676,7 @@ function App() {
                 type="time"
                 step={60}
                 value={entryDraft.endTime}
+                disabled={isEntryLiveConversionBusy}
                 onChange={(event) =>
                   updateEntryDraft((previous) =>
                     previous
@@ -8562,6 +8698,7 @@ function App() {
               aria-label="Entry description"
               rows={4}
               value={entryDraft.description}
+              disabled={isEntryLiveConversionBusy}
               onChange={(event) =>
                 updateEntryDraft((previous) =>
                   previous
@@ -8585,7 +8722,7 @@ function App() {
               type="button"
               className="button-soft-danger"
               onClick={() => onDeleteTimelineEntry(entryDraft.id)}
-              disabled={isTimelineDeleteBusy}
+              disabled={isTimelineDeleteBusy || isEntryLiveConversionBusy}
             >
               <span className="control-icon trash-icon" aria-hidden="true" />
               Delete
@@ -13603,6 +13740,73 @@ function buildEntryDraftSavePlan(entryDraft: EntryDraft): EntryDraftSavePlan {
     endMinute,
     normalizedDraft,
     key: serializeEntryDraft(normalizedDraft),
+  }
+}
+
+function resolveEntryLiveEligibility(
+  entryDraft: EntryDraft | null,
+  activeTimer: ActiveTimer | null,
+  now: Date,
+): EntryLiveEligibility {
+  if (!entryDraft) {
+    return {
+      eligible: false,
+      title: 'Select an entry to make it live',
+      errorMessage: 'Select an entry to make it live.',
+    }
+  }
+  if (activeTimer) {
+    return {
+      eligible: false,
+      title: 'Stop the current live timer before starting another',
+      errorMessage: 'Stop the current live timer before starting another.',
+    }
+  }
+
+  const savePlan = buildEntryDraftSavePlan(entryDraft)
+  if (!savePlan.ok) {
+    return {
+      eligible: false,
+      title: savePlan.errorMessage,
+      errorMessage: savePlan.errorMessage,
+    }
+  }
+  if (!savePlan.normalizedDraft.engagementId || !savePlan.normalizedDraft.activityId) {
+    return {
+      eligible: false,
+      title: 'Choose an engagement and activity to make this entry live',
+      errorMessage: 'Choose an engagement and activity before making this entry live.',
+    }
+  }
+
+  const start = dateMinuteToLocalDate(
+    savePlan.normalizedDraft.date,
+    savePlan.startMinute,
+  ).getTime()
+  const end = dateMinuteToLocalDate(
+    savePlan.normalizedDraft.date,
+    savePlan.endMinute,
+  ).getTime()
+  const currentTime = now.getTime()
+  if (currentTime < start) {
+    return {
+      eligible: false,
+      title: 'This entry has not started yet',
+      errorMessage: 'A future entry cannot be made live until it starts.',
+    }
+  }
+  if (currentTime >= end) {
+    return {
+      eligible: false,
+      title: 'This entry has already ended',
+      errorMessage: 'A past entry can no longer be made live.',
+    }
+  }
+
+  return {
+    eligible: true,
+    title: 'Make this entry live',
+    savePlan,
   }
 }
 

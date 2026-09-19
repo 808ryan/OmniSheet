@@ -81,6 +81,7 @@ pub fn run() {
             commands::timeline_delete_entry,
             commands::timer_get_active,
             commands::timer_start,
+            commands::timer_start_from_entry,
             commands::timer_update_active,
             commands::timer_stop,
             commands::timer_cancel,

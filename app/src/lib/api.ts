@@ -42,6 +42,8 @@ import type {
   TimelineWeeklySummary,
   TimelineMonthSummaryInput,
   TimelineUpdateInput,
+  TimerStartFromEntryInput,
+  TimerStartFromEntryResult,
   TimerStartInput,
   TimerStopInput,
   TimerStopResult,
@@ -357,6 +359,12 @@ export function timerGetActive(): Promise<ActiveTimer | null> {
 
 export function timerStart(input: TimerStartInput): Promise<ActiveTimer> {
   return invokeCommand<ActiveTimer>('timer_start', { input })
+}
+
+export function timerStartFromEntry(
+  input: TimerStartFromEntryInput,
+): Promise<TimerStartFromEntryResult> {
+  return invokeCommand<TimerStartFromEntryResult>('timer_start_from_entry', { input })
 }
 
 export function timerUpdateActive(input: TimerUpdateInput): Promise<ActiveTimer> {

@@ -35,8 +35,9 @@ use crate::models::{
     TimelineCreateInput, TimelineDaySummary, TimelineEntry, TimelineMonthSummaryInput,
     TimelineTotalBreakdown, TimelineUpdateInput, TimelineUpdateMode, TimelineWeekStartDay,
     TimelineWeekView, TimelineWeekViewDay, TimelineWeeklySummary, TimelineWeeklySummaryNote,
-    TimerStartInput, TimerStopInput, TimerStopResult, TimerUpdateInput, TranscribeAudioInput,
-    TranscribeAudioResult, TranscriptionModelId, Warning, WarningType,
+    TimerStartFromEntryInput, TimerStartFromEntryResult, TimerStartInput, TimerStopInput,
+    TimerStopResult, TimerUpdateInput, TranscribeAudioInput, TranscribeAudioResult,
+    TranscriptionModelId, Warning, WarningType,
 };
 use crate::openai;
 use crate::state::AppState;
@@ -5462,6 +5463,26 @@ pub fn timer_get_active(state: State<'_, AppState>) -> Result<Option<ActiveTimer
     db::get_active_timer(&connection).map_err(|error| error.to_string())
 }
 
+fn validate_timer_start_window(start_date: &str, start_minute: i64) -> Result<(), String> {
+    let parsed_start_date =
+        parse_date(start_date).ok_or_else(|| "timer start date must be YYYY-MM-DD".to_string())?;
+    if !(0..MINUTES_IN_DAY).contains(&start_minute) {
+        return Err("timer start minute must be within the selected day".to_string());
+    }
+
+    let now = Local::now();
+    let current_time = now.time();
+    let current_minute = i64::from(TimeParts::hour(&current_time)) * 60
+        + i64::from(TimeParts::minute(&current_time));
+    if parsed_start_date > now.date_naive()
+        || (parsed_start_date == now.date_naive() && start_minute > current_minute)
+    {
+        return Err("timer start time cannot be in the future".to_string());
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn timer_start(
     state: State<'_, AppState>,
@@ -5476,12 +5497,7 @@ pub fn timer_start(
     }
 
     let start_date = input.start_date.trim();
-    if parse_date(start_date).is_none() {
-        return Err("timer start date must be YYYY-MM-DD".to_string());
-    }
-    if !(0..MINUTES_IN_DAY).contains(&input.start_minute) {
-        return Err("timer start minute must be within the selected day".to_string());
-    }
+    validate_timer_start_window(start_date, input.start_minute)?;
 
     let engagement_id = input.engagement_id.trim();
     let activity_id = input.activity_id.trim();
@@ -5500,6 +5516,80 @@ pub fn timer_start(
     db::get_active_timer(&connection)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "timer could not be loaded after starting".to_string())
+}
+
+fn start_timer_from_entry(
+    connection: &Connection,
+    input: TimerStartFromEntryInput,
+) -> Result<TimerStartFromEntryResult, String> {
+    if db::get_active_timer(connection)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err("a timer is already running".to_string());
+    }
+
+    let entry_id = input.entry_id.trim();
+    let removed_entry_date = db::get_entry_date(connection, entry_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "timeline entry not found".to_string())?;
+    let engagement_id = input.engagement_id.trim();
+    let activity_id = input.activity_id.trim();
+    if engagement_id.is_empty() || activity_id.is_empty() {
+        return Err("a live entry requires an engagement and activity".to_string());
+    }
+    validate_manual_create_refs(connection, Some(engagement_id), Some(activity_id))?;
+
+    let start_date = input.start_date.trim();
+    validate_timer_start_window(start_date, input.start_minute)?;
+
+    connection
+        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .map_err(|error| error.to_string())?;
+
+    let write_result: Result<ActiveTimer, String> = (|| {
+        db::insert_active_timer(
+            connection,
+            engagement_id,
+            activity_id,
+            start_date,
+            input.start_minute,
+            &input.description,
+        )
+        .map_err(|error| error.to_string())?;
+        db::delete_timeline_entry(connection, entry_id).map_err(|error| error.to_string())?;
+        let _ = db::recompute_overlap_warnings(connection, &removed_entry_date)
+            .map_err(|error| error.to_string())?;
+
+        db::get_active_timer(connection)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "timer could not be loaded after starting".to_string())
+    })();
+
+    match write_result {
+        Ok(timer) => {
+            connection
+                .execute_batch("COMMIT")
+                .map_err(|error| error.to_string())?;
+            Ok(TimerStartFromEntryResult {
+                timer,
+                removed_entry_date,
+            })
+        }
+        Err(message) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(message)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn timer_start_from_entry(
+    state: State<'_, AppState>,
+    input: TimerStartFromEntryInput,
+) -> Result<TimerStartFromEntryResult, String> {
+    let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    start_timer_from_entry(&connection, input)
 }
 
 #[tauri::command]
@@ -5523,20 +5613,7 @@ pub fn timer_update_active(
     validate_manual_create_refs(&connection, Some(engagement_id), Some(activity_id))?;
 
     let start_date = input.start_date.trim();
-    let parsed_start_date =
-        parse_date(start_date).ok_or_else(|| "timer start date must be YYYY-MM-DD".to_string())?;
-    if !(0..MINUTES_IN_DAY).contains(&input.start_minute) {
-        return Err("timer start minute must be within the selected day".to_string());
-    }
-    let now = Local::now();
-    let current_time = now.time();
-    let current_minute = i64::from(TimeParts::hour(&current_time)) * 60
-        + i64::from(TimeParts::minute(&current_time));
-    if parsed_start_date > now.date_naive()
-        || (parsed_start_date == now.date_naive() && input.start_minute > current_minute)
-    {
-        return Err("timer start time cannot be in the future".to_string());
-    }
+    validate_timer_start_window(start_date, input.start_minute)?;
 
     if !db::update_active_timer(
         &connection,
@@ -9505,7 +9582,8 @@ mod tests {
         SummaryLayoutFieldKey, SummaryLayoutPreset, SummaryLayoutState, TimelineCreateInput,
         TimelineEntry, TimelineTotalBreakdown, TimelineWeekStartDay, TimelineWeeklySummary,
         TimelineWeeklySummaryCell, TimelineWeeklySummaryDay, TimelineWeeklySummaryNote,
-        TimelineWeeklySummaryRow, TimerStopInput, TranscriptionModelId, WarningType,
+        TimelineWeeklySummaryRow, TimerStartFromEntryInput, TimerStopInput, TranscriptionModelId,
+        WarningType,
     };
     use crate::openai::LlmAttemptTelemetry;
 
@@ -9531,7 +9609,7 @@ mod tests {
         resolve_saved_calendar_bulk_model_value, resolve_saved_openai_model_value,
         resolve_saved_transcription_model_value, resolve_summary_export_field_value,
         resolve_summary_export_free_text_value, resolve_time_off_request, round_to_nearest_15,
-        should_read_openai_keyring, summary_day_notes_header,
+        should_read_openai_keyring, start_timer_from_entry, summary_day_notes_header,
         synthesize_time_off_request_from_text, timeline_week_bounds, timeline_week_view_bounds,
         validate_calendar_import_entry, validate_manual_create_refs, validate_manual_update_window,
         validate_timeline_preferences, MinuteInterval, PreparedEntry, ResolvedGapFillActivity,
@@ -9747,6 +9825,47 @@ mod tests {
         assert!(db::get_active_timer(&connection)
             .expect("cleared timer should load")
             .is_none());
+    }
+
+    #[test]
+    fn timeline_entry_can_become_the_active_timer_atomically() {
+        let connection = test_connection();
+        let (engagement_id, activity_id) = create_test_engagement_with_activity(&connection);
+        let entry = create_manual_timeline_entry(
+            &connection,
+            TimelineCreateInput {
+                date: "2020-08-09".to_string(),
+                start_minute: 600,
+                end_minute: 660,
+                engagement_id: Some(engagement_id.clone()),
+                activity_id: Some(activity_id.clone()),
+                description: Some("Original description".to_string()),
+            },
+        )
+        .expect("entry should save");
+
+        let result = start_timer_from_entry(
+            &connection,
+            TimerStartFromEntryInput {
+                entry_id: entry.id,
+                engagement_id: engagement_id.clone(),
+                activity_id: activity_id.clone(),
+                start_date: "2020-08-09".to_string(),
+                start_minute: 615,
+                description: "Updated description".to_string(),
+            },
+        )
+        .expect("entry should become a live timer");
+
+        assert_eq!(result.removed_entry_date, "2020-08-09");
+        assert_eq!(result.timer.engagement_id, engagement_id);
+        assert_eq!(result.timer.activity_id, activity_id);
+        assert_eq!(result.timer.start_date, "2020-08-09");
+        assert_eq!(result.timer.start_minute, 615);
+        assert_eq!(result.timer.description, "Updated description");
+        assert!(db::list_timeline_entries(&connection, "2020-08-09")
+            .expect("timeline should load")
+            .is_empty());
     }
 
     fn prepared_entry_for_test(
