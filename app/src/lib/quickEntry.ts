@@ -5,7 +5,6 @@ import type {
   QuickAddSuggestion,
 } from './types'
 
-export const QUICK_ENTRY_NEUTRAL_COLOR = '#6F7B89'
 export const QUICK_ENTRY_DEFAULT_DURATION_MINUTES = 30
 export const QUICK_ENTRY_DRAG_ACTIVATION_PX = 4
 
@@ -42,6 +41,7 @@ export interface QuickEntryDragState {
   pointerId: number
   originClientX: number
   currentClientX: number
+  baseDurationMinutes: number
   durationMinutes: number
   isDragging: boolean
 }
@@ -49,8 +49,6 @@ export interface QuickEntryDragState {
 export interface QuickEntryModel {
   allActivities: QuickEntryActivityView[]
   orderedActivities: QuickEntryActivityView[]
-  visibleActivities: QuickEntryActivityView[]
-  groups: QuickEntryActivityGroup[]
   activityByKey: Map<string, QuickEntryActivityView>
 }
 
@@ -59,7 +57,7 @@ interface BuildQuickEntryModelInput {
   preferences: QuickAddPreferences | null | undefined
   suggestions: QuickAddSuggestion[]
   suggestedKeys?: string[]
-  search?: string
+  includeDefaultHiddenActivities?: boolean
 }
 
 export function quickEntryActivityKey(engagementId: string, activityId: string): string {
@@ -179,7 +177,7 @@ export function buildQuickEntryModel({
   preferences,
   suggestions,
   suggestedKeys,
-  search = '',
+  includeDefaultHiddenActivities = false,
 }: BuildQuickEntryModelInput): QuickEntryModel {
   const quickAddPreferences = sanitizeQuickAddPreferences(preferences, engagements)
   const suggestionByKey = new Map<string, QuickAddSuggestion>()
@@ -225,15 +223,12 @@ export function buildQuickEntryModel({
     allActivities,
     suggestedActivities,
     quickAddPreferences,
+    includeDefaultHiddenActivities,
   )
-  const visibleActivities = filterQuickEntryActivities(orderedActivities, search)
-  const groups = groupQuickEntryActivities(visibleActivities)
 
   return {
     allActivities,
     orderedActivities,
-    visibleActivities,
-    groups,
     activityByKey,
   }
 }
@@ -261,29 +256,15 @@ export function formatEntityDisplayLabel(
   return `${primary} (${normalizedCode})`
 }
 
-export function formatQuickEntryDuration(minutes: number): string {
-  if (minutes < HOUR_IN_MINUTES) {
-    return `${minutes}m`
-  }
-
-  return formatTimelineHoursCompact(minutes)
-}
-
-export function quickEntryDurationProgress(minutes: number): number {
-  const span = QUICK_ENTRY_MAX_DURATION_MINUTES - QUICK_ENTRY_DEFAULT_DURATION_MINUTES
-
-  if (span <= 0) {
-    return 0
-  }
-
-  return ((clampQuickEntryDuration(minutes) - QUICK_ENTRY_DEFAULT_DURATION_MINUTES) / span) * 100
-}
-
-export function quickEntryDurationFromDrag(originClientX: number, currentClientX: number): number {
+export function quickEntryDurationFromDrag(
+  originClientX: number,
+  currentClientX: number,
+  baseDurationMinutes = QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
+): number {
   const dragDistance = Math.max(0, currentClientX - originClientX)
   const durationSteps = Math.round(dragDistance / QUICK_ENTRY_DRAG_STEP_PX)
   return clampQuickEntryDuration(
-    QUICK_ENTRY_DEFAULT_DURATION_MINUTES
+    baseDurationMinutes
     + durationSteps * QUICK_ENTRY_DURATION_STEP_MINUTES,
   )
 }
@@ -335,6 +316,7 @@ function orderQuickEntryActivities(
   allActivities: QuickEntryActivityView[],
   suggestedActivities: QuickEntryActivityView[],
   quickAddPreferences: QuickAddPreferences,
+  includeDefaultHiddenActivities: boolean,
 ): QuickEntryActivityView[] {
   const hiddenEngagementIds = new Set(quickAddPreferences.hiddenEngagementIds)
   const hiddenActivityIds = new Set(quickAddPreferences.hiddenActivityIds)
@@ -360,8 +342,11 @@ function orderQuickEntryActivities(
   const groups = new Map<string, QuickEntryActivityGroup>()
   for (const item of allActivities) {
     if (
-      hiddenEngagementIds.has(item.engagement.id)
-      || hiddenActivityIds.has(item.activity.id)
+      !includeDefaultHiddenActivities
+      && (
+        hiddenEngagementIds.has(item.engagement.id)
+        || hiddenActivityIds.has(item.activity.id)
+      )
     ) {
       continue
     }
@@ -455,58 +440,6 @@ function orderQuickEntryActivities(
   })
 }
 
-function filterQuickEntryActivities(
-  orderedActivities: QuickEntryActivityView[],
-  search: string,
-): QuickEntryActivityView[] {
-  const searchTerms = search
-    .trim()
-    .toLocaleLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-
-  if (searchTerms.length === 0) {
-    return orderedActivities
-  }
-
-  return orderedActivities.filter(({ engagement, activity }) => {
-    const haystack = [
-      engagement.code,
-      engagement.name,
-      activity.code,
-      activity.name,
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .toLocaleLowerCase()
-
-    return searchTerms.every((term) => haystack.includes(term))
-  })
-}
-
-function groupQuickEntryActivities(
-  visibleActivities: QuickEntryActivityView[],
-): QuickEntryActivityGroup[] {
-  const groups: QuickEntryActivityGroup[] = []
-  const groupByEngagementId = new Map<string, QuickEntryActivityGroup>()
-
-  for (const item of visibleActivities) {
-    let group = groupByEngagementId.get(item.engagement.id)
-    if (!group) {
-      group = {
-        engagement: item.engagement,
-        activities: [],
-      }
-      groupByEngagementId.set(item.engagement.id, group)
-      groups.push(group)
-    }
-
-    group.activities.push(item)
-  }
-
-  return groups
-}
-
 function normalizeDisplayText(value: string | null | undefined): string | null {
   if (!value) {
     return null
@@ -514,14 +447,6 @@ function normalizeDisplayText(value: string | null | undefined): string | null {
 
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
-}
-
-function formatTimelineHoursCompact(minutes: number): string {
-  const formattedHours = (minutes / HOUR_IN_MINUTES)
-    .toFixed(2)
-    .replace(/(?:\.0+|(\.\d*?)0+)$/, '$1')
-
-  return `${formattedHours}h`
 }
 
 function snapMinute(value: number, increment: number): number {

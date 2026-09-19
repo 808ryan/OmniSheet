@@ -538,13 +538,22 @@ fn build_quick_add_tray_icon() -> tauri::Result<Image<'static>> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
+const MACOS_TRAY_DIAL_CENTER_X_FACTOR: f32 = 0.493;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_TRAY_DIAL_CENTER_Y_FACTOR: f32 = 0.535;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_TRAY_DIAL_CUTOUT_RADIUS_FACTOR: f32 = 0.225;
+
+#[cfg(any(target_os = "macos", test))]
 fn build_macos_template_tray_icon(source: Image<'static>) -> Image<'static> {
     let width = source.width();
     let height = source.height();
-    let center_x = (width as f32 - 1.0) / 2.0;
-    let center_y = (height as f32 - 1.0) / 2.0;
-    let center_cutout_radius = width.min(height) as f32 * 0.245;
+    // The crown shifts the dial below the square canvas center. Keep the mask
+    // aligned to the dial itself and leave its outer rim as a thin complete ring.
+    let center_x = width as f32 * MACOS_TRAY_DIAL_CENTER_X_FACTOR;
+    let center_y = height as f32 * MACOS_TRAY_DIAL_CENTER_Y_FACTOR;
+    let center_cutout_radius = width.min(height) as f32 * MACOS_TRAY_DIAL_CUTOUT_RADIUS_FACTOR;
     let mut rgba = Vec::with_capacity(source.rgba().len());
 
     for (index, pixel) in source.rgba().chunks_exact(4).enumerate() {
@@ -583,8 +592,10 @@ fn is_clock_hand_pixel(red: u8, green: u8, blue: u8, alpha: u8) -> bool {
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn normalize_template_alpha(alpha: u8) -> u8 {
-    if alpha < 64 {
-        alpha
+    // Drop the glass artwork's faint shadow and glow so the four existing
+    // segment gaps stay distinct after macOS scales the template to 18 points.
+    if alpha < 128 {
+        0
     } else {
         255
     }
@@ -592,7 +603,21 @@ fn normalize_template_alpha(alpha: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::is_clock_hand_pixel;
+    use super::{build_macos_template_tray_icon, is_clock_hand_pixel, normalize_template_alpha};
+    use tauri::image::Image;
+
+    fn rendered_macos_tray_icon() -> Image<'static> {
+        let source = Image::from_bytes(include_bytes!("../icons/icon.png"))
+            .expect("app icon should decode")
+            .to_owned();
+
+        build_macos_template_tray_icon(source)
+    }
+
+    fn alpha_at(image: &Image<'_>, x: u32, y: u32) -> u8 {
+        let index = ((y * image.width() + x) * 4 + 3) as usize;
+        image.rgba()[index]
+    }
 
     #[test]
     fn clock_hand_detection_keeps_dark_teal_and_purple_hands() {
@@ -604,5 +629,45 @@ mod tests {
     fn clock_hand_detection_drops_light_center_disk_pixels() {
         assert!(!is_clock_hand_pixel(230, 234, 250, 255));
         assert!(!is_clock_hand_pixel(91, 50, 145, 20));
+    }
+
+    #[test]
+    fn template_alpha_removes_glow_but_keeps_logo_pixels() {
+        assert_eq!(normalize_template_alpha(127), 0);
+        assert_eq!(normalize_template_alpha(128), 255);
+        assert_eq!(normalize_template_alpha(255), 255);
+    }
+
+    #[test]
+    fn macos_tray_icon_keeps_a_complete_thin_dial_ring() {
+        let image = rendered_macos_tray_icon();
+
+        for (x, y) in [(252, 157), (369, 274), (252, 391), (136, 274)] {
+            assert!(alpha_at(&image, x, y) > 200, "ring missing at ({x}, {y})");
+        }
+        for (x, y) in [(252, 164), (362, 274), (252, 384), (142, 274)] {
+            assert!(
+                alpha_at(&image, x, y) < 32,
+                "dial should be transparent at ({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_tray_icon_preserves_the_four_original_segment_gaps() {
+        let image = rendered_macos_tray_icon();
+
+        for (x, y) in [(386, 394), (97, 364), (284, 97), (419, 206)] {
+            assert!(
+                alpha_at(&image, x, y) < 32,
+                "segment gap should be transparent at ({x}, {y})"
+            );
+        }
+        for (x, y) in [(252, 454), (83, 212), (380, 147), (430, 305)] {
+            assert!(
+                alpha_at(&image, x, y) > 200,
+                "segment should be opaque at ({x}, {y})"
+            );
+        }
     }
 }

@@ -8,8 +8,10 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import { listen } from '@tauri-apps/api/event'
+import { emit, listen } from '@tauri-apps/api/event'
 
+import { ActivityCommandBar } from './ActivityCommandBar'
+import { PlusIcon, StopIcon, TimerIcon, TrashIcon } from './InterfaceIcons'
 import {
   activityDelete,
   activityUpsert,
@@ -38,6 +40,12 @@ import {
   summaryExportWeeklyExcel,
   summaryLayoutStateGet,
   summaryLayoutStateSet,
+  timerCancel,
+  timerGetActive,
+  timerStart,
+  timerStartFromEntry,
+  timerStop,
+  timerUpdateActive,
   transcribeAudioClip,
   timelineCreateEntry,
   timelineDeleteEntry,
@@ -49,9 +57,11 @@ import {
   voiceRequestMicrophonePermission,
 } from './lib/api'
 import { isAppRuntime, isTauriRuntime } from './lib/runtime'
-import { QUICK_ADD_OPEN_TIMELINE_EVENT, QUICK_ADD_SUBMITTED_EVENT } from './lib/events'
-import { QuickEntryScrollIndicator } from './QuickEntryScrollIndicator'
-import type { QuickEntryScrollMetrics } from './QuickEntryScrollIndicator'
+import {
+  QUICK_ADD_OPEN_TIMELINE_EVENT,
+  QUICK_ADD_SUBMITTED_EVENT,
+  TIMER_CHANGED_EVENT,
+} from './lib/events'
 import { SegmentedControl } from './SegmentedControl'
 import {
   buildDefaultSummaryLayoutState,
@@ -74,6 +84,7 @@ import {
   REPORTING_DISPLAY_PRESET_MAX_NAME_LENGTH,
 } from './lib/reporting'
 import {
+  dateMinuteToLocalDate,
   formatDate,
   joinTags,
   minuteToLabel,
@@ -88,7 +99,6 @@ import {
   QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
   QUICK_ENTRY_DRAG_ACTIVATION_PX,
   quickEntryActivityKey as quickAddActivityKey,
-  quickEntryDurationProgress,
   quickEntryDurationFromDrag,
   resolveQuickEntryCreateWindow,
   sanitizeQuickAddPreferences,
@@ -99,6 +109,7 @@ import type {
   QuickEntryDragState,
 } from './lib/quickEntry'
 import type {
+  ActiveTimer,
   Activity,
   CalendarExtractCandidate,
   CaptureSourceId,
@@ -255,6 +266,34 @@ interface EntryDraft {
   preserveEndOfDay: boolean
 }
 
+interface PendingEntryDraftSave {
+  draft: EntryDraft
+  key: string
+  preview: TimelineEntry | null
+  previousEntry: TimelineEntry | null
+  startMinute: number
+  endMinute: number
+}
+
+interface ActiveTimerDraft {
+  startedAt: number
+  startDate: string
+  startMinute: number
+  engagementId: string
+  activityId: string
+  description: string
+}
+
+interface ActiveTimerDragState {
+  entryId: string
+  pointerId: number
+  initialClientY: number
+  originalStartMinute: number
+  originalEndMinute: number
+  previewStartMinute: number
+  isDragging: boolean
+}
+
 type EntryAutoSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
 type EntryDraftSavePlan =
@@ -267,6 +306,18 @@ type EntryDraftSavePlan =
   }
   | {
     ok: false
+    errorMessage: string
+  }
+
+type EntryLiveEligibility =
+  | {
+    eligible: true
+    title: string
+    savePlan: Extract<EntryDraftSavePlan, { ok: true }>
+  }
+  | {
+    eligible: false
+    title: string
     errorMessage: string
   }
 
@@ -427,6 +478,28 @@ interface TimelineDragState {
   isDragging: boolean
 }
 
+interface TimelineCreateSelection {
+  surface: 'day' | 'week'
+  date: string
+  startMinute: number
+  endMinute: number
+  x: number
+  y: number
+}
+
+interface TimelineCreateDragState {
+  surface: 'day' | 'week'
+  pointerId: number
+  date: string
+  originMinute: number
+  currentMinute: number
+  originClientX: number
+  originClientY: number
+  currentClientX: number
+  currentClientY: number
+  isDragging: boolean
+}
+
 interface PositionedWeekTimelineEntry extends PositionedTimelineEntry {
   dayIndex: number
   left: number
@@ -564,13 +637,15 @@ const TIMELINE_BLOCK_FILL_ALPHA = 0.2
 const TIMELINE_BLOCK_BORDER_ALPHA = 0.34
 const TIMELINE_BLOCK_SELECTION_RING_ALPHA = 0.3
 const TIMELINE_BLOCK_TEXT_COLOR = '#0F172A'
+const TIMELINE_MIN_BLOCK_HEIGHT_PX = 30
 const TIMELINE_DRAG_SNAP_MINUTES = 15
-const TIMELINE_DRAG_ACTIVATION_PX = 4
+const TIMELINE_DRAG_ACTIVATION_PX = 8
 const TIMELINE_MANUAL_CREATE_DURATION_MINUTES = 30
 const TIMELINE_DURATION_RESIZE_ACTIVATION_PX = 12
 const TIMELINE_DURATION_RESIZE_DOMINANCE_RATIO = 1.5
 const TIMELINE_DURATION_RESIZE_STEP_PX = 28
 const TIMELINE_DURATION_RESIZE_STEP_MINUTES = 30
+const ACTIVE_TIMER_PREVIEW_ENTRY_ID_PREFIX = 'active-timer-preview:'
 const WEEK_TIMELINE_HEADER_HEIGHT = 64
 const WEEK_TIMELINE_GUTTER_LEFT = 60
 const WEEK_TIMELINE_DAY_WIDTH = 176
@@ -983,21 +1058,17 @@ function App() {
   const [voiceCaptureState, setVoiceCaptureState] = useState<VoiceCaptureState>('idle')
   const [voiceCaptureStatusMessage, setVoiceCaptureStatusMessage] = useState<string | null>(null)
   const [submissionQueue, setSubmissionQueue] = useState<SubmissionQueueItem[]>([])
-  const [quickAddSearch, setQuickAddSearch] = useState('')
   const [quickAddSuggestionItems, setQuickAddSuggestionItems] = useState<QuickAddSuggestion[]>([])
   const [quickAddSuggestedKeys, setQuickAddSuggestedKeys] = useState<string[]>([])
   const [quickAddSuggestionsError, setQuickAddSuggestionsError] = useState<string | null>(null)
+  const [activeTimer, setActiveTimer] = useState<ActiveTimer | null>(null)
+  const [isTimerSelectionMode, setIsTimerSelectionMode] = useState(false)
   const [isQuickAddSettingsOpen, setIsQuickAddSettingsOpen] = useState(false)
   const [quickAddSettingsDraft, setQuickAddSettingsDraft] = useState<QuickAddPreferences | null>(null)
   const [quickAddSettingsDragState, setQuickAddSettingsDragState] =
     useState<QuickAddSettingsDragState | null>(null)
   const [quickAddSettingsDropCommitKeys, setQuickAddSettingsDropCommitKeys] = useState<string[]>([])
   const [quickBlockDragState, setQuickBlockDragState] = useState<QuickEntryDragState | null>(null)
-  const [quickAddScrollMetrics, setQuickAddScrollMetrics] = useState<QuickEntryScrollMetrics>({
-    canScroll: false,
-    thumbTopPct: 0,
-    thumbHeightPct: 100,
-  })
   const [isCalendarBulkModalOpen, setIsCalendarBulkModalOpen] = useState(false)
   const [calendarBulkTab, setCalendarBulkTab] = useState<CalendarBulkTab>('submission')
   const [calendarSelectedFileName, setCalendarSelectedFileName] = useState<string | null>(null)
@@ -1016,12 +1087,24 @@ function App() {
   const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([])
   const [weekTimeline, setWeekTimeline] = useState<TimelineWeekView | null>(null)
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
+  const [selectedActiveTimerDate, setSelectedActiveTimerDate] = useState<string | null>(null)
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null)
   const [entryDraft, setEntryDraft] = useState<EntryDraft | null>(null)
+  const [pendingEntryDraftSaves, setPendingEntryDraftSaves] =
+    useState<Map<string, PendingEntryDraftSave>>(() => new Map())
   const [entryAutoSaveStatus, setEntryAutoSaveStatus] = useState<EntryAutoSaveStatus>('idle')
+  const [activeTimerDraft, setActiveTimerDraft] = useState<ActiveTimerDraft | null>(null)
+  const [activeTimerAutoSaveStatus, setActiveTimerAutoSaveStatus] =
+    useState<EntryAutoSaveStatus>('idle')
+  const [activeTimerDragState, setActiveTimerDragState] = useState<ActiveTimerDragState | null>(null)
   const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenuState | null>(null)
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
+  const [isEntryLiveConversionBusy, setIsEntryLiveConversionBusy] = useState(false)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
+  const [timelineCreateSelection, setTimelineCreateSelection] =
+    useState<TimelineCreateSelection | null>(null)
+  const [timelineCreateDragState, setTimelineCreateDragState] =
+    useState<TimelineCreateDragState | null>(null)
   const [isWeekTimelineLoading, setIsWeekTimelineLoading] = useState(false)
   const [weekTimelineError, setWeekTimelineError] = useState<string | null>(null)
   const [timelineLanePreferences, setTimelineLanePreferences] = useState(() => ({
@@ -1045,13 +1128,22 @@ function App() {
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
   const selectedDateRef = useRef(selectedDate)
   const selectedEntryIdRef = useRef<string | null>(selectedEntryId)
+  const entryDraftRef = useRef<EntryDraft | null>(entryDraft)
+  const activeTimerRef = useRef<ActiveTimer | null>(activeTimer)
   const entryDraftAutoSaveTimeoutRef = useRef<number | null>(null)
   const entryDraftAutoSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const entryDraftLastSavedKeyRef = useRef<string | null>(null)
+  const entryDraftQueuedKeyByIdRef = useRef<Map<string, string>>(new Map())
+  const enqueueEntryDraftSaveRef = useRef<(draft: EntryDraft) => void>(() => undefined)
+  const activeTimerDraftAutoSaveTimeoutRef = useRef<number | null>(null)
+  const activeTimerDraftSaveChainRef = useRef<Promise<boolean>>(Promise.resolve(true))
+  const activeTimerDraftLastSavedKeyRef = useRef<string | null>(null)
+  const activeTimerDragStateRef = useRef<ActiveTimerDragState | null>(null)
+  const selectNextLoadedActiveTimerRef = useRef(false)
   const timelineDragStateRef = useRef<TimelineDragState | null>(null)
+  const timelineCreateDragStateRef = useRef<TimelineCreateDragState | null>(null)
   const timelineMutationInFlightRef = useRef(false)
   const quickBlockDragStateRef = useRef<QuickEntryDragState | null>(null)
-  const quickAddScrollRef = useRef<HTMLDivElement | null>(null)
   const quickAddSettingsDraftRef = useRef<QuickAddPreferences | null>(null)
   const quickAddSettingsDragStateRef = useRef<QuickAddSettingsDragState | null>(null)
   const quickAddSettingsRowRefs = useRef<Record<string, HTMLElement | null>>({})
@@ -1125,6 +1217,13 @@ function App() {
       && window.matchMedia(WEEK_TIMELINE_COMPACT_MEDIA_QUERY).matches
     ),
   )
+  const updateEntryDraft = useCallback((
+    updater: (previous: EntryDraft | null) => EntryDraft | null,
+  ) => {
+    const nextDraft = updater(entryDraftRef.current)
+    entryDraftRef.current = nextDraft
+    setEntryDraft(nextDraft)
+  }, [])
   const commitSummaryLayoutDragState = useCallback((next: SummaryLayoutDragState | null) => {
     summaryLayoutDragStateRef.current = next
     setSummaryLayoutDragState(next)
@@ -1305,6 +1404,11 @@ function App() {
     () => loadedTimelineEntries.find((entry) => entry.id === selectedEntryId) ?? null,
     [loadedTimelineEntries, selectedEntryId],
   )
+  const isActiveTimerSelected = Boolean(activeTimer && selectedActiveTimerDate)
+  const displayedActiveTimer = useMemo(
+    () => applyActiveTimerDraft(activeTimer, activeTimerDraft),
+    [activeTimer, activeTimerDraft],
+  )
   const selectedEntryHasMultiEventSource = (selectedEntry?.sourceMessageEntryCount ?? 0) > 1
   const visibleMonthSummaries = useMemo(
     () => monthSummaryCache[visibleMonth] ?? [],
@@ -1435,6 +1539,21 @@ function App() {
     ),
     [activityById, engagementById, entryDraft, selectedEntry],
   )
+  const optimisticEntryDraftPreviews = useMemo(() => {
+    const previewsByEntryId = new Map<string, TimelineEntry>()
+
+    for (const pendingSave of pendingEntryDraftSaves.values()) {
+      if (pendingSave.preview) {
+        previewsByEntryId.set(pendingSave.preview.id, pendingSave.preview)
+      }
+    }
+
+    if (optimisticEntryDraftPreview) {
+      previewsByEntryId.set(optimisticEntryDraftPreview.id, optimisticEntryDraftPreview)
+    }
+
+    return [...previewsByEntryId.values()]
+  }, [optimisticEntryDraftPreview, pendingEntryDraftSaves])
   const quickAddPreferences = useMemo(
     () => sanitizeQuickAddPreferences(settingsStatus?.quickAddPreferences, engagements),
     [engagements, settingsStatus?.quickAddPreferences],
@@ -1445,19 +1564,26 @@ function App() {
       preferences: quickAddPreferences,
       suggestions: quickAddSuggestionItems,
       suggestedKeys: quickAddSuggestedKeys,
-      search: quickAddSearch,
     }),
     [
       engagements,
       quickAddPreferences,
-      quickAddSearch,
       quickAddSuggestedKeys,
       quickAddSuggestionItems,
     ],
   )
   const allQuickAddActivities = quickEntryModel.allActivities
   const orderedQuickAddActivities = quickEntryModel.orderedActivities
-  const quickAddActivityGroups = quickEntryModel.groups
+  const activityCommandItems = useMemo(
+    () => buildQuickEntryModel({
+      engagements,
+      preferences: quickAddPreferences,
+      suggestions: [],
+      suggestedKeys: [],
+      includeDefaultHiddenActivities: true,
+    }).orderedActivities,
+    [engagements, quickAddPreferences],
+  )
   useEffect(() => {
     setQuickAddSuggestedKeys((previous) => {
       if (previous.length === 0) {
@@ -1469,92 +1595,6 @@ function App() {
       return next.length === previous.length ? previous : next
     })
   }, [quickEntryModel.activityByKey])
-  const updateQuickAddScrollMetrics = useCallback(() => {
-    const node = quickAddScrollRef.current
-
-    if (!node) {
-      setQuickAddScrollMetrics((previous) => (
-        previous.canScroll
-          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
-          : previous
-      ))
-      return
-    }
-
-    const scrollFrame = node.parentElement as HTMLElement | null
-    const maxScrollTop = Math.max(node.scrollHeight - node.clientHeight, 0)
-    const canScroll = maxScrollTop > 1
-
-    if (!canScroll || node.scrollHeight <= 0 || node.clientHeight <= 0) {
-      scrollFrame?.style.setProperty('--quick-add-scroll-thumb-top', '0%')
-      scrollFrame?.style.setProperty('--quick-add-scroll-thumb-height', '100%')
-      setQuickAddScrollMetrics((previous) => (
-        previous.canScroll
-          ? { canScroll: false, thumbTopPct: 0, thumbHeightPct: 100 }
-          : previous
-      ))
-      return
-    }
-
-    const thumbHeightPct = Math.min(100, Math.max((node.clientHeight / node.scrollHeight) * 100, 18))
-    const maxThumbTopPct = Math.max(100 - thumbHeightPct, 0)
-    const thumbTopPct = Math.min(maxThumbTopPct, Math.max(0, (node.scrollTop / maxScrollTop) * maxThumbTopPct))
-
-    scrollFrame?.style.setProperty('--quick-add-scroll-thumb-top', `${thumbTopPct}%`)
-    scrollFrame?.style.setProperty('--quick-add-scroll-thumb-height', `${thumbHeightPct}%`)
-
-    setQuickAddScrollMetrics((previous) => {
-      if (
-        previous.canScroll === canScroll
-        && previous.thumbTopPct === thumbTopPct
-        && previous.thumbHeightPct === thumbHeightPct
-      ) {
-        return previous
-      }
-
-      return {
-        canScroll,
-        thumbTopPct,
-        thumbHeightPct,
-      }
-    })
-  }, [])
-  useLayoutEffect(() => {
-    updateQuickAddScrollMetrics()
-
-    const node = quickAddScrollRef.current
-    if (!node) {
-      return undefined
-    }
-
-    let animationFrame: number | null = null
-    const scheduleUpdate = () => {
-      if (animationFrame !== null) {
-        window.cancelAnimationFrame(animationFrame)
-      }
-
-      animationFrame = window.requestAnimationFrame(updateQuickAddScrollMetrics)
-    }
-
-    const resizeObserver = typeof ResizeObserver === 'undefined'
-      ? null
-      : new ResizeObserver(scheduleUpdate)
-
-    resizeObserver?.observe(node)
-    if (node.firstElementChild) {
-      resizeObserver?.observe(node.firstElementChild)
-    }
-
-    window.addEventListener('resize', scheduleUpdate)
-
-    return () => {
-      if (animationFrame !== null) {
-        window.cancelAnimationFrame(animationFrame)
-      }
-      resizeObserver?.disconnect()
-      window.removeEventListener('resize', scheduleUpdate)
-    }
-  }, [quickAddActivityGroups, updateQuickAddScrollMetrics])
   const reportingDayIndexes = useMemo(() => (
     buildReportingDisplayAllDayIndexes(weeklySummary)
   ), [weeklySummary])
@@ -1842,6 +1882,31 @@ function App() {
       + TIMELINE_CANVAS_TOP_PADDING
       + TIMELINE_CANVAS_BOTTOM_PADDING
   )
+  const activeTimerDayPreviewEntry = useMemo(
+    () => applyActiveTimerDragPreview(
+      buildActiveTimerPreviewEntry(displayedActiveTimer, selectedDate, timelineClock),
+      activeTimerDragState,
+    ),
+    [activeTimerDragState, displayedActiveTimer, selectedDate, timelineClock],
+  )
+  const timelineCreatePreview = useMemo<TimelineCreateSelection | null>(() => {
+    if (!timelineCreateDragState?.isDragging) {
+      return timelineCreateSelection
+    }
+
+    const range = resolveTimelineCreateRange(
+      timelineCreateDragState.originMinute,
+      timelineCreateDragState.currentMinute,
+      timelineWindow,
+    )
+    return {
+      surface: timelineCreateDragState.surface,
+      date: timelineCreateDragState.date,
+      ...range,
+      x: timelineCreateDragState.currentClientX,
+      y: timelineCreateDragState.currentClientY,
+    }
+  }, [timelineCreateDragState, timelineCreateSelection, timelineWindow])
   const timelinePositioningPreferences = useMemo(
     () => ({
       preferredLaneByEntryId: timelineLanePreferences.byEntryId,
@@ -1858,16 +1923,22 @@ function App() {
     [timelineEntries, timelinePositioningPreferences, timelineWindow],
   )
   const optimisticTimelineEntries = useMemo(
-    () => applyOptimisticTimelineEntryPreview(
+    () => applyOptimisticTimelineEntryPreviews(
       timelineEntries,
-      optimisticEntryDraftPreview,
+      optimisticEntryDraftPreviews,
       (entry) => entry.date === selectedDate,
     ),
-    [optimisticEntryDraftPreview, selectedDate, timelineEntries],
+    [optimisticEntryDraftPreviews, selectedDate, timelineEntries],
   )
   const timelineEntriesForLayout = useMemo(
     () => applyDragPreviewToTimelineEntries(optimisticTimelineEntries, timelineDragState),
     [optimisticTimelineEntries, timelineDragState],
+  )
+  const timelineEntriesWithActiveTimerPreview = useMemo(
+    () => activeTimerDayPreviewEntry
+      ? [...timelineEntriesForLayout, activeTimerDayPreviewEntry]
+      : timelineEntriesForLayout,
+    [activeTimerDayPreviewEntry, timelineEntriesForLayout],
   )
   const timelineDayTotalBreakdown = useMemo(
     () => buildTimelineTotalBreakdown(
@@ -1881,7 +1952,7 @@ function App() {
     && timelineDayTotalBreakdown.uncategorizedMinutes > 0
   const previewPositionedTimelineEntries = useMemo(
     () => positionTimelineEntries(
-      timelineEntriesForLayout,
+      timelineEntriesWithActiveTimerPreview,
       timelineWindow,
       {
         ...timelinePositioningPreferences,
@@ -1895,7 +1966,7 @@ function App() {
     ),
     [
       timelineDragState,
-      timelineEntriesForLayout,
+      timelineEntriesWithActiveTimerPreview,
       timelinePositioningPreferences,
       timelineWindow,
     ],
@@ -1913,6 +1984,15 @@ function App() {
     () => weekTimeline?.days ?? buildWeekViewDays(selectedDate, timelineWeekStartDay),
     [selectedDate, timelineWeekStartDay, weekTimeline],
   )
+  const activeTimerWeekPreviewEntries = useMemo(
+    () => weekTimelineDays
+      .map((day) => applyActiveTimerDragPreview(
+        buildActiveTimerPreviewEntry(displayedActiveTimer, day.date, timelineClock),
+        activeTimerDragState,
+      ))
+      .filter((entry): entry is TimelineEntry => entry !== null),
+    [activeTimerDragState, displayedActiveTimer, timelineClock, weekTimelineDays],
+  )
   const weekTimelineEntries = useMemo(
     () => weekTimeline?.entries ?? [],
     [weekTimeline],
@@ -1922,16 +2002,22 @@ function App() {
     [weekTimelineDays],
   )
   const optimisticWeekTimelineEntries = useMemo(
-    () => applyOptimisticTimelineEntryPreview(
+    () => applyOptimisticTimelineEntryPreviews(
       weekTimelineEntries,
-      optimisticEntryDraftPreview,
+      optimisticEntryDraftPreviews,
       (entry) => weekTimelineDateSet.has(entry.date),
     ),
-    [optimisticEntryDraftPreview, weekTimelineDateSet, weekTimelineEntries],
+    [optimisticEntryDraftPreviews, weekTimelineDateSet, weekTimelineEntries],
   )
   const weekTimelineEntriesForLayout = useMemo(
     () => applyDragPreviewToTimelineEntries(optimisticWeekTimelineEntries, timelineDragState),
     [optimisticWeekTimelineEntries, timelineDragState],
+  )
+  const weekTimelineEntriesWithActiveTimerPreview = useMemo(
+    () => activeTimerWeekPreviewEntries.length > 0
+      ? [...weekTimelineEntriesForLayout, ...activeTimerWeekPreviewEntries]
+      : weekTimelineEntriesForLayout,
+    [activeTimerWeekPreviewEntries, weekTimelineEntriesForLayout],
   )
   const weekTimelineDayTotalBreakdowns = useMemo(
     () => buildTimelineDayTotalBreakdowns(
@@ -1992,7 +2078,7 @@ function App() {
   )
   const previewPositionedWeekTimelineEntries = useMemo(
     () => positionWeekTimelineEntries(
-      weekTimelineEntriesForLayout,
+      weekTimelineEntriesWithActiveTimerPreview,
       weekTimelineDays,
       timelineWindow,
       weekTimelineLayoutMetrics,
@@ -2005,7 +2091,7 @@ function App() {
       timelinePositioningPreferences,
       timelineWindow,
       weekTimelineDays,
-      weekTimelineEntriesForLayout,
+      weekTimelineEntriesWithActiveTimerPreview,
     ],
   )
   const draggedWeekEntryOriginPosition = useMemo(() => {
@@ -2050,6 +2136,20 @@ function App() {
 
     return engagement?.activities ?? []
   }, [engagements, entryDraft])
+
+  const activeTimerAvailableEngagements = useMemo(
+    () => engagements.filter((engagement) => engagement.activities.length > 0),
+    [engagements],
+  )
+  const activeTimerAvailableActivities = useMemo(() => {
+    if (!activeTimerDraft?.engagementId) {
+      return [] as Activity[]
+    }
+
+    return engagements.find(
+      (engagement) => engagement.id === activeTimerDraft.engagementId,
+    )?.activities ?? []
+  }, [activeTimerDraft, engagements])
 
   const engagementColorById = useMemo(() => {
     const values = new Map<string, string | null>()
@@ -2453,6 +2553,15 @@ function App() {
     setCalendarIgnoredKeywordDraft(status.calendarBulkIgnoredKeywords.join('\n'))
   }, [])
 
+  const loadActiveTimer = useCallback(async () => {
+    const value = await timerGetActive()
+    setActiveTimer(value)
+    if (value) {
+      setIsTimerSelectionMode(false)
+    }
+    return value
+  }, [])
+
   const loadSummaryLayoutState = useCallback(async () => {
     const value = await summaryLayoutStateGet()
     setSummaryLayoutState(value)
@@ -2614,6 +2723,41 @@ function App() {
   ])
 
   useEffect(() => {
+    if (!tauriRuntime) {
+      return
+    }
+
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+
+    void listen<{ origin?: string }>(TIMER_CHANGED_EVENT, (event) => {
+      if (event.payload?.origin === 'main-live-timer-editor') {
+        return
+      }
+      if (!activeTimerRef.current) {
+        selectNextLoadedActiveTimerRef.current = true
+      }
+      void loadActiveTimer().then((timer) => {
+        if (!timer) {
+          selectNextLoadedActiveTimerRef.current = false
+        }
+      })
+    }).then((nextUnlisten) => {
+      if (cancelled) {
+        nextUnlisten()
+        return
+      }
+
+      unlisten = nextUnlisten
+    })
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [loadActiveTimer, tauriRuntime])
+
+  useEffect(() => {
     let timeoutId: ReturnType<typeof window.setTimeout> | null = null
 
     const scheduleNextMinuteTick = () => {
@@ -2647,6 +2791,7 @@ function App() {
       try {
         setIsBusy(true)
         await Promise.all([
+          loadActiveTimer(),
           loadEngagements(),
           loadQuickAddSuggestions(),
           loadSettings(),
@@ -2665,6 +2810,7 @@ function App() {
     void initialize()
   }, [
     loadEngagements,
+    loadActiveTimer,
     loadQuickAddSuggestions,
     loadReportingState,
     loadSettings,
@@ -3465,6 +3611,17 @@ function App() {
     [],
   )
 
+  const setActiveTimerDragStateWithRef = useCallback(
+    (updater: (previous: ActiveTimerDragState | null) => ActiveTimerDragState | null) => {
+      setActiveTimerDragState((previous) => {
+        const next = updater(previous)
+        activeTimerDragStateRef.current = next
+        return next
+      })
+    },
+    [],
+  )
+
   const setQuickBlockDragStateWithRef = useCallback(
     (updater: (previous: QuickEntryDragState | null) => QuickEntryDragState | null) => {
       setQuickBlockDragState((previous) => {
@@ -3477,18 +3634,30 @@ function App() {
   )
 
   const clearTimelineSelection = useCallback(() => {
+    const currentDraft = entryDraftRef.current
+    if (currentDraft) {
+      enqueueEntryDraftSaveRef.current(currentDraft)
+    }
+
     if (entryDraftAutoSaveTimeoutRef.current !== null) {
       window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
       entryDraftAutoSaveTimeoutRef.current = null
     }
     entryDraftLastSavedKeyRef.current = null
     setEntryAutoSaveStatus('idle')
+    selectedEntryIdRef.current = null
+    entryDraftRef.current = null
     setSelectedEntryId(null)
+    setSelectedActiveTimerDate(null)
     setHighlightedEntryId(null)
     setEntryDraft(null)
     setTimelineContextMenu(null)
+    setTimelineCreateSelection(null)
+    timelineCreateDragStateRef.current = null
+    setTimelineCreateDragState(null)
+    setActiveTimerDragStateWithRef(() => null)
     setTimelineDragStateWithRef(() => null)
-  }, [setTimelineDragStateWithRef])
+  }, [setActiveTimerDragStateWithRef, setTimelineDragStateWithRef])
 
   const requestTimelineAutoCenter = useCallback((date: string) => {
     pendingAutoCenterDateRef.current = date
@@ -4185,6 +4354,38 @@ function App() {
   useEffect(() => {
     selectedEntryIdRef.current = selectedEntryId
   }, [selectedEntryId])
+
+  useEffect(() => {
+    entryDraftRef.current = entryDraft
+  }, [entryDraft])
+
+  useEffect(() => {
+    activeTimerRef.current = activeTimer
+
+    if (!activeTimer) {
+      if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+        activeTimerDraftAutoSaveTimeoutRef.current = null
+      }
+      activeTimerDraftLastSavedKeyRef.current = null
+      setActiveTimerDraft(null)
+      setActiveTimerAutoSaveStatus('idle')
+      setSelectedActiveTimerDate(null)
+      setActiveTimerDragStateWithRef(() => null)
+      return
+    }
+
+    setActiveTimerDraft((previous) => {
+      if (previous && activeTimerDraftMatchesTimer(previous, activeTimer)) {
+        return previous
+      }
+
+      const nextDraft = buildActiveTimerDraft(activeTimer)
+      activeTimerDraftLastSavedKeyRef.current = serializeActiveTimerDraft(nextDraft)
+      setActiveTimerAutoSaveStatus('saved')
+      return nextDraft
+    })
+  }, [activeTimer, setActiveTimerDragStateWithRef])
 
   useEffect(() => {
     timelineEntriesRef.current = loadedTimelineEntries
@@ -5469,23 +5670,203 @@ function App() {
     onSetDate(nextDate)
   }
 
+  const saveEntryDraftSnapshot = useCallback(
+    async (pendingSave: PendingEntryDraftSave) => {
+      const {
+        draft,
+        endMinute,
+        key,
+        previousEntry,
+        startMinute,
+      } = pendingSave
+      const previousEntryDate = previousEntry?.date ?? selectedDateRef.current
+      const previousMonthKey = monthKeyFromDate(previousEntryDate)
+      const nextMonthKey = monthKeyFromDate(draft.date)
+      const nextEngagementId = draft.engagementId || null
+      const nextActivityId = draft.activityId || null
+      const shouldRefreshQuickAddSuggestions =
+        previousEntry?.engagementId !== nextEngagementId
+        || previousEntry?.activityId !== nextActivityId
+      const isCurrentDraftForSave = () => {
+        const currentDraft = entryDraftRef.current
+        return selectedEntryIdRef.current === draft.id
+          && currentDraft !== null
+          && serializeEntryDraft(currentDraft) === key
+      }
+      const clearCompletedPendingSave = () => {
+        if (entryDraftQueuedKeyByIdRef.current.get(draft.id) === key) {
+          entryDraftQueuedKeyByIdRef.current.delete(draft.id)
+        }
+
+        setPendingEntryDraftSaves((previous) => {
+          const currentPendingSave = previous.get(draft.id)
+          if (!currentPendingSave || currentPendingSave.key !== key) {
+            return previous
+          }
+
+          const next = new Map(previous)
+          next.delete(draft.id)
+          return next
+        })
+      }
+
+      if (isCurrentDraftForSave()) {
+        setEntryAutoSaveStatus('saving')
+        setSuccessMessage(null)
+        setErrorMessage(null)
+      }
+
+      try {
+        await timelineUpdateEntry({
+          id: draft.id,
+          engagementId: nextEngagementId,
+          activityId: nextActivityId,
+          mode: 'manual',
+          date: draft.date,
+          startMinute,
+          endMinute,
+          description: draft.description,
+        })
+
+        invalidateMonthSummaries([previousMonthKey, nextMonthKey])
+
+        const draftRemainsSelected = selectedEntryIdRef.current === draft.id
+        if (draftRemainsSelected) {
+          updateSelectedDate(draft.date, { clearSelection: false })
+        }
+
+        const visibleRefreshDate = draftRemainsSelected ? draft.date : selectedDateRef.current
+        const refreshTasks: Promise<unknown>[] = [
+          loadTimeline(visibleRefreshDate),
+          loadWeekTimeline(visibleRefreshDate),
+          loadWeeklySummary(visibleRefreshDate),
+        ]
+
+        if (shouldRefreshQuickAddSuggestions) {
+          refreshTasks.push(loadQuickAddSuggestions())
+        }
+
+        await Promise.all(refreshTasks)
+        clearCompletedPendingSave()
+
+        if (!isCurrentDraftForSave()) {
+          return
+        }
+
+        entryDraftRef.current = draft
+        entryDraftLastSavedKeyRef.current = key
+        setEntryDraft(draft)
+        setEntryAutoSaveStatus('saved')
+      } catch (error) {
+        clearCompletedPendingSave()
+        if (isCurrentDraftForSave()) {
+          setEntryAutoSaveStatus('error')
+        }
+        setErrorMessage(formatActionErrorMessage(error))
+      }
+    },
+    [
+      invalidateMonthSummaries,
+      loadTimeline,
+      loadWeekTimeline,
+      loadWeeklySummary,
+      loadQuickAddSuggestions,
+      updateSelectedDate,
+    ],
+  )
+
+  const enqueueEntryDraftSave = useCallback((draft: EntryDraft) => {
+    const savePlan = buildEntryDraftSavePlan(draft)
+    if (!savePlan.ok) {
+      if (selectedEntryIdRef.current === draft.id) {
+        setEntryAutoSaveStatus('error')
+      }
+      setSuccessMessage(null)
+      setErrorMessage(savePlan.errorMessage)
+      return
+    }
+
+    const queuedKey = entryDraftQueuedKeyByIdRef.current.get(draft.id)
+    if (savePlan.key === entryDraftLastSavedKeyRef.current && queuedKey === undefined) {
+      return
+    }
+
+    if (entryDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
+      entryDraftAutoSaveTimeoutRef.current = null
+    }
+
+    const previousEntry = timelineEntriesRef.current.find(
+      (entry) => entry.id === savePlan.normalizedDraft.id,
+    ) ?? null
+    const preview = previousEntry
+      ? buildOptimisticTimelineEntryPreview(
+          previousEntry,
+          savePlan.normalizedDraft,
+          engagementById,
+          activityById,
+        )
+      : null
+    const pendingSave: PendingEntryDraftSave = {
+      draft: savePlan.normalizedDraft,
+      key: savePlan.key,
+      preview,
+      previousEntry,
+      startMinute: savePlan.startMinute,
+      endMinute: savePlan.endMinute,
+    }
+
+    setPendingEntryDraftSaves((previous) => {
+      if (previous.get(draft.id)?.key === savePlan.key) {
+        return previous
+      }
+
+      const next = new Map(previous)
+      next.set(draft.id, pendingSave)
+      return next
+    })
+
+    if (queuedKey === savePlan.key) {
+      return
+    }
+
+    entryDraftQueuedKeyByIdRef.current.set(draft.id, savePlan.key)
+    entryDraftAutoSaveChainRef.current = entryDraftAutoSaveChainRef.current
+      .catch(() => undefined)
+      .then(() => saveEntryDraftSnapshot(pendingSave))
+  }, [activityById, engagementById, saveEntryDraftSnapshot])
+
+  useEffect(() => {
+    enqueueEntryDraftSaveRef.current = enqueueEntryDraftSave
+  }, [enqueueEntryDraftSave])
+
   const onSelectEntry = useCallback((
     entry: TimelineEntry,
     options?: {
       syncSelectedDate?: boolean
     },
   ) => {
+    const currentDraft = entryDraftRef.current
+    if (currentDraft && currentDraft.id !== entry.id) {
+      enqueueEntryDraftSave(currentDraft)
+    }
+
     const nextDraft = buildEntryDraft(entry)
     setTimelineContextMenu(null)
     if (options?.syncSelectedDate) {
       updateSelectedDate(entry.date, { clearSelection: false })
     }
+    setSelectedActiveTimerDate(null)
     setHighlightedEntryId(null)
+    selectedEntryIdRef.current = entry.id
+    entryDraftRef.current = nextDraft
     setSelectedEntryId(entry.id)
     entryDraftLastSavedKeyRef.current = serializeEntryDraft(nextDraft)
-    setEntryAutoSaveStatus('saved')
+    setEntryAutoSaveStatus(
+      entryDraftQueuedKeyByIdRef.current.has(entry.id) ? 'saving' : 'saved',
+    )
     setEntryDraft(nextDraft)
-  }, [updateSelectedDate])
+  }, [enqueueEntryDraftSave, updateSelectedDate])
 
   const onSelectTimelineBlock = (entry: TimelineEntry) => {
     if (suppressTimelineClickRef.current) {
@@ -5512,6 +5893,104 @@ function App() {
     }
 
     onSelectEntry(entry, { syncSelectedDate: true })
+  }
+
+  const selectActiveTimer = useCallback((
+    timer: ActiveTimer,
+    date: string,
+    options?: { syncSelectedDate?: boolean },
+  ) => {
+    const currentDraft = entryDraftRef.current
+    if (currentDraft) {
+      enqueueEntryDraftSave(currentDraft)
+    }
+
+    if (options?.syncSelectedDate) {
+      updateSelectedDate(date, { clearSelection: false })
+    }
+    if (entryDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(entryDraftAutoSaveTimeoutRef.current)
+      entryDraftAutoSaveTimeoutRef.current = null
+    }
+    entryDraftLastSavedKeyRef.current = null
+    setEntryAutoSaveStatus('idle')
+    selectedEntryIdRef.current = null
+    entryDraftRef.current = null
+    setSelectedEntryId(null)
+    setHighlightedEntryId(null)
+    setEntryDraft(null)
+    setTimelineContextMenu(null)
+    setSelectedActiveTimerDate(date)
+
+    setActiveTimerDraft((previous) => {
+      if (previous && activeTimerDraftMatchesTimer(previous, timer)) {
+        return previous
+      }
+
+      const nextDraft = buildActiveTimerDraft(timer)
+      activeTimerDraftLastSavedKeyRef.current = serializeActiveTimerDraft(nextDraft)
+      setActiveTimerAutoSaveStatus('saved')
+      return nextDraft
+    })
+  }, [enqueueEntryDraftSave, updateSelectedDate])
+
+  const onSelectActiveTimerBlock = (
+    entry: TimelineEntry,
+    options?: {
+      syncSelectedDate?: boolean
+    },
+  ) => {
+    if (suppressTimelineClickRef.current) {
+      suppressTimelineClickRef.current = false
+      return
+    }
+
+    if (!activeTimer || !isActiveTimerPreviewEntry(entry)) {
+      return
+    }
+
+    selectActiveTimer(activeTimer, entry.date, options)
+  }
+
+  useEffect(() => {
+    if (!activeTimer || !selectNextLoadedActiveTimerRef.current) {
+      return
+    }
+
+    selectNextLoadedActiveTimerRef.current = false
+    setActiveView('timeline')
+    selectActiveTimer(activeTimer, activeTimer.startDate, { syncSelectedDate: true })
+    requestTimelineAutoCenter(activeTimer.startDate)
+  }, [activeTimer, requestTimelineAutoCenter, selectActiveTimer])
+
+  const onStartActiveTimerDrag = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+    entry: TimelineEntry,
+  ) => {
+    if (
+      event.button !== 0
+      || !activeTimer
+      || !isActiveTimerPreviewEntry(entry)
+      || entry.date !== activeTimer.startDate
+      || isBusy
+      || timelineMutationInFlightRef.current
+      || isTimelineDeleteBusy
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    suppressTimelineClickRef.current = false
+    selectActiveTimer(activeTimer, entry.date, { syncSelectedDate: true })
+    setActiveTimerDragStateWithRef(() => ({
+      entryId: entry.id,
+      pointerId: event.pointerId,
+      initialClientY: event.clientY,
+      originalStartMinute: entry.startMinute,
+      originalEndMinute: entry.endMinute,
+      previewStartMinute: entry.startMinute,
+      isDragging: false,
+    }))
   }
 
   const onStartTimelineDrag = (
@@ -5798,10 +6277,421 @@ function App() {
     ],
   )
 
+  const saveActiveTimerDraftSnapshot = useCallback(
+    async (draft: ActiveTimerDraft): Promise<boolean> => {
+      const currentTimer = activeTimerRef.current
+      if (!currentTimer || !isActiveTimerDraftForTimer(draft, currentTimer)) {
+        return false
+      }
+      if (!draft.engagementId || !draft.activityId) {
+        setErrorMessage('A running timer requires an engagement and activity.')
+        setActiveTimerAutoSaveStatus('error')
+        return false
+      }
+
+      setActiveTimerAutoSaveStatus('saving')
+      setErrorMessage(null)
+
+      try {
+        const updatedTimer = await timerUpdateActive({
+          engagementId: draft.engagementId,
+          activityId: draft.activityId,
+          startDate: draft.startDate,
+          startMinute: draft.startMinute,
+          description: draft.description,
+        })
+        if (!activeTimerRef.current || !isActiveTimerDraftForTimer(draft, activeTimerRef.current)) {
+          return false
+        }
+
+        activeTimerRef.current = updatedTimer
+        setActiveTimer(updatedTimer)
+        activeTimerDraftLastSavedKeyRef.current = serializeActiveTimerDraft(draft)
+        setActiveTimerAutoSaveStatus('saved')
+        await emit(TIMER_CHANGED_EVENT, { origin: 'main-live-timer-editor' })
+        return true
+      } catch (error) {
+        if (activeTimerRef.current && isActiveTimerDraftForTimer(draft, activeTimerRef.current)) {
+          setActiveTimerAutoSaveStatus('error')
+          setErrorMessage(formatActionErrorMessage(error))
+        }
+        return false
+      }
+    },
+    [],
+  )
+
+  const queueActiveTimerDraftSave = useCallback(
+    (draft: ActiveTimerDraft) => {
+      activeTimerDraftSaveChainRef.current = activeTimerDraftSaveChainRef.current
+        .catch(() => false)
+        .then(() => saveActiveTimerDraftSnapshot(draft))
+      return activeTimerDraftSaveChainRef.current
+    },
+    [saveActiveTimerDraftSnapshot],
+  )
+
+  useEffect(() => {
+    if (!activeTimerDraft) {
+      return undefined
+    }
+
+    const draftKey = serializeActiveTimerDraft(activeTimerDraft)
+    if (draftKey === activeTimerDraftLastSavedKeyRef.current) {
+      return undefined
+    }
+
+    if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+    }
+
+    activeTimerDraftAutoSaveTimeoutRef.current = window.setTimeout(() => {
+      const draftToSave = activeTimerDraft
+      activeTimerDraftAutoSaveTimeoutRef.current = null
+      void queueActiveTimerDraftSave(draftToSave)
+    }, 700)
+
+    return () => {
+      if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+        activeTimerDraftAutoSaveTimeoutRef.current = null
+      }
+    }
+  }, [activeTimerDraft, queueActiveTimerDraftSave])
+
+  const flushActiveTimerDraft = useCallback(async (): Promise<boolean> => {
+    if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+      activeTimerDraftAutoSaveTimeoutRef.current = null
+    }
+
+    if (
+      activeTimerDraft
+      && serializeActiveTimerDraft(activeTimerDraft) !== activeTimerDraftLastSavedKeyRef.current
+    ) {
+      return queueActiveTimerDraftSave(activeTimerDraft)
+    }
+
+    return activeTimerDraftSaveChainRef.current.catch(() => false)
+  }, [activeTimerDraft, queueActiveTimerDraftSave])
+
+  const activeTimerDragPointerId = activeTimerDragState?.pointerId ?? null
+
+  useEffect(() => {
+    if (activeTimerDragPointerId === null) {
+      return
+    }
+
+    const finishDrag = (pointerId: number, shouldCommit: boolean) => {
+      const current = activeTimerDragStateRef.current
+      if (!current || current.pointerId !== pointerId) {
+        return
+      }
+
+      if (current.isDragging) {
+        suppressTimelineClickRef.current = true
+      }
+
+      if (
+        shouldCommit
+        && current.isDragging
+        && current.previewStartMinute !== current.originalStartMinute
+      ) {
+        const currentTimer = activeTimerRef.current
+        if (currentTimer) {
+          setActiveTimerDraft((previous) => {
+            const nextDraft = previous && isActiveTimerDraftForTimer(previous, currentTimer)
+              ? { ...previous, startMinute: current.previewStartMinute }
+              : {
+                  ...buildActiveTimerDraft(currentTimer),
+                  startMinute: current.previewStartMinute,
+                }
+            setActiveTimerAutoSaveStatus('saving')
+            return nextDraft
+          })
+          setSelectedActiveTimerDate(currentTimer.startDate)
+        }
+      }
+
+      setActiveTimerDragStateWithRef(() => null)
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const current = activeTimerDragStateRef.current
+      if (!current || event.pointerId !== current.pointerId) {
+        return
+      }
+
+      const deltaY = event.clientY - current.initialClientY
+      if (!current.isDragging && Math.abs(deltaY) < TIMELINE_DRAG_ACTIVATION_PX) {
+        return
+      }
+
+      const nextStartMinute = Math.min(
+        current.originalEndMinute - TIMELINE_DRAG_SNAP_MINUTES,
+        Math.max(
+          0,
+          snapMinute(
+            current.originalStartMinute + deltaY / PIXELS_PER_MINUTE,
+            TIMELINE_DRAG_SNAP_MINUTES,
+          ),
+        ),
+      )
+
+      setActiveTimerDragStateWithRef((previous) => {
+        if (!previous || previous.pointerId !== event.pointerId) {
+          return previous
+        }
+
+        if (previous.isDragging && previous.previewStartMinute === nextStartMinute) {
+          return previous
+        }
+
+        return {
+          ...previous,
+          previewStartMinute: nextStartMinute,
+          isDragging: true,
+        }
+      })
+    }
+
+    const handlePointerUp = (event: PointerEvent) => finishDrag(event.pointerId, true)
+    const handlePointerCancel = (event: PointerEvent) => finishDrag(event.pointerId, false)
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+
+      const current = activeTimerDragStateRef.current
+      if (!current) {
+        return
+      }
+
+      event.preventDefault()
+      finishDrag(current.pointerId, false)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerCancel)
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerCancel)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [activeTimerDragPointerId, setActiveTimerDragStateWithRef])
+
+  const startActivityTimer = useCallback(
+    (engagement: Engagement, activity: Activity) => {
+      if (timelineMutationInFlightRef.current || activeTimer) {
+        return
+      }
+
+      const now = new Date()
+      void runTimelineMutation(async () => {
+        const timer = await timerStart({
+          engagementId: engagement.id,
+          activityId: activity.id,
+          startDate: formatDate(now),
+          startMinute: now.getHours() * HOUR_IN_MINUTES + now.getMinutes(),
+        })
+        activeTimerRef.current = timer
+        setActiveTimer(timer)
+        setIsTimerSelectionMode(false)
+        setActiveView('timeline')
+        selectActiveTimer(timer, timer.startDate, { syncSelectedDate: true })
+        requestTimelineAutoCenter(timer.startDate)
+        setSuccessMessage(`Tracking ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
+        await emit(TIMER_CHANGED_EVENT)
+      })
+    },
+    [activeTimer, requestTimelineAutoCenter, runTimelineMutation, selectActiveTimer],
+  )
+
+  const stopCurrentTimer = useCallback(() => {
+    if (timelineMutationInFlightRef.current || !activeTimer) {
+      return
+    }
+
+    const now = new Date()
+    const elapsedHours = activeTimerElapsedMilliseconds(
+      applyActiveTimerDraft(activeTimer, activeTimerDraft) ?? activeTimer,
+      now,
+    ) / 3_600_000
+    if (
+      elapsedHours >= 12
+      && !window.confirm(`This timer has been running for ${Math.floor(elapsedHours)} hours. Save the full range?`)
+    ) {
+      return
+    }
+    const date = formatDate(now)
+
+    void runTimelineMutation(async () => {
+      if (!await flushActiveTimerDraft()) {
+        return
+      }
+      const timerToStop = activeTimerRef.current ?? activeTimer
+      const stoppedActivityName = formatEntityDisplayLabel(
+        timerToStop.activityName,
+        timerToStop.activityCode,
+      )
+      const result = await timerStop({
+        stopDate: date,
+        stopMinute: now.getHours() * HOUR_IN_MINUTES + now.getMinutes(),
+      })
+      activeTimerRef.current = null
+      setActiveTimer(null)
+      setSelectedActiveTimerDate(null)
+      setActiveTimerDraft(null)
+      setActiveView('timeline')
+      updateSelectedDate(date, { clearSelection: false })
+      setSelectedEntryId(null)
+      setEntryDraft(null)
+
+      const [entries] = await Promise.all([
+        loadTimeline(date),
+        loadWeekTimeline(date),
+        loadWeeklySummary(date),
+        loadQuickAddSuggestions(),
+      ])
+      invalidateMonthSummaries(result.touchedMonthKeys)
+      const createdEntry = entries.find((entry) => result.createdEntryIds.includes(entry.id))
+      if (createdEntry) {
+        onSelectEntry(createdEntry)
+        setHighlightedEntryId(createdEntry.id)
+        scrollDayTimelineToEntry(createdEntry)
+      }
+      setSuccessMessage(`Saved ${stoppedActivityName}.`)
+      await emit(TIMER_CHANGED_EVENT)
+    })
+  }, [
+    activeTimer,
+    activeTimerDraft,
+    flushActiveTimerDraft,
+    invalidateMonthSummaries,
+    loadQuickAddSuggestions,
+    loadTimeline,
+    loadWeekTimeline,
+    loadWeeklySummary,
+    onSelectEntry,
+    runTimelineMutation,
+    scrollDayTimelineToEntry,
+    updateSelectedDate,
+  ])
+
+  const discardCurrentTimer = useCallback(() => {
+    if (timelineMutationInFlightRef.current || !activeTimer) {
+      return
+    }
+
+    void runTimelineMutation(async () => {
+      if (activeTimerDraftAutoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(activeTimerDraftAutoSaveTimeoutRef.current)
+        activeTimerDraftAutoSaveTimeoutRef.current = null
+      }
+      await activeTimerDraftSaveChainRef.current.catch(() => false)
+      await timerCancel()
+      activeTimerRef.current = null
+      setActiveTimer(null)
+      setSelectedActiveTimerDate(null)
+      setActiveTimerDraft(null)
+      setSuccessMessage('Timer discarded.')
+      await emit(TIMER_CHANGED_EVENT)
+    })
+  }, [activeTimer, runTimelineMutation])
+
+  const startSelectedEntryLive = useCallback(() => {
+    const draft = entryDraftRef.current
+    if (
+      !draft
+      || timelineMutationInFlightRef.current
+      || isTimelineDeleteBusy
+      || isEntryLiveConversionBusy
+    ) {
+      return
+    }
+
+    const eligibility = resolveEntryLiveEligibility(draft, activeTimerRef.current, new Date())
+    if (!eligibility.eligible) {
+      setErrorMessage(eligibility.errorMessage)
+      return
+    }
+    const { savePlan } = eligibility
+
+    void runTimelineMutation(async () => {
+      setIsEntryLiveConversionBusy(true)
+      try {
+        enqueueEntryDraftSave(savePlan.normalizedDraft)
+        await entryDraftAutoSaveChainRef.current.catch(() => undefined)
+
+        const result = await timerStartFromEntry({
+          entryId: savePlan.normalizedDraft.id,
+          engagementId: savePlan.normalizedDraft.engagementId,
+          activityId: savePlan.normalizedDraft.activityId,
+          startDate: savePlan.normalizedDraft.date,
+          startMinute: savePlan.startMinute,
+          description: savePlan.normalizedDraft.description,
+        })
+
+        entryDraftQueuedKeyByIdRef.current.delete(savePlan.normalizedDraft.id)
+        setPendingEntryDraftSaves((previous) => {
+          if (!previous.has(savePlan.normalizedDraft.id)) {
+            return previous
+          }
+
+          const next = new Map(previous)
+          next.delete(savePlan.normalizedDraft.id)
+          return next
+        })
+        entryDraftLastSavedKeyRef.current = null
+        entryDraftRef.current = null
+        selectedEntryIdRef.current = null
+        activeTimerRef.current = result.timer
+        setActiveTimer(result.timer)
+        setIsTimerSelectionMode(false)
+        selectActiveTimer(result.timer, result.timer.startDate, { syncSelectedDate: true })
+        requestTimelineAutoCenter(result.timer.startDate)
+
+        await Promise.all([
+          loadTimeline(result.timer.startDate),
+          loadWeekTimeline(result.timer.startDate),
+          loadWeeklySummary(result.timer.startDate),
+          loadQuickAddSuggestions(),
+        ])
+        invalidateMonthSummaries([
+          monthKeyFromDate(result.removedEntryDate),
+          monthKeyFromDate(result.timer.startDate),
+        ])
+        setSuccessMessage(
+          `Tracking ${formatEntityDisplayLabel(result.timer.activityName, result.timer.activityCode)}.`,
+        )
+        await emit(TIMER_CHANGED_EVENT)
+      } finally {
+        setIsEntryLiveConversionBusy(false)
+      }
+    })
+  }, [
+    enqueueEntryDraftSave,
+    invalidateMonthSummaries,
+    isEntryLiveConversionBusy,
+    isTimelineDeleteBusy,
+    loadQuickAddSuggestions,
+    loadTimeline,
+    loadWeekTimeline,
+    loadWeeklySummary,
+    requestTimelineAutoCenter,
+    runTimelineMutation,
+    selectActiveTimer,
+  ])
+
   const onQuickBlockActivityPointerDown = (
     event: ReactPointerEvent<HTMLButtonElement>,
     engagement: Engagement,
     activity: Activity,
+    initialDurationMinutes = QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
   ) => {
     if (event.button !== 0 || timelineMutationInFlightRef.current || activity.isActive === false) {
       return
@@ -5817,7 +6707,8 @@ function App() {
       pointerId: event.pointerId,
       originClientX: event.clientX,
       currentClientX: event.clientX,
-      durationMinutes: QUICK_ENTRY_DEFAULT_DURATION_MINUTES,
+      baseDurationMinutes: initialDurationMinutes,
+      durationMinutes: initialDurationMinutes,
       isDragging: false,
     }))
   }
@@ -5833,6 +6724,7 @@ function App() {
     const nextDuration = quickEntryDurationFromDrag(
       current.originClientX,
       event.clientX,
+      current.baseDurationMinutes,
     )
     const nextIsDragging =
       current.isDragging
@@ -5881,41 +6773,73 @@ function App() {
   }
 
   const onCreateTimelineEntryAtMinute = useCallback(
-    (date: string, anchorMinute: number) => {
+    (
+      date: string,
+      anchorMinute: number,
+      clientX = window.innerWidth / 2,
+      clientY = window.innerHeight / 2,
+      surface: 'day' | 'week' = 'day',
+    ) => {
       const { startMinute, endMinute } = resolveManualTimelineCreateWindow(anchorMinute, timelineWindow)
+      const position = clampTimelineCreatePopoverPosition(clientX, clientY)
+      setTimelineContextMenu(null)
+      setTimelineCreateSelection({
+        surface,
+        date,
+        startMinute,
+        endMinute,
+        ...position,
+      })
+    },
+    [timelineWindow],
+  )
 
+  const createTimelineEntryFromSelection = useCallback(
+    (engagement: Engagement, activity: Activity) => {
+      if (!timelineCreateSelection || timelineMutationInFlightRef.current) {
+        return
+      }
+
+      const selection = timelineCreateSelection
       void runTimelineMutation(async () => {
         const result = await timelineCreateEntry({
-          date,
-          startMinute,
-          endMinute,
+          date: selection.date,
+          startMinute: selection.startMinute,
+          endMinute: selection.endMinute,
+          engagementId: engagement.id,
+          activityId: activity.id,
+          description: '',
         })
-        updateSelectedDate(date, { clearSelection: false })
+        setTimelineCreateSelection(null)
+        updateSelectedDate(selection.date, { clearSelection: false })
         const [entries] = await Promise.all([
-          loadTimeline(date),
-          loadWeekTimeline(date),
-          loadWeeklySummary(date),
+          loadTimeline(selection.date),
+          loadWeekTimeline(selection.date),
+          loadWeeklySummary(selection.date),
+          loadQuickAddSuggestions(),
         ])
-        invalidateMonthSummaries([monthKeyFromDate(date)])
+        invalidateMonthSummaries([monthKeyFromDate(selection.date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
         if (createdEntry) {
-          const nextDraft = buildEntryDraft(createdEntry)
-          setSelectedEntryId(createdEntry.id)
-          entryDraftLastSavedKeyRef.current = serializeEntryDraft(nextDraft)
-          setEntryAutoSaveStatus('saved')
-          setEntryDraft(nextDraft)
+          onSelectEntry(createdEntry)
+          setHighlightedEntryId(createdEntry.id)
+          if (selection.surface === 'day') {
+            scrollDayTimelineToEntry(createdEntry)
+          }
         }
-        setTimelineContextMenu(null)
-        setSuccessMessage('Timeline entry created.')
+        setSuccessMessage(`Added ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
       })
     },
     [
       invalidateMonthSummaries,
+      loadQuickAddSuggestions,
       loadTimeline,
       loadWeekTimeline,
       loadWeeklySummary,
+      onSelectEntry,
       runTimelineMutation,
-      timelineWindow,
+      scrollDayTimelineToEntry,
+      timelineCreateSelection,
       updateSelectedDate,
     ],
   )
@@ -5925,15 +6849,14 @@ function App() {
       return
     }
 
-    const date = timelineContextMenu.createDate
-    const startMinute = timelineContextMenu.createStartMinute
+    const { createDate: date, createStartMinute: startMinute, surface, x, y } = timelineContextMenu
     setTimelineContextMenu(null)
-    if (timelineContextMenu.surface === 'calendar-review') {
+    if (surface === 'calendar-review') {
       onCreateCalendarCandidateAtMinute(date, startMinute)
       return
     }
 
-    onCreateTimelineEntryAtMinute(date, startMinute)
+    onCreateTimelineEntryAtMinute(date, startMinute, x, y, surface)
   }
 
   const onDeleteTimelineContextMenuEntry = () => {
@@ -6033,7 +6956,7 @@ function App() {
 
   const onDoubleClickTimelineEmptySpace = (
     event: ReactMouseEvent<HTMLDivElement>,
-    surface: TimelineSurface = 'day',
+    surface: 'day' | 'week' = 'day',
   ) => {
     if (
       isBusy
@@ -6068,7 +6991,153 @@ function App() {
         date: selectedDateRef.current,
         minute: clientYToTimelineMinute(event.clientY, grid, timelineWindow),
       }
-    onCreateTimelineEntryAtMinute(pointerSlot.date, pointerSlot.minute)
+    onCreateTimelineEntryAtMinute(
+      pointerSlot.date,
+      pointerSlot.minute,
+      event.clientX,
+      event.clientY,
+      surface,
+    )
+  }
+
+  const onTimelineCreatePointerDown = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    surface: 'day' | 'week',
+  ) => {
+    if (
+      event.button !== 0
+      || isBusy
+      || timelineMutationInFlightRef.current
+      || isTimelineDeleteBusy
+      || timelineDragState?.isDragging
+      || (surface === 'day' ? isTimelineLoading : isWeekTimelineLoading)
+      || isTargetWithinTimelineBlock(event.target)
+      || isTargetWithinWeekTimelineGutter(event.target)
+    ) {
+      return
+    }
+
+    const grid = surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const pointerSlot = surface === 'week'
+      ? resolveWeekTimelinePointerSlot(
+        event.clientX,
+        event.clientY,
+        grid,
+        weekTimelineDays,
+        timelineWindow,
+        weekTimelineLayoutMetrics,
+      )
+      : {
+        date: selectedDateRef.current,
+        minute: clientYToTimelineMinute(event.clientY, grid, timelineWindow),
+      }
+    const originMinute = snapMinute(pointerSlot.minute, TIMELINE_DRAG_SNAP_MINUTES)
+    const nextState: TimelineCreateDragState = {
+      surface,
+      pointerId: event.pointerId,
+      date: pointerSlot.date,
+      originMinute,
+      currentMinute: originMinute,
+      originClientX: event.clientX,
+      originClientY: event.clientY,
+      currentClientX: event.clientX,
+      currentClientY: event.clientY,
+      isDragging: false,
+    }
+
+    event.currentTarget.setPointerCapture(event.pointerId)
+    timelineCreateDragStateRef.current = nextState
+    setTimelineCreateDragState(nextState)
+    setTimelineCreateSelection(null)
+    setTimelineContextMenu(null)
+  }
+
+  const onTimelineCreatePointerMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    surface: 'day' | 'week',
+  ) => {
+    const current = timelineCreateDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId || current.surface !== surface) {
+      return
+    }
+
+    const grid = surface === 'week' ? weekTimelineGridRef.current : timelineGridRef.current
+    if (!grid) {
+      return
+    }
+
+    const pointerMinute = surface === 'week'
+      ? resolveWeekTimelinePointerSlot(
+        event.clientX,
+        event.clientY,
+        grid,
+        weekTimelineDays,
+        timelineWindow,
+        weekTimelineLayoutMetrics,
+      ).minute
+      : clientYToTimelineMinute(event.clientY, grid, timelineWindow)
+    const snappedPointerMinute = snapMinute(pointerMinute, TIMELINE_DRAG_SNAP_MINUTES)
+    const isDragging = current.isDragging || (
+      Math.abs(event.clientY - current.originClientY) >= TIMELINE_DRAG_ACTIVATION_PX
+      && snappedPointerMinute !== current.originMinute
+    )
+    const nextState: TimelineCreateDragState = {
+      ...current,
+      currentMinute: snappedPointerMinute,
+      currentClientX: event.clientX,
+      currentClientY: event.clientY,
+      isDragging,
+    }
+    timelineCreateDragStateRef.current = nextState
+    setTimelineCreateDragState(nextState)
+  }
+
+  const onTimelineCreatePointerUp = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    surface: 'day' | 'week',
+  ) => {
+    const current = timelineCreateDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId || current.surface !== surface) {
+      return
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+
+    timelineCreateDragStateRef.current = null
+    setTimelineCreateDragState(null)
+    if (!current.isDragging) {
+      return
+    }
+
+    event.preventDefault()
+    const position = clampTimelineCreatePopoverPosition(event.clientX, event.clientY)
+    setTimelineCreateSelection({
+      surface,
+      date: current.date,
+      ...resolveTimelineCreateRange(current.originMinute, current.currentMinute, timelineWindow),
+      ...position,
+    })
+  }
+
+  const onTimelineCreatePointerCancel = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const current = timelineCreateDragStateRef.current
+    if (!current || current.pointerId !== event.pointerId) {
+      return
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    timelineCreateDragStateRef.current = null
+    setTimelineCreateDragState(null)
   }
 
   const onDoubleClickCalendarReviewEmptySpace = (
@@ -6092,89 +7161,6 @@ function App() {
     onCreateCalendarCandidateAtMinute(calendarSelectedDate, pointerMinute)
   }
 
-  const saveEntryDraftSnapshot = useCallback(
-    async (draft: EntryDraft) => {
-      if (selectedEntryIdRef.current !== draft.id) {
-        return
-      }
-
-      const savePlan = buildEntryDraftSavePlan(draft)
-      if (!savePlan.ok) {
-        setSuccessMessage(null)
-        setErrorMessage(savePlan.errorMessage)
-        setEntryAutoSaveStatus('error')
-        return
-      }
-
-      const currentEntry = timelineEntriesRef.current.find((entry) => entry.id === draft.id) ?? null
-      const previousEntryDate = currentEntry?.date ?? selectedDateRef.current
-      const previousMonthKey = monthKeyFromDate(previousEntryDate)
-      const nextMonthKey = monthKeyFromDate(savePlan.normalizedDraft.date)
-      const refreshDate = savePlan.normalizedDraft.date
-      const nextEngagementId = savePlan.normalizedDraft.engagementId || null
-      const nextActivityId = savePlan.normalizedDraft.activityId || null
-      const shouldRefreshQuickAddSuggestions =
-        currentEntry?.engagementId !== nextEngagementId
-        || currentEntry?.activityId !== nextActivityId
-
-      setEntryAutoSaveStatus('saving')
-      setSuccessMessage(null)
-      setErrorMessage(null)
-
-      try {
-        await timelineUpdateEntry({
-          id: savePlan.normalizedDraft.id,
-          engagementId: nextEngagementId,
-          activityId: nextActivityId,
-          mode: 'manual',
-          date: savePlan.normalizedDraft.date,
-          startMinute: savePlan.startMinute,
-          endMinute: savePlan.endMinute,
-          description: savePlan.normalizedDraft.description,
-        })
-
-        invalidateMonthSummaries([previousMonthKey, nextMonthKey])
-        updateSelectedDate(refreshDate, { clearSelection: false })
-        const refreshTasks: Promise<unknown>[] = [
-          loadTimeline(refreshDate),
-          loadWeekTimeline(refreshDate),
-          loadWeeklySummary(refreshDate),
-        ]
-
-        if (shouldRefreshQuickAddSuggestions) {
-          refreshTasks.push(loadQuickAddSuggestions())
-        }
-
-        await Promise.all(refreshTasks)
-
-        if (selectedEntryIdRef.current !== draft.id) {
-          return
-        }
-
-        entryDraftLastSavedKeyRef.current = savePlan.key
-        setEntryDraft((previous) =>
-          previous && previous.id === draft.id ? savePlan.normalizedDraft : previous,
-        )
-        setEntryAutoSaveStatus('saved')
-      } catch (error) {
-        if (selectedEntryIdRef.current !== draft.id) {
-          return
-        }
-
-        setEntryAutoSaveStatus('error')
-        setErrorMessage(formatActionErrorMessage(error))
-      }
-    },
-    [
-      invalidateMonthSummaries,
-      loadTimeline,
-      loadWeekTimeline,
-      loadWeeklySummary,
-      loadQuickAddSuggestions,
-      updateSelectedDate,
-    ],
-  )
-
   useEffect(() => {
     if (!entryDraft) {
       return undefined
@@ -6192,9 +7178,7 @@ function App() {
     entryDraftAutoSaveTimeoutRef.current = window.setTimeout(() => {
       const draftToSave = entryDraft
       entryDraftAutoSaveTimeoutRef.current = null
-      entryDraftAutoSaveChainRef.current = entryDraftAutoSaveChainRef.current
-        .catch(() => undefined)
-        .then(() => saveEntryDraftSnapshot(draftToSave))
+      enqueueEntryDraftSave(draftToSave)
     }, 700)
 
     return () => {
@@ -6203,7 +7187,7 @@ function App() {
         entryDraftAutoSaveTimeoutRef.current = null
       }
     }
-  }, [entryDraft, saveEntryDraftSnapshot])
+  }, [enqueueEntryDraftSave, entryDraft])
 
   const onSaveEntryDraft = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -6212,13 +7196,15 @@ function App() {
       return
     }
 
-    entryDraftAutoSaveChainRef.current = entryDraftAutoSaveChainRef.current
-      .catch(() => undefined)
-      .then(() => saveEntryDraftSnapshot(entryDraft))
+    enqueueEntryDraftSave(entryDraft)
   }
 
   const onDeleteTimelineEntry = (id: string) => {
-    if (isTimelineDeleteBusy) {
+    if (
+      isTimelineDeleteBusy
+      || isEntryLiveConversionBusy
+      || timelineMutationInFlightRef.current
+    ) {
       return
     }
 
@@ -7349,6 +8335,10 @@ function App() {
       clearTimelineSelection()
     }
 
+    setTimelineCreateSelection(null)
+    timelineCreateDragStateRef.current = null
+    setTimelineCreateDragState(null)
+
     if (view === 'timeline' || view === 'week') {
       requestTimelineAutoCenter(selectedDateRef.current)
     }
@@ -7365,21 +8355,227 @@ function App() {
           ? 'Not saved'
           : ''
 
+  const activeTimerAutoSaveStatusLabel =
+    activeTimerAutoSaveStatus === 'saving'
+      ? 'Saving...'
+      : activeTimerAutoSaveStatus === 'saved'
+        ? 'Saved'
+        : activeTimerAutoSaveStatus === 'error'
+          ? 'Not saved'
+          : ''
+
+  const entryLiveEligibility = resolveEntryLiveEligibility(
+    entryDraft,
+    activeTimer,
+    timelineClock,
+  )
+  const isEntryLiveButtonBusy = isBusy
+    || isTimelineDeleteBusy
+    || isEntryLiveConversionBusy
+  const entryLiveButtonTitle = isEntryLiveButtonBusy
+    ? 'Entry updates are in progress'
+    : entryLiveEligibility.title
+  const isEntryLiveButtonDisabled = isEntryLiveButtonBusy || !entryLiveEligibility.eligible
+  const entryLiveButtonAriaLabel = isEntryLiveButtonDisabled
+    ? `Make this entry live unavailable. ${entryLiveButtonTitle}`
+    : 'Make this entry live'
+
+  const liveTimerEditorPanel = activeTimer && activeTimerDraft && isActiveTimerSelected ? (
+    <aside className="timeline-editor live-timer-editor">
+      <div className="timeline-editor-header live-timer-editor-header">
+        <div className="live-timer-editor-heading">
+          <h3>Edit Entry</h3>
+          <span className="live-timer-editor-status" aria-label={`Timer live for ${formatActiveTimerElapsed(displayedActiveTimer ?? activeTimer, timelineClock)}`}>
+            <span className="live-timer-status-dot" aria-hidden="true" />
+            <span>LIVE</span>
+            <span aria-hidden="true">·</span>
+            <time>{formatActiveTimerElapsed(displayedActiveTimer ?? activeTimer, timelineClock)}</time>
+          </span>
+        </div>
+        <button
+          type="button"
+          className="timeline-editor-close"
+          aria-label="Close edit entry"
+          title="Close edit entry"
+          onClick={clearTimelineSelection}
+          disabled={isBusy}
+        >
+          <span className="control-icon close-icon" aria-hidden="true" />
+        </button>
+      </div>
+
+      <form
+        className="stack live-timer-editor-form"
+        onSubmit={(event) => {
+          event.preventDefault()
+          void flushActiveTimerDraft()
+        }}
+      >
+        <label>
+          Date
+          <output className="live-timer-readonly-value">
+            <time dateTime={activeTimer.startDate}>{activeTimer.startDate}</time>
+          </output>
+        </label>
+        <label>
+          Engagement
+          <select
+            value={activeTimerDraft.engagementId}
+            onChange={(event) => {
+              const engagementId = event.target.value
+              const engagement = activeTimerAvailableEngagements.find(
+                (candidate) => candidate.id === engagementId,
+              )
+              setActiveTimerDraft((previous) => previous
+                ? {
+                    ...previous,
+                    engagementId,
+                    activityId: engagement?.activities[0]?.id ?? '',
+                  }
+                : previous)
+            }}
+            disabled={isBusy}
+          >
+            {activeTimerAvailableEngagements.map((engagement) => (
+              <option key={engagement.id} value={engagement.id}>
+                {formatEntityDisplayLabel(engagement.name, engagement.code)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Activity
+          <select
+            value={activeTimerDraft.activityId}
+            onChange={(event) => setActiveTimerDraft((previous) => previous
+              ? {
+                  ...previous,
+                  activityId: event.target.value,
+                }
+              : previous)}
+            disabled={isBusy}
+          >
+            {activeTimerAvailableActivities.map((activity) => (
+              <option key={activity.id} value={activity.id}>
+                {formatEntityDisplayLabel(activity.name, activity.code)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="live-timer-time-grid">
+          <label>
+            Start
+            <span className="time-input-shell">
+              <input
+                type="time"
+                step={60}
+                value={minuteToTimeInput(activeTimerDraft.startMinute)}
+                max={activeTimerDraft.startDate === todayDate
+                  ? minuteToTimeInput(currentTimelineMinute)
+                  : undefined}
+                onChange={(event) => {
+                  const nextStartMinute = timeInputToMinute(event.target.value)
+                  setActiveTimerDraft((previous) => previous
+                    ? {
+                        ...previous,
+                        startMinute: Math.min(
+                          MINUTES_IN_DAY - 1,
+                          Math.max(0, nextStartMinute),
+                        ),
+                      }
+                    : previous)
+                }}
+                disabled={isBusy}
+                aria-label="Live timer start time"
+              />
+              <span className="control-icon clock-icon" aria-hidden="true" />
+            </span>
+          </label>
+          <label>
+            End
+            <output className="live-timer-readonly-value is-running">
+              <span className="live-timer-status-dot" aria-hidden="true" />
+              <strong>Running now</strong>
+            </output>
+          </label>
+        </div>
+        <label>
+          Description
+          <textarea
+            aria-label="Live timer description"
+            rows={4}
+            value={activeTimerDraft.description}
+            onChange={(event) => setActiveTimerDraft((previous) => previous
+              ? {
+                  ...previous,
+                  description: event.target.value,
+                }
+              : previous)}
+            disabled={isBusy}
+          />
+        </label>
+        <div className="live-timer-entry-actions">
+          <p
+            className={`timeline-entry-save-status ${activeTimerAutoSaveStatus}`}
+            aria-live="polite"
+          >
+            {activeTimerAutoSaveStatusLabel}
+          </p>
+          <span className="live-timer-entry-action-buttons">
+            <button
+              type="button"
+              className="live-timer-action-button is-discard"
+              onClick={discardCurrentTimer}
+              disabled={isBusy}
+              aria-label="Discard running timer"
+              title="Discard running timer"
+            >
+              <TrashIcon className="live-timer-action-icon" />
+            </button>
+            <button
+              type="button"
+              className="live-timer-action-button is-stop"
+              onClick={stopCurrentTimer}
+              disabled={isBusy}
+              aria-label="Stop and save timer"
+              title="Stop and save timer"
+            >
+              <StopIcon className="live-timer-action-icon live-timer-stop-icon" />
+            </button>
+          </span>
+        </div>
+      </form>
+    </aside>
+  ) : null
+
   const timelineEditorPanel = (
     <aside className={`timeline-editor ${entryDraft ? '' : 'is-empty'}`}>
       <div className="timeline-editor-header">
         <h3>Edit Entry</h3>
         {entryDraft ? (
-          <button
-            type="button"
-            className="timeline-editor-close"
-            aria-label="Close edit entry"
-            title="Close edit entry"
-            onClick={clearTimelineSelection}
-            disabled={isTimelineDeleteBusy}
-          >
-            <span className="control-icon close-icon" aria-hidden="true" />
-          </button>
+          <div className="timeline-editor-header-actions">
+            <span className="timeline-editor-live-button-help" title={entryLiveButtonTitle}>
+              <button
+                type="button"
+                className="timeline-editor-live-button"
+                aria-label={entryLiveButtonAriaLabel}
+                onClick={startSelectedEntryLive}
+                disabled={isEntryLiveButtonDisabled}
+              >
+                <TimerIcon className="timeline-editor-live-icon" />
+              </button>
+            </span>
+            <button
+              type="button"
+              className="timeline-editor-close"
+              aria-label="Close edit entry"
+              title="Close edit entry"
+              onClick={clearTimelineSelection}
+              disabled={isTimelineDeleteBusy || isEntryLiveConversionBusy}
+            >
+              <span className="control-icon close-icon" aria-hidden="true" />
+            </button>
+          </div>
         ) : null}
       </div>
       {entryDraft ? (
@@ -7389,8 +8585,9 @@ function App() {
             <input
               type="date"
               value={entryDraft.date}
+              disabled={isEntryLiveConversionBusy}
               onChange={(event) =>
-                setEntryDraft((previous) =>
+                updateEntryDraft((previous) =>
                   previous
                     ? {
                         ...previous,
@@ -7405,8 +8602,9 @@ function App() {
             Engagement
             <select
               value={entryDraft.engagementId}
+              disabled={isEntryLiveConversionBusy}
               onChange={(event) =>
-                setEntryDraft((previous) =>
+                updateEntryDraft((previous) =>
                   previous
                     ? {
                         ...previous,
@@ -7429,8 +8627,9 @@ function App() {
             Activity
             <select
               value={entryDraft.activityId}
+              disabled={isEntryLiveConversionBusy}
               onChange={(event) =>
-                setEntryDraft((previous) =>
+                updateEntryDraft((previous) =>
                   previous
                     ? {
                         ...previous,
@@ -7455,8 +8654,9 @@ function App() {
                 type="time"
                 step={60}
                 value={entryDraft.startTime}
+                disabled={isEntryLiveConversionBusy}
                 onChange={(event) =>
-                  setEntryDraft((previous) =>
+                  updateEntryDraft((previous) =>
                     previous
                       ? {
                           ...previous,
@@ -7476,8 +8676,9 @@ function App() {
                 type="time"
                 step={60}
                 value={entryDraft.endTime}
+                disabled={isEntryLiveConversionBusy}
                 onChange={(event) =>
-                  setEntryDraft((previous) =>
+                  updateEntryDraft((previous) =>
                     previous
                       ? {
                           ...previous,
@@ -7497,8 +8698,9 @@ function App() {
               aria-label="Entry description"
               rows={4}
               value={entryDraft.description}
+              disabled={isEntryLiveConversionBusy}
               onChange={(event) =>
-                setEntryDraft((previous) =>
+                updateEntryDraft((previous) =>
                   previous
                     ? {
                         ...previous,
@@ -7520,7 +8722,7 @@ function App() {
               type="button"
               className="button-soft-danger"
               onClick={() => onDeleteTimelineEntry(entryDraft.id)}
-              disabled={isTimelineDeleteBusy}
+              disabled={isTimelineDeleteBusy || isEntryLiveConversionBusy}
             >
               <span className="control-icon trash-icon" aria-hidden="true" />
               Delete
@@ -7538,8 +8740,16 @@ function App() {
           <p>
             Confidence: {(selectedEntry.confidence * 100).toFixed(0)}%
           </p>
-          <p>Source: {selectedEntry.source}</p>
-          {selectedEntry.source !== 'manual' ? (
+          <p className={selectedEntry.source === 'timer' ? 'entry-source-timer' : undefined}>
+            Source:{' '}
+            {selectedEntry.source === 'timer' ? (
+              <span>
+                <TimerIcon className="entry-source-timer-icon" />
+                Timer
+              </span>
+            ) : selectedEntry.source}
+          </p>
+          {selectedEntry.source !== 'manual' && selectedEntry.source !== 'timer' ? (
             <p>User Submission: {selectedEntry.userSubmissionText || 'Unavailable'}</p>
           ) : null}
           <p>Description: {selectedEntry.description}</p>
@@ -7578,6 +8788,7 @@ function App() {
       ) : null}
     </aside>
   )
+  const activeTimelineEditorPanel = liveTimerEditorPanel ?? timelineEditorPanel
 
   const codesCreateModal = isCodesCreateModalOpen ? createPortal(
     <div
@@ -8119,7 +9330,7 @@ function App() {
         <header className="calendar-bulk-header quick-add-settings-header">
           <div>
             <h3 id="quick-add-settings-title">Quick Entry Settings</h3>
-            <p>Rearrange or hide engagements/activities to customize how it appears.</p>
+            <p>Choose which activities appear before you search. Hidden activities remain searchable.</p>
           </div>
           <div className="calendar-bulk-header-actions">
             <button
@@ -8158,7 +9369,7 @@ function App() {
         </header>
 
         <div className="quick-add-settings-body">
-          <section className="quick-add-settings-list" aria-label="Quick Entry order and visibility">
+          <section className="quick-add-settings-list" aria-label="Default Quick Entry order and visibility">
             {quickAddSettingsEngagements.length === 0 ? (
               <p className="quick-add-settings-empty">No active engagements.</p>
             ) : (
@@ -8253,9 +9464,9 @@ function App() {
                         <button
                           type="button"
                           className={`quick-add-visibility-button ${engagementHidden ? 'is-hidden' : ''}`}
-                          aria-label={`${engagementHidden ? 'Show' : 'Hide'} ${engagementLabel}`}
+                          aria-label={`${engagementHidden ? 'Show' : 'Hide'} ${engagementLabel} by default`}
                           aria-pressed={!engagementHidden}
-                          title={engagementHidden ? 'Show in Quick Entry' : 'Hide from Quick Entry'}
+                          title={engagementHidden ? 'Show in default list' : 'Hide from default list'}
                           onClick={() => toggleQuickAddEngagementVisibility(engagement.id)}
                           disabled={isBusy}
                         >
@@ -8273,13 +9484,13 @@ function App() {
                           const activityLabel = formatEntityDisplayLabel(activity.name, activity.code)
                           const activityEffectivelyHidden = engagementHidden || activityHidden
                           const activityVisibilityLabel = engagementHidden
-                            ? `${activityLabel} hidden because ${engagementLabel} is hidden`
-                            : `${activityHidden ? 'Show' : 'Hide'} ${activityLabel}`
+                            ? `${activityLabel} is not shown by default because ${engagementLabel} is hidden`
+                            : `${activityHidden ? 'Show' : 'Hide'} ${activityLabel} by default`
                           const activityVisibilityTitle = engagementHidden
-                            ? 'Hidden because engagement is hidden'
+                            ? 'Not shown by default because engagement is hidden'
                             : activityHidden
-                              ? 'Show in Quick Entry'
-                              : 'Hide from Quick Entry'
+                              ? 'Show in default list'
+                              : 'Hide from default list'
                           const activityKey = quickAddSettingsActivityKey(engagement.id, activity.id)
                           const activityDragPresentation = getQuickAddSettingsDragPresentation(activityKey)
                           const activityColor = activity.colorHex ?? engagementColor
@@ -8379,63 +9590,50 @@ function App() {
           <aside className="quick-add-settings-preview-panel" aria-label="Quick Entry preview">
             <div className="quick-add-settings-preview-header">
               <h4>Live Preview</h4>
-              <span>{quickAddShownActivityCount} visible</span>
+              <span>{quickAddShownActivityCount} shown by default</span>
             </div>
             <div className="quick-add-panel quick-add-settings-preview">
               {quickAddSettingsPreviewGroups.length === 0 ? (
                 <p className="quick-add-empty">
-                  {allQuickAddActivities.length === 0 ? 'No active activities yet.' : 'All Quick Entry items are hidden.'}
+                  {allQuickAddActivities.length === 0
+                    ? 'No active activities yet.'
+                    : 'No activities are shown by default.'}
                 </p>
               ) : (
-                <div className="quick-add-scroll-frame">
-                  <div className="quick-add-scroll">
-                    <div className="quick-add-list">
-                      {quickAddSettingsPreviewGroups.map((group) => {
-                        const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
-
-                        return (
-                          <section
-                            key={group.engagement.id}
-                            className="quick-add-group"
-                            style={{
-                              '--quick-add-color': engagementColor,
-                            } as CSSProperties}
-                          >
-                            <div className="quick-add-group-header">
-                              <span>{formatEntityPrimaryLabel(
-                                group.engagement.name,
-                                group.engagement.code,
-                                'Engagement',
-                              )}</span>
-                            </div>
-                            <div className="quick-add-grid">
-                              {group.activities.map(({ activity }) => {
-                                const activityColor = activity.colorHex ?? engagementColor
-                                const activityLabel = activity.name || activity.code
-
-                                return (
-                                  <div
-                                    key={activity.id}
-                                    className="quick-add-tile quick-add-settings-preview-tile"
-                                    role="button"
-                                    aria-disabled="true"
-                                    style={{
-                                      '--quick-add-color': activityColor,
-                                      '--quick-add-duration-progress': '0%',
-                                    } as CSSProperties}
-                                  >
-                                    <span className="quick-add-tile-main">
-                                      <strong>{activityLabel}</strong>
-                                    </span>
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          </section>
-                        )
-                      })}
-                    </div>
-                  </div>
+                <div className="quick-add-settings-preview-list">
+                  {quickAddSettingsPreviewGroups.flatMap((group) => (
+                    group.activities.map(({ activity, engagement }) => (
+                      <div
+                        key={`${engagement.id}:${activity.id}`}
+                        className="activity-command-result quick-add-settings-preview-result"
+                      >
+                        <span
+                          className="activity-command-result-accent"
+                          style={{
+                            backgroundColor: activity.colorHex
+                              ?? engagement.colorHex
+                              ?? TIMELINE_NEUTRAL_COLOR,
+                          }}
+                          aria-hidden="true"
+                        />
+                        <span className="activity-command-result-copy">
+                          <strong>{formatEntityPrimaryLabel(
+                            activity.name,
+                            activity.code,
+                            'Activity',
+                          )}</strong>
+                          <small>{formatEntityDisplayLabel(
+                            engagement.name,
+                            engagement.code,
+                            'Engagement',
+                          )}</small>
+                        </span>
+                        <span className="activity-command-result-action is-icon" aria-hidden="true">
+                          <PlusIcon className="activity-command-result-action-icon" />
+                        </span>
+                      </div>
+                    ))
+                  ))}
                 </div>
               )}
             </div>
@@ -9140,9 +10338,9 @@ function App() {
                 onClick={() => setIsLlmEntryCollapsed((previous) => !previous)}
                 aria-expanded={!isLlmEntryCollapsed}
                 aria-controls="llm-entry-body"
-                title={isLlmEntryCollapsed ? 'Expand LLM Entry' : 'Collapse LLM Entry'}
+                title={isLlmEntryCollapsed ? 'Expand bulk entry' : 'Collapse bulk entry'}
               >
-                <span>LLM Entry</span>
+                <span>Bulk Entry</span>
                 <span
                   className={`control-icon ${isLlmEntryCollapsed ? 'chevron-down' : 'chevron-up'}`}
                   aria-hidden="true"
@@ -9225,139 +10423,138 @@ function App() {
             <div className="quick-add-panel" aria-label="Quick Entry">
               <div className="quick-add-header">
                 <h3>Quick Entry</h3>
-                <button
-                  type="button"
-                  className="quick-add-settings-button"
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={openQuickAddSettings}
-                  aria-label="Open Quick Entry settings"
-                  title="Quick Entry settings"
-                >
-                  <img src={settingsIcon} alt="" aria-hidden="true" draggable={false} />
-                </button>
+                <div className="quick-add-header-actions">
+                  {!activeTimer ? (
+                    <button
+                      type="button"
+                      className={`quick-add-start-timer-button ${isTimerSelectionMode ? 'is-active' : ''}`}
+                      onClick={() => setIsTimerSelectionMode((previous) => !previous)}
+                      disabled={isBusy}
+                      aria-pressed={isTimerSelectionMode}
+                      aria-label={isTimerSelectionMode ? 'Cancel start timer selection' : 'Start timer'}
+                      title={isTimerSelectionMode ? 'Cancel start timer selection' : 'Start timer'}
+                    >
+                      <TimerIcon className="quick-add-start-timer-icon" />
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="quick-add-settings-button"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={openQuickAddSettings}
+                    aria-label="Open Quick Entry settings"
+                    title="Quick Entry settings"
+                  >
+                    <img src={settingsIcon} alt="" aria-hidden="true" draggable={false} />
+                  </button>
+                </div>
               </div>
-              <input
-                className="quick-add-search"
-                type="search"
-                value={quickAddSearch}
-                onChange={(event) => setQuickAddSearch(event.target.value)}
-                placeholder="Search activities"
-                aria-label="Search quick entry activities"
-              />
+
+              {activeTimer ? (
+                <div
+                  className="quick-add-active-timer"
+                  style={{
+                    '--quick-add-timer-color': activeTimer.activityColorHex
+                      ?? activeTimer.engagementColorHex
+                      ?? TIMELINE_NEUTRAL_COLOR,
+                  } as CSSProperties}
+                >
+                  <span className="quick-add-active-timer-accent" aria-hidden="true" />
+                  <span className="quick-add-active-timer-copy">
+                    <strong>{formatEntityPrimaryLabel(
+                      activeTimer.activityName,
+                      activeTimer.activityCode,
+                      'Activity',
+                    )}</strong>
+                    <small>{formatEntityPrimaryLabel(
+                      activeTimer.engagementName,
+                      activeTimer.engagementCode,
+                      'Engagement',
+                    )}</small>
+                  </span>
+                  <span className="quick-add-active-timer-controls">
+                    <time>{formatActiveTimerElapsed(displayedActiveTimer ?? activeTimer, timelineClock)}</time>
+                    <span className="quick-add-active-timer-actions">
+                      <button
+                        type="button"
+                        className="quick-add-discard-timer-button"
+                        onClick={discardCurrentTimer}
+                        disabled={isBusy}
+                        aria-label="Discard running timer"
+                        title="Discard running timer"
+                      >
+                        <TrashIcon className="quick-add-timer-action-icon" />
+                      </button>
+                      <button
+                        type="button"
+                        className="quick-add-stop-timer-button"
+                        onClick={stopCurrentTimer}
+                        disabled={isBusy}
+                        aria-label="Stop and save timer"
+                        title="Stop and save timer"
+                      >
+                        <StopIcon className="quick-add-timer-action-icon quick-add-timer-stop-icon" />
+                      </button>
+                    </span>
+                  </span>
+                </div>
+              ) : null}
+
               {quickAddSuggestionsError ? (
                 <p className="quick-add-error" role="status">{quickAddSuggestionsError}</p>
               ) : null}
-              {quickAddActivityGroups.length === 0 ? (
-                <p className="quick-add-empty">
-                  {allQuickAddActivities.length === 0
-                    ? 'No active activities yet.'
-                    : orderedQuickAddActivities.length === 0 && quickAddSearch.trim().length === 0
-                      ? 'All Quick Entry items are hidden.'
-                      : 'No matching activities.'}
-                </p>
-              ) : (
-                <div className="quick-add-scroll-frame">
-                  <div
-                    ref={quickAddScrollRef}
-                    className="quick-add-scroll"
-                    onScroll={updateQuickAddScrollMetrics}
-                  >
-                    <div className="quick-add-list">
-                      {quickAddActivityGroups.map((group) => {
-                        const engagementColor = group.engagement.colorHex ?? TIMELINE_NEUTRAL_COLOR
 
-                        return (
-                          <section
-                            key={group.engagement.id}
-                            className="quick-add-group"
-                            style={{
-                              '--quick-add-color': engagementColor,
-                            } as CSSProperties}
-                          >
-                            <div
-                              className="quick-add-group-header"
-                              title={formatEntityDisplayLabel(
-                                group.engagement.name,
-                                group.engagement.code,
-                                'Engagement',
-                              )}
-                            >
-                              <span>{formatEntityPrimaryLabel(
-                                group.engagement.name,
-                                group.engagement.code,
-                                'Engagement',
-                              )}</span>
-                            </div>
-                            <div className="quick-add-grid">
-                              {group.activities.map(({ activity, engagement }) => {
-                                const activityColor = activity.colorHex ?? engagementColor
-                                const isDraggingActivity =
-                                  quickBlockDragState?.activityId === activity.id
-                                  && quickBlockDragState.engagementId === engagement.id
-                                const durationMinutes = isDraggingActivity
-                                  ? quickBlockDragState.durationMinutes
-                                  : TIMELINE_MANUAL_CREATE_DURATION_MINUTES
-                                const activityLabel = activity.name || activity.code
-                                const fullActivityLabel = formatEntityDisplayLabel(activity.name, activity.code)
+              <ActivityCommandBar
+                key={isTimerSelectionMode ? 'sidebar-timer-command' : 'sidebar-entry-command'}
+                activities={activityCommandItems}
+                defaultActivities={orderedQuickAddActivities}
+                disabled={isBusy}
+                autoFocus={isTimerSelectionMode}
+                alwaysShowResults
+                placeholder={isTimerSelectionMode ? 'Choose activity to start' : 'Search activities'}
+                ariaLabel={isTimerSelectionMode ? 'Choose an activity to start tracking' : 'Search for an activity to add'}
+                actionLabel={isTimerSelectionMode ? 'Start' : 'Add'}
+                defaultEmptyMessage={allQuickAddActivities.length === 0
+                  ? 'No active activities yet.'
+                  : 'No activities are shown by default. Search to find any active activity.'}
+                actionIcon="plus"
+                resultsMaterial="opaque"
+                resultsPresentation="inline"
+                resultLimit={activityCommandItems.length}
+                showDuration={!isTimerSelectionMode}
+                contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
+                onCancel={() => setIsTimerSelectionMode(false)}
+                resultDragState={isTimerSelectionMode ? null : quickBlockDragState}
+                onResultPointerDown={isTimerSelectionMode
+                  ? undefined
+                  : (event, item, durationMinutes) => onQuickBlockActivityPointerDown(
+                    event,
+                    item.engagement,
+                    item.activity,
+                    durationMinutes,
+                  )}
+                onResultPointerMove={isTimerSelectionMode
+                  ? undefined
+                  : onQuickBlockActivityPointerMove}
+                onResultPointerUp={isTimerSelectionMode
+                  ? undefined
+                  : (event, item) => onQuickBlockActivityPointerUp(
+                    event,
+                    item.engagement,
+                    item.activity,
+                  )}
+                onResultPointerCancel={isTimerSelectionMode
+                  ? undefined
+                  : onQuickBlockActivityPointerCancel}
+                onSubmit={(item, durationMinutes) => {
+                  if (isTimerSelectionMode) {
+                    startActivityTimer(item.engagement, item.activity)
+                    return
+                  }
 
-                                return (
-                                  <button
-                                    key={activity.id}
-                                    type="button"
-                                    className={`quick-add-tile ${isDraggingActivity ? 'dragging' : ''}`}
-                                    onPointerDown={(event) =>
-                                      onQuickBlockActivityPointerDown(event, engagement, activity)
-                                    }
-                                    onPointerMove={onQuickBlockActivityPointerMove}
-                                    onPointerUp={(event) =>
-                                      onQuickBlockActivityPointerUp(event, engagement, activity)
-                                    }
-                                    onPointerCancel={onQuickBlockActivityPointerCancel}
-                                    onKeyDown={(event) => {
-                                      if (event.key === 'Enter' || event.key === ' ') {
-                                        event.preventDefault()
-                                        createQuickBlockEntry(
-                                          engagement,
-                                          activity,
-                                          TIMELINE_MANUAL_CREATE_DURATION_MINUTES,
-                                        )
-                                      }
-                                    }}
-                                    aria-label={`Add ${fullActivityLabel} for ${formatQuickBlockDuration(durationMinutes)}`}
-                                    title={fullActivityLabel}
-                                    style={{
-                                      '--quick-add-color': activityColor,
-                                      '--quick-add-duration-progress': `${quickEntryDurationProgress(durationMinutes)}%`,
-                                    } as CSSProperties}
-                                  >
-                                    <span className="quick-add-tile-main">
-                                      <strong>{activityLabel}</strong>
-                                    </span>
-                                    {isDraggingActivity ? (
-                                      <span className="quick-add-duration">
-                                        {formatQuickBlockDuration(durationMinutes)}
-                                      </span>
-                                    ) : null}
-                                    {isDraggingActivity ? (
-                                      <span className="quick-add-duration-track" aria-hidden="true">
-                                        <span />
-                                      </span>
-                                    ) : null}
-                                  </button>
-                                )
-                              })}
-                            </div>
-                          </section>
-                        )
-                      })}
-                    </div>
-                  </div>
-                  <QuickEntryScrollIndicator
-                    scrollRef={quickAddScrollRef}
-                    metrics={quickAddScrollMetrics}
-                  />
-                </div>
-              )}
+                  createQuickBlockEntry(item.engagement, item.activity, durationMinutes)
+                }}
+              />
             </div>
 
           </section>
@@ -9488,6 +10685,10 @@ function App() {
                   style={{ minHeight: `${timelineCanvasHeight}px` }}
                   onContextMenu={onOpenTimelineEmptyContextMenu}
                   onDoubleClick={onDoubleClickTimelineEmptySpace}
+                  onPointerDown={(event) => onTimelineCreatePointerDown(event, 'day')}
+                  onPointerMove={(event) => onTimelineCreatePointerMove(event, 'day')}
+                  onPointerUp={(event) => onTimelineCreatePointerUp(event, 'day')}
+                  onPointerCancel={onTimelineCreatePointerCancel}
                 >
                   {timelineHourMarks.map((minute) => (
                     <div
@@ -9514,6 +10715,26 @@ function App() {
                   ) : null}
 
                   <div className="timeline-entry-layer">
+                    {timelineCreatePreview?.surface === 'day'
+                      && timelineCreatePreview.date === selectedDate ? (
+                        <div
+                          className="timeline-create-preview"
+                          style={{
+                            top: TIMELINE_CANVAS_TOP_PADDING
+                              + (timelineCreatePreview.startMinute - timelineWindow.startMinute)
+                                * PIXELS_PER_MINUTE,
+                            height: Math.max(
+                              TIMELINE_DRAG_SNAP_MINUTES,
+                              timelineCreatePreview.endMinute - timelineCreatePreview.startMinute,
+                            ) * PIXELS_PER_MINUTE,
+                            left: '3%',
+                            width: '94%',
+                          }}
+                          aria-hidden="true"
+                        >
+                          <span>{minuteToLabel(timelineCreatePreview.startMinute)} – {minuteToLabel(timelineCreatePreview.endMinute)}</span>
+                        </div>
+                      ) : null}
                     {draggedEntryOriginPosition
                       ? (() => {
                         const ghostEntry = draggedEntryOriginPosition.entry
@@ -9562,18 +10783,60 @@ function App() {
                       )
                       const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
                       const needsReview = reviewLabel !== null
+                      const isActiveTimerPreview = isActiveTimerPreviewEntry(entry)
+                      const isTimerEntry = entry.source === 'timer'
+                      const isSelectedBlock =
+                        isActiveTimerPreview
+                          ? selectedActiveTimerDate === entry.date
+                          : selectedEntryId === entry.id || highlightedEntryId === entry.id
                       const isDragPreview =
                         timelineDragState?.isDragging
                         && timelineDragState.surface === 'day'
                         && timelineDragState.entryId === entry.id
                       const shouldShowDurationBadge =
-                        timelineDragState?.surface === 'day'
-                        && timelineDragState.entryId === entry.id
-                        && (
-                          timelineDragState.dragMode === 'pending'
-                          || timelineDragState.dragMode === 'resize-duration'
+                        isSelectedBlock
+                        || (
+                          timelineDragState?.surface === 'day'
+                          && timelineDragState.entryId === entry.id
+                          && (
+                            timelineDragState.dragMode === 'pending'
+                            || timelineDragState.dragMode === 'resize-duration'
+                          )
                         )
                       const blockPalette = buildTimelineBlockPalette(blockColor)
+
+                      if (isActiveTimerPreview) {
+                        const canAdjustStart = entry.date === activeTimer?.startDate
+                        const isAdjustingStart =
+                          activeTimerDragState?.entryId === entry.id
+                          && activeTimerDragState.isDragging
+                        return (
+                          <button
+                            type="button"
+                            key={entry.id}
+                            className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier} ${isSelectedBlock ? 'selected' : ''} ${canAdjustStart ? 'can-move-start' : ''} ${isAdjustingStart ? 'is-adjusting-start' : ''}`}
+                            style={{
+                              top: positionedEntry.top,
+                              height: positionedEntry.height,
+                              left: `${positionedEntry.leftPercent}%`,
+                              width: `${positionedEntry.widthPercent}%`,
+                              ...buildTimelineBlockCssVariables(blockPalette),
+                            } as CSSProperties}
+                            onClick={() => onSelectActiveTimerBlock(entry)}
+                            onPointerDown={canAdjustStart
+                              ? (event) => onStartActiveTimerDrag(event, entry)
+                              : undefined}
+                            title={`${blockLabel.fullLabel}\nLive timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.${canAdjustStart ? '\nDrag vertically to adjust the start time.' : ''}`}
+                            aria-label={`${blockLabel.fullLabel}. Live timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.${canAdjustStart ? ' Drag vertically to adjust the start time.' : ''}`}
+                          >
+                            <TimelineBlockContent
+                              label={blockLabel.label}
+                              durationLabel={formatQuickBlockDuration(entry.durationMinutes)}
+                              status="live"
+                            />
+                          </button>
+                        )
+                      }
 
                       if (isDragPreview) {
                         return (
@@ -9604,7 +10867,7 @@ function App() {
                       const blockClassName = [
                         'timeline-block',
                         `tier-${blockLabel.tier}`,
-                        selectedEntryId === entry.id || highlightedEntryId === entry.id ? 'selected' : '',
+                        isSelectedBlock ? 'selected' : '',
                         needsReview ? 'needs-review' : '',
                         shouldShowDurationBadge ? 'duration-active' : '',
                       ]
@@ -9637,12 +10900,12 @@ function App() {
                             blockLabel.fullLabel,
                             entry.description,
                             reviewLabel,
-                          )}
-                          aria-label={buildTimelineBlockAriaLabel(
+                          ) + (isTimerEntry ? '\nCaptured with timer.' : '')}
+                          aria-label={`${buildTimelineBlockAriaLabel(
                             blockLabel.fullLabel,
                             entry.description,
                             reviewLabel,
-                          )}
+                          )}${isTimerEntry ? '. Captured with timer.' : ''}`}
                           aria-haspopup="menu"
                         >
                           <TimelineBlockContent
@@ -9660,7 +10923,7 @@ function App() {
                 </div>
               </div>
 
-              {timelineEditorPanel}
+              {activeTimelineEditorPanel}
             </div>
           </section>
         ) : null}
@@ -9741,7 +11004,7 @@ function App() {
               <p className="mini-calendar-error">{weekTimelineError}</p>
             ) : null}
 
-            <div className={`timeline-layout week-timeline-layout ${selectedEntry ? 'has-editor' : 'full-width'}`}>
+            <div className={`timeline-layout week-timeline-layout ${selectedEntry || isActiveTimerSelected ? 'has-editor' : 'full-width'}`}>
               <div
                 className={`timeline-grid week-timeline-grid ${(timelineDragState?.isDragging && timelineDragState.surface === 'week') ? 'dragging' : ''}`}
                 style={{
@@ -9818,6 +11081,10 @@ function App() {
                     style={{ minHeight: `${timelineCanvasHeight}px` }}
                     onContextMenu={(event) => onOpenTimelineEmptyContextMenu(event, 'week')}
                     onDoubleClick={(event) => onDoubleClickTimelineEmptySpace(event, 'week')}
+                    onPointerDown={(event) => onTimelineCreatePointerDown(event, 'week')}
+                    onPointerMove={(event) => onTimelineCreatePointerMove(event, 'week')}
+                    onPointerUp={(event) => onTimelineCreatePointerUp(event, 'week')}
+                    onPointerCancel={onTimelineCreatePointerCancel}
                   >
                     {timelineHourMarks.map((minute) => (
                       <div
@@ -9882,6 +11149,34 @@ function App() {
                     ) : null}
 
                     <div className="week-timeline-entry-layer">
+                      {timelineCreatePreview?.surface === 'week'
+                        && weekTimelineDateSet.has(timelineCreatePreview.date) ? (() => {
+                          const dayIndex = weekTimelineDays.findIndex(
+                            (day) => day.date === timelineCreatePreview.date,
+                          )
+                          return (
+                            <div
+                              className="timeline-create-preview"
+                              style={{
+                                top: TIMELINE_CANVAS_TOP_PADDING
+                                  + (timelineCreatePreview.startMinute - timelineWindow.startMinute)
+                                    * PIXELS_PER_MINUTE,
+                                height: Math.max(
+                                  TIMELINE_DRAG_SNAP_MINUTES,
+                                  timelineCreatePreview.endMinute - timelineCreatePreview.startMinute,
+                                ) * PIXELS_PER_MINUTE,
+                                left: weekTimelineLayoutMetrics.gutterLeft
+                                  + (dayIndex * weekTimelineLayoutMetrics.dayWidth)
+                                  + WEEK_TIMELINE_ENTRY_COLUMN_INSET,
+                                width: weekTimelineLayoutMetrics.dayWidth
+                                  - (WEEK_TIMELINE_ENTRY_COLUMN_INSET * 2),
+                              }}
+                              aria-hidden="true"
+                            >
+                              <span>{minuteToLabel(timelineCreatePreview.startMinute)} – {minuteToLabel(timelineCreatePreview.endMinute)}</span>
+                            </div>
+                          )
+                        })() : null}
                       {draggedWeekEntryOriginPosition && timelineDragState?.surface === 'week'
                         ? (() => {
                           const ghostEntry = draggedWeekEntryOriginPosition.entry
@@ -9930,18 +11225,60 @@ function App() {
                         )
                         const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
                         const needsReview = reviewLabel !== null
+                        const isActiveTimerPreview = isActiveTimerPreviewEntry(entry)
+                        const isTimerEntry = entry.source === 'timer'
+                        const isSelectedBlock =
+                          isActiveTimerPreview
+                            ? selectedActiveTimerDate === entry.date
+                            : selectedEntryId === entry.id || highlightedEntryId === entry.id
                         const isDragPreview =
                           timelineDragState?.isDragging
                           && timelineDragState.surface === 'week'
                           && timelineDragState.entryId === entry.id
                         const shouldShowDurationBadge =
-                          timelineDragState?.surface === 'week'
-                          && timelineDragState.entryId === entry.id
-                          && (
-                            timelineDragState.dragMode === 'pending'
-                            || timelineDragState.dragMode === 'resize-duration'
+                          isSelectedBlock
+                          || (
+                            timelineDragState?.surface === 'week'
+                            && timelineDragState.entryId === entry.id
+                            && (
+                              timelineDragState.dragMode === 'pending'
+                              || timelineDragState.dragMode === 'resize-duration'
+                            )
                           )
                         const blockPalette = buildTimelineBlockPalette(blockColor)
+
+                        if (isActiveTimerPreview) {
+                          const canAdjustStart = entry.date === activeTimer?.startDate
+                          const isAdjustingStart =
+                            activeTimerDragState?.entryId === entry.id
+                            && activeTimerDragState.isDragging
+                          return (
+                            <button
+                              type="button"
+                              key={entry.id}
+                              className={`timeline-block active-timer-preview duration-active tier-${blockLabel.tier} ${isSelectedBlock ? 'selected' : ''} ${canAdjustStart ? 'can-move-start' : ''} ${isAdjustingStart ? 'is-adjusting-start' : ''}`}
+                              style={{
+                                top: positionedEntry.top,
+                                height: positionedEntry.height,
+                                left: positionedEntry.left,
+                                width: positionedEntry.width,
+                                ...buildTimelineBlockCssVariables(blockPalette),
+                              } as CSSProperties}
+                              onClick={() => onSelectActiveTimerBlock(entry, { syncSelectedDate: true })}
+                              onPointerDown={canAdjustStart
+                                ? (event) => onStartActiveTimerDrag(event, entry)
+                                : undefined}
+                              title={`${blockLabel.fullLabel}\nLive timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.${canAdjustStart ? '\nDrag vertically to adjust the start time.' : ''}`}
+                              aria-label={`${blockLabel.fullLabel}. Live timer running for ${formatQuickBlockDuration(entry.durationMinutes)}.${canAdjustStart ? ' Drag vertically to adjust the start time.' : ''}`}
+                            >
+                              <TimelineBlockContent
+                                label={blockLabel.label}
+                                durationLabel={formatQuickBlockDuration(entry.durationMinutes)}
+                                status="live"
+                              />
+                            </button>
+                          )
+                        }
 
                         if (isDragPreview) {
                           return (
@@ -9972,7 +11309,7 @@ function App() {
                         const blockClassName = [
                           'timeline-block',
                           `tier-${blockLabel.tier}`,
-                          selectedEntryId === entry.id || highlightedEntryId === entry.id ? 'selected' : '',
+                          isSelectedBlock ? 'selected' : '',
                           needsReview ? 'needs-review' : '',
                           shouldShowDurationBadge ? 'duration-active' : '',
                         ]
@@ -10005,12 +11342,12 @@ function App() {
                               blockLabel.fullLabel,
                               entry.description,
                               reviewLabel,
-                            )}
-                            aria-label={buildTimelineBlockAriaLabel(
+                            ) + (isTimerEntry ? '\nCaptured with timer.' : '')}
+                            aria-label={`${buildTimelineBlockAriaLabel(
                               blockLabel.fullLabel,
                               entry.description,
                               reviewLabel,
-                            )}
+                            )}${isTimerEntry ? '. Captured with timer.' : ''}`}
                             aria-haspopup="menu"
                           >
                             <TimelineBlockContent
@@ -10029,7 +11366,7 @@ function App() {
                 </div>
               </div>
 
-              {selectedEntry ? timelineEditorPanel : null}
+              {selectedEntry || isActiveTimerSelected ? activeTimelineEditorPanel : null}
             </div>
           </section>
         ) : null}
@@ -11177,6 +12514,58 @@ function App() {
       {codesCreateModal}
       {quickAddSettingsModal}
       {calendarBulkModal}
+      {timelineCreateSelection ? createPortal(
+        <div
+          className="timeline-create-popover"
+          style={{
+            left: `${timelineCreateSelection.x}px`,
+            top: `${timelineCreateSelection.y}px`,
+          }}
+          role="dialog"
+          aria-label="Create timeline entry"
+        >
+          <header className="timeline-create-popover-header">
+            <div>
+              <strong>Create entry</strong>
+              <span>
+                {formatWeekdayName(timelineCreateSelection.date, 'short')}{' '}
+                {formatMonthDay(timelineCreateSelection.date)} ·{' '}
+                {minuteToLabel(timelineCreateSelection.startMinute)}–{minuteToLabel(timelineCreateSelection.endMinute)}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="timeline-create-popover-close"
+              onClick={() => setTimelineCreateSelection(null)}
+              aria-label="Cancel entry creation"
+              title="Cancel"
+            >
+              <span className="control-icon close-icon" aria-hidden="true" />
+            </button>
+          </header>
+          <ActivityCommandBar
+            activities={activityCommandItems}
+            disabled={isBusy}
+            autoFocus
+            placeholder="Search activity"
+            ariaLabel="Search activity for this timeline range"
+            actionLabel="Create"
+            actionIcon="plus"
+            fixedDurationMinutes={
+              timelineCreateSelection.endMinute - timelineCreateSelection.startMinute
+            }
+            showDuration={false}
+            contextLabel="Type a few characters, then press Enter"
+            clearAfterSubmit={false}
+            resultLimit={6}
+            onCancel={() => setTimelineCreateSelection(null)}
+            onSubmit={(item) => {
+              createTimelineEntryFromSelection(item.engagement, item.activity)
+            }}
+          />
+        </div>,
+        document.body,
+      ) : null}
       {timelineContextMenu ? createPortal(
         <div
           ref={timelineContextMenuRef}
@@ -12183,13 +13572,21 @@ function WarningBadge({ type }: { type: WarningType }) {
 function TimelineBlockContent({
   label,
   durationLabel = null,
+  status = null,
 }: {
   label: string
   durationLabel?: string | null
+  status?: 'live' | null
 }) {
   return (
-    <span className="timeline-block-content">
+    <span className={`timeline-block-content ${status ? `has-${status}-status` : ''}`}>
       <span className="timeline-block-label">{label}</span>
+      {status === 'live' ? (
+        <span className="timeline-block-live-badge">
+          <span className="timeline-block-live-dot" aria-hidden="true" />
+          LIVE
+        </span>
+      ) : null}
       {durationLabel ? (
         <span className="timeline-block-duration-badge">{durationLabel}</span>
       ) : null}
@@ -12233,6 +13630,56 @@ function buildEntryDraft(entry: TimelineEntry): EntryDraft {
     startTime: minuteToTimeInput(entry.startMinute),
     ...endState,
   }
+}
+
+function buildActiveTimerDraft(timer: ActiveTimer): ActiveTimerDraft {
+  return {
+    startedAt: timer.startedAt,
+    startDate: timer.startDate,
+    startMinute: timer.startMinute,
+    engagementId: timer.engagementId,
+    activityId: timer.activityId,
+    description: timer.description,
+  }
+}
+
+function isActiveTimerDraftForTimer(draft: ActiveTimerDraft, timer: ActiveTimer): boolean {
+  return draft.startedAt === timer.startedAt
+}
+
+function activeTimerDraftMatchesTimer(draft: ActiveTimerDraft, timer: ActiveTimer): boolean {
+  return isActiveTimerDraftForTimer(draft, timer)
+    && draft.startDate === timer.startDate
+    && draft.startMinute === timer.startMinute
+    && draft.engagementId === timer.engagementId
+    && draft.activityId === timer.activityId
+    && draft.description === timer.description
+}
+
+function applyActiveTimerDraft(
+  timer: ActiveTimer | null,
+  draft: ActiveTimerDraft | null,
+): ActiveTimer | null {
+  if (!timer || !draft || !isActiveTimerDraftForTimer(draft, timer)) {
+    return timer
+  }
+
+  return {
+    ...timer,
+    startDate: draft.startDate,
+    startMinute: draft.startMinute,
+  }
+}
+
+function serializeActiveTimerDraft(draft: ActiveTimerDraft): string {
+  return JSON.stringify([
+    draft.startedAt,
+    draft.startDate,
+    draft.startMinute,
+    draft.engagementId,
+    draft.activityId,
+    draft.description,
+  ])
 }
 
 function serializeEntryDraft(entryDraft: EntryDraft): string {
@@ -12293,6 +13740,73 @@ function buildEntryDraftSavePlan(entryDraft: EntryDraft): EntryDraftSavePlan {
     endMinute,
     normalizedDraft,
     key: serializeEntryDraft(normalizedDraft),
+  }
+}
+
+function resolveEntryLiveEligibility(
+  entryDraft: EntryDraft | null,
+  activeTimer: ActiveTimer | null,
+  now: Date,
+): EntryLiveEligibility {
+  if (!entryDraft) {
+    return {
+      eligible: false,
+      title: 'Select an entry to make it live',
+      errorMessage: 'Select an entry to make it live.',
+    }
+  }
+  if (activeTimer) {
+    return {
+      eligible: false,
+      title: 'Stop the current live timer before starting another',
+      errorMessage: 'Stop the current live timer before starting another.',
+    }
+  }
+
+  const savePlan = buildEntryDraftSavePlan(entryDraft)
+  if (!savePlan.ok) {
+    return {
+      eligible: false,
+      title: savePlan.errorMessage,
+      errorMessage: savePlan.errorMessage,
+    }
+  }
+  if (!savePlan.normalizedDraft.engagementId || !savePlan.normalizedDraft.activityId) {
+    return {
+      eligible: false,
+      title: 'Choose an engagement and activity to make this entry live',
+      errorMessage: 'Choose an engagement and activity before making this entry live.',
+    }
+  }
+
+  const start = dateMinuteToLocalDate(
+    savePlan.normalizedDraft.date,
+    savePlan.startMinute,
+  ).getTime()
+  const end = dateMinuteToLocalDate(
+    savePlan.normalizedDraft.date,
+    savePlan.endMinute,
+  ).getTime()
+  const currentTime = now.getTime()
+  if (currentTime < start) {
+    return {
+      eligible: false,
+      title: 'This entry has not started yet',
+      errorMessage: 'A future entry cannot be made live until it starts.',
+    }
+  }
+  if (currentTime >= end) {
+    return {
+      eligible: false,
+      title: 'This entry has already ended',
+      errorMessage: 'A past entry can no longer be made live.',
+    }
+  }
+
+  return {
+    eligible: true,
+    title: 'Make this entry live',
+    savePlan,
   }
 }
 
@@ -12810,6 +14324,93 @@ function formatTimelineHoursCompact(minutes: number): string {
   return `${formattedHours}h`
 }
 
+function formatActiveTimerElapsed(timer: ActiveTimer, now: Date): string {
+  const elapsedMinutes = Math.max(
+    0,
+    Math.floor(activeTimerElapsedMilliseconds(timer, now) / 60_000),
+  )
+  const hours = Math.floor(elapsedMinutes / HOUR_IN_MINUTES)
+  const minutes = elapsedMinutes % HOUR_IN_MINUTES
+  return `${hours}:${`${minutes}`.padStart(2, '0')}`
+}
+
+function activeTimerElapsedMilliseconds(timer: ActiveTimer, now: Date): number {
+  const start = dateMinuteToLocalDate(timer.startDate, timer.startMinute)
+  return Math.max(0, now.getTime() - start.getTime())
+}
+
+function buildActiveTimerPreviewEntry(
+  timer: ActiveTimer | null,
+  date: string,
+  now: Date,
+): TimelineEntry | null {
+  if (!timer) {
+    return null
+  }
+
+  const currentDate = formatDate(now)
+  if (date < timer.startDate || date > currentDate) {
+    return null
+  }
+
+  const startMinute = date === timer.startDate
+    ? Math.min(
+      MINUTES_IN_DAY - TIMELINE_DRAG_SNAP_MINUTES,
+      Math.max(0, snapMinute(timer.startMinute, TIMELINE_DRAG_SNAP_MINUTES)),
+    )
+    : 0
+  const currentMinute = now.getHours() * HOUR_IN_MINUTES + now.getMinutes()
+  const endMinute = date === currentDate
+    ? Math.min(
+      MINUTES_IN_DAY,
+      Math.max(
+        startMinute + TIMELINE_DRAG_SNAP_MINUTES,
+        snapMinute(currentMinute, TIMELINE_DRAG_SNAP_MINUTES),
+      ),
+    )
+    : MINUTES_IN_DAY
+
+  if (endMinute <= startMinute) {
+    return null
+  }
+
+  return {
+    id: `${ACTIVE_TIMER_PREVIEW_ENTRY_ID_PREFIX}${date}`,
+    date,
+    startMinute,
+    endMinute,
+    durationMinutes: endMinute - startMinute,
+    description: 'Timer running',
+    userSubmissionText: '',
+    source: 'active_timer_preview',
+    confidence: 1,
+    engagementId: timer.engagementId,
+    activityId: timer.activityId,
+    engagementCode: timer.engagementCode,
+    engagementName: timer.engagementName,
+    engagementType: inferEngagementTypeFromCode(timer.engagementCode),
+    activityCode: timer.activityCode,
+    activityName: timer.activityName,
+    usedActivityFallback: false,
+    usedTemporalFallback: false,
+    durationDefaulted: false,
+    fallbackSummary: null,
+    sourceMessageEntryIndex: null,
+    sourceMessageEntryCount: null,
+    modelUsed: null,
+    modelUsedLabel: null,
+    transcriptionModelUsed: null,
+    transcriptionModelUsedLabel: null,
+    warningFlags: [],
+    createdAt: timer.startedAt,
+    updatedAt: timer.startedAt,
+  }
+}
+
+function isActiveTimerPreviewEntry(entry: TimelineEntry): boolean {
+  return entry.id.startsWith(ACTIVE_TIMER_PREVIEW_ENTRY_ID_PREFIX)
+}
+
 function formatQuickBlockDuration(minutes: number): string {
   if (minutes < HOUR_IN_MINUTES) {
     return `${minutes}m`
@@ -13086,18 +14687,35 @@ function applyDragPreviewToTimelineEntries(
   )
 }
 
-function applyOptimisticTimelineEntryPreview(
-  entries: TimelineEntry[],
-  optimisticEntry: TimelineEntry | null,
-  shouldIncludeEntry: (entry: TimelineEntry) => boolean,
-): TimelineEntry[] {
-  if (!optimisticEntry || !shouldIncludeEntry(optimisticEntry)) {
-    return entries
+function applyActiveTimerDragPreview(
+  entry: TimelineEntry | null,
+  dragState: ActiveTimerDragState | null,
+): TimelineEntry | null {
+  if (!entry || !dragState?.isDragging || entry.id !== dragState.entryId) {
+    return entry
   }
 
-  return entries.some((entry) => entry.id === optimisticEntry.id)
-    ? replaceTimelineEntry(entries, optimisticEntry)
-    : entries
+  return {
+    ...entry,
+    startMinute: dragState.previewStartMinute,
+    durationMinutes: entry.endMinute - dragState.previewStartMinute,
+  }
+}
+
+function applyOptimisticTimelineEntryPreviews(
+  entries: TimelineEntry[],
+  optimisticEntries: TimelineEntry[],
+  shouldIncludeEntry: (entry: TimelineEntry) => boolean,
+): TimelineEntry[] {
+  return optimisticEntries.reduce((currentEntries, optimisticEntry) => {
+    if (!shouldIncludeEntry(optimisticEntry)) {
+      return currentEntries.filter((entry) => entry.id !== optimisticEntry.id)
+    }
+
+    return currentEntries.some((entry) => entry.id === optimisticEntry.id)
+      ? replaceTimelineEntry(currentEntries, optimisticEntry)
+      : replaceTimelineEntry([...currentEntries, optimisticEntry], optimisticEntry)
+  }, entries)
 }
 
 function buildOptimisticTimelineEntryPreview(
@@ -13526,9 +15144,13 @@ function positionTimelineEntries(
       laneIndex += 1
     }
 
+    const visualEndMinute = Math.max(
+      clippedEntry.clippedEndMinute,
+      clippedEntry.clippedStartMinute + (TIMELINE_MIN_BLOCK_HEIGHT_PX / PIXELS_PER_MINUTE),
+    )
     activeLanes.push({
       laneIndex,
-      endMinute: clippedEntry.clippedEndMinute,
+      endMinute: visualEndMinute,
     })
 
     currentGroup.push({
@@ -13641,7 +15263,7 @@ function positionTimelineEntries(
         height: Math.max(
           (groupEntry.clippedEndMinute - groupEntry.clippedStartMinute)
           * PIXELS_PER_MINUTE,
-          30,
+          TIMELINE_MIN_BLOCK_HEIGHT_PX,
         ),
         leftPercent: groupEntry.laneIndex * (widthPercent + laneGapPercent),
         widthPercent,
@@ -13952,8 +15574,73 @@ function resolveManualTimelineCreateWindow(
   }
 }
 
+function resolveTimelineCreateRange(
+  originMinute: number,
+  currentMinute: number,
+  timelineWindow: TimelineWindow,
+): { startMinute: number; endMinute: number } {
+  const minMinute = timelineWindow.startMinute
+  const maxMinute = timelineWindow.endMinute
+  const snappedOrigin = Math.min(maxMinute, Math.max(minMinute, snapMinute(
+    originMinute,
+    TIMELINE_DRAG_SNAP_MINUTES,
+  )))
+  const snappedCurrent = Math.min(maxMinute, Math.max(minMinute, snapMinute(
+    currentMinute,
+    TIMELINE_DRAG_SNAP_MINUTES,
+  )))
+
+  if (snappedCurrent >= snappedOrigin) {
+    const startMinute = Math.min(
+      snappedOrigin,
+      maxMinute - TIMELINE_DRAG_SNAP_MINUTES,
+    )
+    return {
+      startMinute,
+      endMinute: Math.min(
+        maxMinute,
+        Math.max(snappedCurrent, startMinute + TIMELINE_DRAG_SNAP_MINUTES),
+      ),
+    }
+  }
+
+  const endMinute = Math.max(
+    snappedOrigin,
+    minMinute + TIMELINE_DRAG_SNAP_MINUTES,
+  )
+  return {
+    startMinute: Math.max(
+      minMinute,
+      Math.min(snappedCurrent, endMinute - TIMELINE_DRAG_SNAP_MINUTES),
+    ),
+    endMinute,
+  }
+}
+
 function isTargetWithinTimelineBlock(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('.timeline-block') !== null
+}
+
+function isTargetWithinWeekTimelineGutter(target: EventTarget | null): boolean {
+  return target instanceof Element
+    && target.closest('.week-timeline-frozen-gutter, .week-timeline-header') !== null
+}
+
+function clampTimelineCreatePopoverPosition(
+  clientX: number,
+  clientY: number,
+): { x: number; y: number } {
+  const viewportPadding = 12
+  const popoverWidth = 360
+  const popoverHeight = 390
+  const offset = 12
+  const maxX = Math.max(viewportPadding, window.innerWidth - popoverWidth - viewportPadding)
+  const maxY = Math.max(viewportPadding, window.innerHeight - popoverHeight - viewportPadding)
+
+  return {
+    x: Math.min(Math.max(clientX + offset, viewportPadding), maxX),
+    y: Math.min(Math.max(clientY + offset, viewportPadding), maxY),
+  }
 }
 
 function clampTimelineContextMenuPosition(

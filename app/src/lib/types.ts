@@ -395,6 +395,61 @@ export interface QuickAddSuggestionResult {
   suggestions: QuickAddSuggestion[]
 }
 
+export interface ActiveTimer {
+  engagementId: string
+  activityId: string
+  engagementCode: string | null
+  engagementName: string
+  engagementColorHex: string | null
+  activityCode: string | null
+  activityName: string
+  activityColorHex: string | null
+  startDate: string
+  startMinute: number
+  startedAt: number
+  description: string
+}
+
+export interface TimerStartInput {
+  engagementId: string
+  activityId: string
+  startDate: string
+  startMinute: number
+  description?: string | null
+}
+
+export interface TimerStartFromEntryInput {
+  entryId: string
+  engagementId: string
+  activityId: string
+  startDate: string
+  startMinute: number
+  description: string
+}
+
+export interface TimerStartFromEntryResult {
+  timer: ActiveTimer
+  removedEntryDate: string
+}
+
+export interface TimerUpdateInput {
+  engagementId: string
+  activityId: string
+  startDate: string
+  startMinute: number
+  description: string
+}
+
+export interface TimerStopInput {
+  stopDate: string
+  stopMinute: number
+}
+
+export interface TimerStopResult {
+  createdEntryIds: string[]
+  touchedMonthKeys: string[]
+}
+
 export interface QuickAddPreferences {
   engagementOrder: string[]
   hiddenEngagementIds: string[]
