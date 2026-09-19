@@ -975,6 +975,7 @@ function App() {
   const credentialHelpText = 'An API key is required for LLM based timesheet entries.'
   const [timelineClock, setTimelineClock] = useState(() => new Date())
   const todayDate = useMemo(() => formatDate(timelineClock), [timelineClock])
+  const previousTodayDateRef = useRef(todayDate)
 
   const [activeView, setActiveView] = useState<View>('timeline')
   const [timelineAutoCenterRequestKey, setTimelineAutoCenterRequestKey] = useState(0)
@@ -1123,8 +1124,10 @@ function App() {
   const calendarDropZoneRef = useRef<HTMLDivElement | null>(null)
   const calendarReviewAutoCenterKeyRef = useRef<string | null>(null)
   const weekCurrentTimeAutoCenterKeyRef = useRef<string | null>(null)
-  const hasInitializedRef = useRef(false)
   const lastLoadedTimelineDateRef = useRef<string | null>(null)
+  const timelineRequestRef = useRef(0)
+  const weekTimelineRequestRef = useRef(0)
+  const weeklySummaryRequestRef = useRef(0)
   const pendingAutoCenterDateRef = useRef<string | null>(todayDate)
   const selectedDateRef = useRef(selectedDate)
   const selectedEntryIdRef = useRef<string | null>(selectedEntryId)
@@ -2575,15 +2578,21 @@ function App() {
   }, [])
 
   const loadTimeline = useCallback(async (date: string) => {
+    const request = date === selectedDateRef.current ? ++timelineRequestRef.current : null
     const entries = await timelineListForDate({ date })
-    lastLoadedTimelineDateRef.current = date
-    setTimelineEntries(entries)
+    if (request === timelineRequestRef.current && date === selectedDateRef.current) {
+      lastLoadedTimelineDateRef.current = date
+      setTimelineEntries(entries)
+    }
     return entries
   }, [])
 
   const loadWeekTimeline = useCallback(async (date: string) => {
+    const request = date === selectedDateRef.current ? ++weekTimelineRequestRef.current : null
     const value = await timelineListForWeekView({ date })
-    setWeekTimeline(value)
+    if (request === weekTimelineRequestRef.current && date === selectedDateRef.current) {
+      setWeekTimeline(value)
+    }
     return value
   }, [])
 
@@ -2606,8 +2615,11 @@ function App() {
   }, [])
 
   const loadWeeklySummary = useCallback(async (date: string) => {
+    const request = date === selectedDateRef.current ? ++weeklySummaryRequestRef.current : null
     const summary = await timelineWeeklySummary({ date })
-    setWeeklySummary(summary)
+    if (request === weeklySummaryRequestRef.current && date === selectedDateRef.current) {
+      setWeeklySummary(summary)
+    }
     return summary
   }, [])
 
@@ -2773,9 +2785,24 @@ function App() {
       }, Math.max(1000, millisecondsUntilNextMinute + 20))
     }
 
+    const syncClock = () => {
+      if (document.visibilityState === 'hidden') {
+        return
+      }
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
+      setTimelineClock(new Date())
+      scheduleNextMinuteTick()
+    }
+
     scheduleNextMinuteTick()
+    window.addEventListener('focus', syncClock)
+    document.addEventListener('visibilitychange', syncClock)
 
     return () => {
+      window.removeEventListener('focus', syncClock)
+      document.removeEventListener('visibilitychange', syncClock)
       if (timeoutId !== null) {
         window.clearTimeout(timeoutId)
       }
@@ -2787,6 +2814,7 @@ function App() {
       return
     }
 
+    let cancelled = false
     const initialize = async () => {
       try {
         setIsBusy(true)
@@ -2797,17 +2825,22 @@ function App() {
           loadSettings(),
           loadSummaryLayoutState(),
           loadReportingState(),
-          loadTimeline(todayDate),
         ])
-        hasInitializedRef.current = true
       } catch (error) {
-        setErrorMessage((error as Error).message)
+        if (!cancelled) {
+          setErrorMessage((error as Error).message)
+        }
       } finally {
-        setIsBusy(false)
+        if (!cancelled) {
+          setIsBusy(false)
+        }
       }
     }
 
     void initialize()
+    return () => {
+      cancelled = true
+    }
   }, [
     loadEngagements,
     loadActiveTimer,
@@ -2815,9 +2848,7 @@ function App() {
     loadReportingState,
     loadSettings,
     loadSummaryLayoutState,
-    loadTimeline,
     appRuntime,
-    todayDate,
   ])
 
   useEffect(() => {
@@ -2842,20 +2873,20 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!appRuntime || !hasInitializedRef.current) {
+    if (!appRuntime) {
       return
     }
 
-    if (lastLoadedTimelineDateRef.current === selectedDate) {
-      return
-    }
-
+    let cancelled = false
     void (async () => {
       try {
         setIsTimelineLoading(true)
         setErrorMessage(null)
         await loadTimeline(selectedDate)
       } catch (error) {
+        if (cancelled) {
+          return
+        }
         if (isAppCommandError(error)) {
           setErrorMessage(
             `${error.message} (command: ${error.command}, correlationId: ${error.correlationId})`,
@@ -2864,9 +2895,14 @@ function App() {
           setErrorMessage((error as Error).message)
         }
       } finally {
-        setIsTimelineLoading(false)
+        if (!cancelled) {
+          setIsTimelineLoading(false)
+        }
       }
     })()
+    return () => {
+      cancelled = true
+    }
   }, [appRuntime, loadTimeline, selectedDate])
 
   useEffect(() => () => {
@@ -2998,7 +3034,7 @@ function App() {
   }, [activeView, settingsStatus, showDiagnosticsTab])
 
   useEffect(() => {
-    if (!appRuntime || !hasInitializedRef.current || activeView !== 'week') {
+    if (!appRuntime || activeView !== 'week') {
       return
     }
 
@@ -3033,7 +3069,7 @@ function App() {
   }, [activeView, appRuntime, loadWeekTimeline, selectedDate])
 
   useEffect(() => {
-    if (!appRuntime || !hasInitializedRef.current || !isSummaryLikeView(activeView)) {
+    if (!appRuntime || !isSummaryLikeView(activeView)) {
       return
     }
 
@@ -3709,6 +3745,11 @@ function App() {
     }
 
     pendingAutoCenterDateRef.current = nextDate
+    // Invalidate pending reads even when navigation returns to the same date (A -> B -> A).
+    timelineRequestRef.current += 1
+    weekTimelineRequestRef.current += 1
+    weeklySummaryRequestRef.current += 1
+    lastLoadedTimelineDateRef.current = null
     selectedDateRef.current = nextDate
     setSelectedDate(nextDate)
     setVisibleMonth(monthKeyFromDate(nextDate))
@@ -3717,8 +3758,17 @@ function App() {
       return
     }
 
+    setTimelineEntries([])
     clearTimelineSelection()
   }, [clearTimelineSelection])
+
+  useEffect(() => {
+    const previousToday = previousTodayDateRef.current
+    previousTodayDateRef.current = todayDate
+    if (previousToday !== todayDate && selectedDateRef.current === previousToday) {
+      updateSelectedDate(todayDate)
+    }
+  }, [todayDate, updateSelectedDate])
 
   const commitTimelineDragDrop = useCallback(
     (dragState: TimelineDragState) => {

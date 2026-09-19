@@ -1,6 +1,5 @@
 use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
@@ -553,7 +552,7 @@ pub async fn interpret_message(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
                 return Err(AppError::Network(error));
@@ -585,7 +584,7 @@ pub async fn interpret_message(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
@@ -615,7 +614,7 @@ pub async fn interpret_message(
             });
 
             if let Some(delay_ms) = delay_ms {
-                thread::sleep(Duration::from_millis(delay_ms));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 continue;
             }
 
@@ -762,7 +761,7 @@ pub async fn extract_calendar_events(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
                 return Err(AppError::Network(error));
@@ -791,7 +790,7 @@ pub async fn extract_calendar_events(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
@@ -817,7 +816,7 @@ pub async fn extract_calendar_events(
             });
 
             if let Some(delay_ms) = delay_ms {
-                thread::sleep(Duration::from_millis(delay_ms));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 continue;
             }
 
@@ -941,7 +940,7 @@ pub async fn transcribe_audio(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
@@ -974,7 +973,7 @@ pub async fn transcribe_audio(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
@@ -1004,7 +1003,7 @@ pub async fn transcribe_audio(
             });
 
             if let Some(delay_ms) = delay_ms {
-                thread::sleep(Duration::from_millis(delay_ms));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 continue;
             }
 
