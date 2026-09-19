@@ -418,6 +418,20 @@ export interface TimerStartInput {
   description?: string | null
 }
 
+export interface TimerStartFromEntryInput {
+  entryId: string
+  engagementId: string
+  activityId: string
+  startDate: string
+  startMinute: number
+  description: string
+}
+
+export interface TimerStartFromEntryResult {
+  timer: ActiveTimer
+  removedEntryDate: string
+}
+
 export interface TimerUpdateInput {
   engagementId: string
   activityId: string
