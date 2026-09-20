@@ -165,6 +165,23 @@ jobs:
           releaseName: ${{ steps.release_meta.outputs.release_name }}
           tagName: ${{ steps.release_meta.outputs.tag_name }}
 
+      - name: Add stable macOS download link
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag_name }}
+        run: |
+          shopt -s nullglob
+          dmg_files=(app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          if [[ ${#dmg_files[@]} -ne 1 ]]; then
+            echo "Expected exactly one universal macOS DMG." >&2
+            exit 1
+          fi
+
+          cp "${dmg_files[0]}" "$RUNNER_TEMP/OmniSheet-macOS.dmg"
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/OmniSheet-macOS.dmg" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
       - name: Clean up signing material
         if: ${{ always() }}
         shell: bash

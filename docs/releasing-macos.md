@@ -154,11 +154,25 @@ The release workflow writes the `.p8` contents to a temporary file and exposes i
 1. In GitHub, open `Actions`.
 2. Open the `Release macOS` workflow.
 3. Click `Run workflow`.
-4. Enter a semver tag such as `v0.1.0`.
-5. Wait for the workflow to finish.
-6. Download the draft release artifact on your MacBook.
-7. Open the app from Finder.
-8. Click the microphone button and verify the macOS microphone permission prompt appears.
+4. Select `main` after merging the changes you want to release.
+5. Enter a new semver tag such as `v0.1.0`. Keep it consistent with the app version in `app/src-tauri/tauri.conf.json` and `app/src-tauri/Cargo.toml`; entering a tag does not change the app version. Leave the release name blank to use `OmniSheet v0.1.0`.
+6. Wait for the entire workflow to finish, including the stable download upload step.
+7. Open the repository's [Releases page](https://github.com/808ryan/OmniSheet/releases). The workflow creates a draft and attaches the installers automatically.
+8. Download `OmniSheet-macOS.dmg` from the draft on your MacBook. It supports both Apple Silicon and Intel Macs.
+9. Open the disk image, drag OmniSheet into Applications, and launch it from Finder.
+10. Click the microphone button and verify the macOS microphone permission prompt appears.
+
+## Publish the download
+
+Once you've checked the build, edit the draft on the Releases page, add release notes, select **Set as latest release**, and click **Publish release**. Keep **This is a pre-release** unchecked for the stable download link.
+
+The README's **Download for macOS** link points to:
+
+https://github.com/808ryan/OmniSheet/releases/latest/download/OmniSheet-macOS.dmg
+
+The workflow uploads a copy of the universal installer with that fixed filename, so the README does not need changing for each version. The link works after the first release containing that asset is published. Draft releases do not activate it, and a private repository's published releases still require repository access.
+
+If you also build Windows installers, use the same release tag for both workflows so the latest release includes the macOS download. Wait for both workflows to finish before publishing.
 
 ## Local build
 

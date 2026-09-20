@@ -2,6 +2,10 @@
 
 OmniSheet helps you track time across projects and activity codes and put together your weekly timesheet. Use a timer, enter hours yourself, or let AI turn a description of your work into time entries. Built-in reports let you review the week and export your timesheet to Excel.
 
+**[Download for macOS](https://github.com/808ryan/OmniSheet/releases/latest/download/OmniSheet-macOS.dmg)** — Apple Silicon and Intel. Open the `.dmg` and drag OmniSheet into Applications.
+
+[Release notes](https://github.com/808ryan/OmniSheet/releases/latest)
+
 ## Logging time
 
 - Start a timer while you work or add entries afterward.
@@ -13,9 +17,9 @@ You can review entries on a daily or weekly timeline and drag blocks to change t
 
 AI features use your own OpenAI API key. Manual entries, timers, and reporting work without one.
 
-## Running OmniSheet
+## Running from source
 
-For now, run OmniSheet from source. Once you've installed the prerequisites in the [development guide](docs/development.md):
+To run from source, install the prerequisites in the [development guide](docs/development.md), then:
 
 ```sh
 cd app
