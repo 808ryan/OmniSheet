@@ -20,7 +20,7 @@ This document covers the full path:
 
 - `.github/workflows/ci.yml`
   - Runs on pull requests and pushes to `main`
-  - Validates lint, frontend build, Rust formatting, and Rust compilation on Linux
+  - Validates repository file hygiene, lint, frontend tests/build, Rust formatting, compilation, and tests on Linux
 - `.github/workflows/release-macos.yml`
   - Runs on `workflow_dispatch` and semver tags such as `v0.1.0`
   - Builds a signed, notarized macOS release on `macos-latest`

@@ -51,7 +51,6 @@ Thumbs.db
 # Tauri / Rust
 # =====================
 app/src-tauri/target/
-**/Cargo.lock
 
 # =====================
 # Build artifacts

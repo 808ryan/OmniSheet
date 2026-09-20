@@ -12596,7 +12596,7 @@ mod tests {
             engagements: vec![ContextEngagement {
                 id: "engagement-1".to_string(),
                 engagement_ref: "eng-001".to_string(),
-                code: Some("ORANGE-FY26".to_string()),
+                code: Some("DEMO-001".to_string()),
                 name: "ExampleCo SOC2".to_string(),
                 tags: vec![],
                 describe_when_to_use: None,
@@ -12630,9 +12630,10 @@ mod tests {
             start_minute: 1080,
             end_minute: 1320,
             duration_minutes: 240,
-            description: "Flight home from the client site for the ExampleCo data center visit.".to_string(),
-            user_submission_text: "Flight home from the client site for the ExampleCo data center visit."
+            description: "Flight home from the client site for the ExampleCo data center visit."
                 .to_string(),
+            user_submission_text:
+                "Flight home from the client site for the ExampleCo data center visit.".to_string(),
             confidence: 0.9,
             engagement_ref: Some("eng-001".to_string()),
             activity_ref: None,
@@ -12773,10 +12774,10 @@ mod tests {
                 ContextEngagement {
                     id: "engagement-1".to_string(),
                     engagement_ref: "eng-001".to_string(),
-                    code: Some("ORANGE-FY26".to_string()),
-                    name: "Orange FY26".to_string(),
+                    code: Some("DEMO-001".to_string()),
+                    name: "Example Project".to_string(),
                     tags: vec!["SOX".to_string(), "FAIT".to_string()],
-                    describe_when_to_use: Some("For the Orange SOX/FAIT audit.".to_string()),
+                    describe_when_to_use: Some("For the example controls review.".to_string()),
                     activities: vec![
                         ContextActivity {
                             id: "activity-1".to_string(),
@@ -12923,9 +12924,9 @@ mod tests {
                 id: "engagement-1".to_string(),
                 engagement_ref: "eng-001".to_string(),
                 code: Some("E-1".to_string()),
-                name: "Orange FY26".to_string(),
+                name: "Example Project".to_string(),
                 tags: vec![],
-                describe_when_to_use: Some("For the Orange SOX/FAIT audit.".to_string()),
+                describe_when_to_use: Some("For the example controls review.".to_string()),
                 activities: vec![ContextActivity {
                     id: "activity-1".to_string(),
                     activity_ref: "act-001-001".to_string(),
@@ -12967,9 +12968,9 @@ mod tests {
                 id: "engagement-1".to_string(),
                 engagement_ref: "eng-001".to_string(),
                 code: Some("E-1".to_string()),
-                name: "Orange FY26".to_string(),
+                name: "Example Project".to_string(),
                 tags: vec![],
-                describe_when_to_use: Some("For the Orange SOX/FAIT audit.".to_string()),
+                describe_when_to_use: Some("For the example controls review.".to_string()),
                 activities: vec![ContextActivity {
                     id: "activity-1".to_string(),
                     activity_ref: "act-001-001".to_string(),

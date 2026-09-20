@@ -31,10 +31,13 @@ jobs:
       - name: Resolve release metadata
         id: release_meta
         shell: bash
+        env:
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+          REQUESTED_RELEASE_NAME: ${{ inputs.release_name }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            TAG_NAME="${{ github.event.inputs.release_tag }}"
-            RELEASE_NAME="${{ github.event.inputs.release_name }}"
+            TAG_NAME="$REQUESTED_RELEASE_TAG"
+            RELEASE_NAME="$REQUESTED_RELEASE_NAME"
           else
             TAG_NAME="${GITHUB_REF_NAME}"
             RELEASE_NAME=""
@@ -47,6 +50,11 @@ jobs:
 
           if [[ -z "$RELEASE_NAME" ]]; then
             RELEASE_NAME="OmniSheet ${TAG_NAME}"
+          fi
+
+          if [[ "$RELEASE_NAME" == *$'\n'* || "$RELEASE_NAME" == *$'\r'* ]]; then
+            echo "release_name must be a single line" >&2
+            exit 1
           fi
 
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"

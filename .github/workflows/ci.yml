@@ -42,6 +42,9 @@ jobs:
         working-directory: app
         run: npm ci
 
+      - name: Check repository file hygiene
+        run: node scripts/check-public-files.mjs
+
       - name: Lint frontend
         working-directory: app
         run: npm run lint
