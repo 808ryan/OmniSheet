@@ -12627,9 +12627,10 @@ mod tests {
             start_minute: 1080,
             end_minute: 1320,
             duration_minutes: 240,
-            description: "Flight home from the client site for the ExampleCo data center visit.".to_string(),
-            user_submission_text: "Flight home from the client site for the ExampleCo data center visit."
+            description: "Flight home from the client site for the ExampleCo data center visit."
                 .to_string(),
+            user_submission_text:
+                "Flight home from the client site for the ExampleCo data center visit.".to_string(),
             confidence: 0.9,
             engagement_ref: Some("eng-001".to_string()),
             activity_ref: None,

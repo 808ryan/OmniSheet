@@ -1134,7 +1134,9 @@ mod tests {
     #[test]
     fn prompt_includes_morning_duration_example() {
         let prompt = build_system_prompt();
-        assert!(prompt.contains("\"in the morning i spent 30 minutes on a ExampleCo related meeting\""));
+        assert!(
+            prompt.contains("\"in the morning i spent 30 minutes on a ExampleCo related meeting\"")
+        );
         assert!(prompt.contains(
             "Expected temporal intent: startTime \"09:30\", endTime \"10:00\", durationMinutes 30."
         ));
@@ -1242,9 +1244,12 @@ mod tests {
         assert!(prompt.contains("Use gapFillRequests, not regular entries"));
         assert!(prompt.contains("selectedDate"));
         assert!(prompt.contains("startTime \"09:00\" and endTime \"18:00\""));
-        assert!(prompt
-            .contains("\"Fill out my calendar using Example ITGCs, Non-SAP ITGCs, and ExampleCo report 1\""));
-        assert!(prompt.contains("\"Worked on Example ITGCs, Non-SAP, and ExampleCo between 3 and 6\""));
+        assert!(prompt.contains(
+            "\"Fill out my calendar using Example ITGCs, Non-SAP ITGCs, and ExampleCo report 1\""
+        ));
+        assert!(
+            prompt.contains("\"Worked on Example ITGCs, Non-SAP, and ExampleCo between 3 and 6\"")
+        );
         assert!(prompt.contains("\"From 9 to 2, worked on Example ITGCs, Non-SAP, ExampleCo\""));
     }
 
