@@ -1,6 +1,6 @@
 # Contributing
 
-Use the setup and validation commands in [README.md](README.md). Keep changes focused and explain the problem, resulting behavior, and checks performed in your pull request.
+Use the setup and validation commands in the [development guide](docs/development.md). Keep changes focused and explain the problem, resulting behavior, and checks performed in your pull request.
 
 For bug reports, include the operating system, app version, reproduction steps, and expected behavior. Use synthetic examples. Do not upload API keys, local databases, real calendar screenshots, client names, billing codes, or unredacted diagnostic logs.
 

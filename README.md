@@ -1,21 +1,19 @@
 # OmniSheet
 
-OmniSheet is a desktop time tracker built with Tauri, React, TypeScript, and Rust. Capture work as it happens, review it on a timeline, and export a weekly timesheet.
+OmniSheet is a desktop timesheet and time-tracking app with optional AI assistance and built-in reporting. It's made for work that spans multiple projects and activity codes, with weekly Excel exports to help you get your timesheet ready to submit.
 
-## Features
+## How it works
 
-- Manual time entries and a live timer.
-- Daily and weekly timelines with drag-and-drop editing.
-- Projects (called engagements), activity codes, and configurable reporting layouts.
-- A quick-entry window available from the system tray or a keyboard shortcut.
-- Optional text interpretation, voice transcription, and calendar-image extraction using your own OpenAI API key.
-- Weekly Excel exports.
+- **Track your work.** Start a timer, add time manually, or open the quick-entry window without leaving what you're working on.
+- **Describe what you did.** Type or speak a time entry and let an LLM help turn it into structured entries using your projects and activity codes. You can also extract entries from a calendar image.
+- **Review your week.** See entries on a daily or weekly timeline and drag blocks to adjust them.
+- **Prepare your timesheet.** Organize time by project and activity code, choose your report columns, and export to Excel for weekly submission.
 
-New installations include generic vacation and holiday categories. Add your own engagements and activities in the app; no client dataset is bundled.
+Add your projects (called engagements in the app) and their activity codes to get started. Manual entries and timers work without an API key. AI features use your own OpenAI API key.
 
-## Run locally
+## Running OmniSheet
 
-Prerequisites: Node.js 22.12 or later, npm, stable Rust, and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) for your operating system. Windows development requires the Microsoft C++ build tools and WebView2; macOS requires Xcode command-line tools.
+For now, run OmniSheet from source. Once you've installed the prerequisites in the [development guide](docs/development.md):
 
 ```sh
 cd app
@@ -23,41 +21,15 @@ npm ci
 npm run tauri dev
 ```
 
-Use the Tauri application for the full workflow. The standalone Vite frontend does not provide database or native desktop commands.
+## Your data
 
-## Checks
+Time entries, projects, settings, and diagnostics stay in a local database on your computer. The database isn't encrypted by OmniSheet. Your API key is kept in your operating system's credential store when available; otherwise, it's kept only for the current session.
 
-```sh
-cd app
-npm run lint
-npm test
-npm run build
-cd src-tauri
-cargo fmt --check
-cargo test --lib
-```
+When you use an AI feature, the text, audio, or image you submit and relevant project context are sent to OpenAI. Diagnostic logs can include entry text, so check them before sharing a bug report.
 
-Frontend regression tests use a simulated DOM and mocked native commands. They do not replace testing a packaged desktop app.
+## Contributing
 
-## Build
-
-From `app/`, run `npm run tauri build`. Packaging and signing requirements vary by platform. See [macOS release instructions](docs/releasing-macos.md) for the signed macOS workflow. Release workflows create draft releases for review.
-
-## Data and privacy
-
-Time entries, project definitions, settings, and diagnostics are stored locally in the app's SQLite database. The database is not encrypted by the app. API keys are stored in the operating-system credential store, with a session-only fallback if storage is unavailable.
-
-Manual entries and timers do not require an API key. AI features send the submitted text, audio, or image and relevant project context to OpenAI when you invoke them. Review that content before submitting confidential work. Diagnostics can include entry text; redact them before sharing a bug report.
-
-## Repository layout
-
-- `app/src/`: React interface and frontend logic.
-- `app/src-tauri/src/`: native commands, SQLite storage, and API integration.
-- `app/tests/`: frontend regression tests.
-- `docs/`: release and project documentation.
-- `scripts/`: development and release helpers.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance and [SECURITY.md](SECURITY.md) for reporting security concerns.
+See the [development guide](docs/development.md) for setup and checks, [contribution guidelines](CONTRIBUTING.md) for changes and bug reports, and [security policy](SECURITY.md) for reporting vulnerabilities.
 
 ## License
 
