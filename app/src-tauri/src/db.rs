@@ -93,6 +93,11 @@ pub fn init_database(app: &AppHandle) -> AppResult<Connection> {
 }
 
 pub fn run_migrations(conn: &Connection) -> AppResult<()> {
+    let is_new_database: bool = conn.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'engagements')",
+        [],
+        |row| row.get(0),
+    )?;
     conn.execute_batch(
         r#"
       PRAGMA foreign_keys = ON;
@@ -238,7 +243,41 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
     migrate_optional_user_code_schema(conn)?;
     ensure_optional_code_indexes(conn)?;
     ensure_standard_time_off_codes(conn)?;
+    if is_new_database {
+        seed_example_engagement(conn)?;
+    }
 
+    Ok(())
+}
+
+fn seed_example_engagement(conn: &Connection) -> AppResult<()> {
+    let transaction = conn.unchecked_transaction()?;
+    let now = current_unix_timestamp();
+    transaction.execute(
+        r#"
+        INSERT INTO engagements (
+          id, code, name, client, engagement_type, color_hex, tags,
+          describe_when_to_use, is_active, created_at, updated_at
+        ) VALUES (
+          'example-orange-fy26', 'ORANGE-FY26', 'Orange FY26', 'Orange', 'external',
+          '#1F7AFF', '[]', 'Used for activities related to the Orange SOX audit.', 1, ?1, ?1
+        )
+        "#,
+        params![now],
+    )?;
+    transaction.execute(
+        r#"
+        INSERT INTO activities (
+          id, engagement_id, code, name, color_hex, tags,
+          describe_when_to_use, is_active, created_at, updated_at
+        ) VALUES (
+          'example-orange-sap-itgcs', 'example-orange-fy26', '0637', 'RSK - SAP ITGCs',
+          NULL, '[]', NULL, 1, ?1, ?1
+        )
+        "#,
+        params![now],
+    )?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -2902,6 +2941,92 @@ mod tests {
             ("VACATION".to_string(), "internal".to_string(), 1)
         );
         assert_eq!(existing_activity, ("0000".to_string(), 1));
+    }
+
+    #[test]
+    fn new_databases_seed_time_off_and_one_fictional_example_activity() {
+        let connection = test_connection();
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        assert_eq!(engagements.len(), 3);
+        let example = engagements
+            .iter()
+            .find(|item| item.code.as_deref() == Some("ORANGE-FY26"))
+            .expect("example should be seeded");
+        assert_eq!(example.name, "Orange FY26");
+        assert_eq!(example.client.as_deref(), Some("Orange"));
+        assert_eq!(
+            example.describe_when_to_use.as_deref(),
+            Some("Used for activities related to the Orange SOX audit.")
+        );
+        assert_eq!(example.engagement_type, EngagementType::External);
+        assert_eq!(example.activities.len(), 1);
+        assert_eq!(example.activities[0].code.as_deref(), Some("0637"));
+        assert_eq!(example.activities[0].name, "RSK - SAP ITGCs");
+        assert!(engagements
+            .iter()
+            .filter(|item| item.id != example.id)
+            .all(|engagement| {
+                engagement.client.is_none()
+                    && engagement.engagement_type == EngagementType::Internal
+                    && engagement.activities.len() == 1
+                    && matches!(engagement.code.as_deref(), Some("VACATION" | "HOLIDAY"))
+            }));
+    }
+
+    #[test]
+    fn migrations_do_not_restore_deleted_examples_or_add_them_to_existing_databases() {
+        let connection = test_connection();
+        connection
+            .execute(
+                "DELETE FROM engagements WHERE id = 'example-orange-fy26'",
+                [],
+            )
+            .expect("example should delete");
+        // This also models an existing database from before the example was introduced.
+        run_migrations(&connection).expect("migration should succeed");
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        assert_eq!(engagements.len(), 2);
+        assert!(engagements
+            .iter()
+            .all(|item| item.engagement_type == EngagementType::Internal));
+    }
+
+    #[test]
+    fn migrations_preserve_user_projects_and_entries() {
+        let connection = test_connection();
+        let engagement_id =
+            create_test_engagement(&connection, "DEMO-PROJECT", "Example project", true);
+        let activity_id = create_test_activity(
+            &connection,
+            &engagement_id,
+            "DEMO-WORK",
+            "Example work",
+            true,
+        );
+        insert_manual_timeline_entry(
+            &connection,
+            "2026-09-19",
+            540,
+            600,
+            60,
+            "User-owned work",
+            Some(&engagement_id),
+            Some(&activity_id),
+        )
+        .expect("entry should save");
+
+        run_migrations(&connection).expect("migrations should run again");
+        let engagements = list_engagements(&connection).expect("engagements should load");
+        let project = engagements
+            .iter()
+            .find(|item| item.id == engagement_id)
+            .expect("user project remains");
+        assert_eq!(project.name, "Example project");
+        assert_eq!(project.activities.len(), 1);
+        let entries =
+            list_timeline_entries(&connection, "2026-09-19").expect("entries should load");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].description, "User-owned work");
     }
 
     #[test]

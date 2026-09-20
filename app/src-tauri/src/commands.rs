@@ -3755,7 +3755,10 @@ fn record_transcription_attempt_events(
     }
 }
 
-#[tauri::command]
+// Dispatch synchronous database, keyring, and file commands off the UI thread.
+// Keep this execution mode on the synchronous commands below; window operations
+// that need the UI thread live in quick_add.rs.
+#[tauri::command(async)]
 pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus, String> {
     let command = "settings_get_status";
     let correlation_id = Uuid::new_v4().to_string();
@@ -4076,7 +4079,7 @@ pub fn settings_get_status(state: State<'_, AppState>) -> Result<SettingsStatus,
     Ok(status)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_set_openai_key(
     state: State<'_, AppState>,
     input: ApiKeyInput,
@@ -4193,7 +4196,7 @@ pub fn settings_set_openai_key(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_set_openai_model(
     state: State<'_, AppState>,
     input: SettingsSetOpenAiModelInput,
@@ -4279,7 +4282,7 @@ pub fn settings_set_openai_model(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_set_calendar_bulk_model(
     state: State<'_, AppState>,
     input: SettingsSetCalendarBulkModelInput,
@@ -4365,7 +4368,7 @@ pub fn settings_set_calendar_bulk_model(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_set_transcription_model(
     state: State<'_, AppState>,
     input: SettingsSetTranscriptionModelInput,
@@ -4449,7 +4452,7 @@ pub fn settings_set_transcription_model(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_set_timeline_preferences(
     state: State<'_, AppState>,
     input: SettingsSetTimelinePreferencesInput,
@@ -4598,7 +4601,7 @@ pub fn settings_set_timeline_preferences(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_set_calendar_bulk_preferences(
     state: State<'_, AppState>,
     input: SettingsSetCalendarBulkPreferencesInput,
@@ -4690,7 +4693,7 @@ pub fn settings_set_calendar_bulk_preferences(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_set_quick_add_preferences(
     state: State<'_, AppState>,
     input: SettingsSetQuickAddPreferencesInput,
@@ -4779,7 +4782,7 @@ pub fn settings_set_quick_add_preferences(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_set_interface_preferences(
     state: State<'_, AppState>,
     input: SettingsSetInterfacePreferencesInput,
@@ -4860,7 +4863,7 @@ pub fn settings_set_interface_preferences(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn summary_layout_state_get(state: State<'_, AppState>) -> Result<SummaryLayoutState, String> {
     let command = "summary_layout_state_get";
     let correlation_id = Uuid::new_v4().to_string();
@@ -4917,7 +4920,7 @@ pub fn summary_layout_state_get(state: State<'_, AppState>) -> Result<SummaryLay
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn summary_layout_state_set(
     state: State<'_, AppState>,
     input: SummaryLayoutState,
@@ -5003,7 +5006,7 @@ pub fn summary_layout_state_set(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reporting_state_get(state: State<'_, AppState>) -> Result<ReportingState, String> {
     let command = "reporting_state_get";
     let correlation_id = Uuid::new_v4().to_string();
@@ -5061,7 +5064,7 @@ pub fn reporting_state_get(state: State<'_, AppState>) -> Result<ReportingState,
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reporting_state_set(
     state: State<'_, AppState>,
     input: ReportingState,
@@ -5149,13 +5152,13 @@ pub fn reporting_state_set(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn engagement_list(state: State<'_, AppState>) -> Result<Vec<Engagement>, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
     db::list_engagements(&connection).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn engagement_upsert(
     state: State<'_, AppState>,
     input: EngagementUpsertInput,
@@ -5165,13 +5168,13 @@ pub fn engagement_upsert(
     Ok(IdResult { id })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn engagement_delete(state: State<'_, AppState>, input: IdInput) -> Result<(), String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
     db::delete_engagement(&connection, &input.id).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn activity_upsert(
     state: State<'_, AppState>,
     input: ActivityUpsertInput,
@@ -5181,13 +5184,13 @@ pub fn activity_upsert(
     Ok(IdResult { id })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn activity_delete(state: State<'_, AppState>, input: IdInput) -> Result<(), String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
     db::delete_activity(&connection, &input.id).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timeline_list_for_date(
     state: State<'_, AppState>,
     input: DateInput,
@@ -5196,7 +5199,7 @@ pub fn timeline_list_for_date(
     db::list_timeline_entries(&connection, input.date.trim()).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timeline_month_summary(
     state: State<'_, AppState>,
     input: TimelineMonthSummaryInput,
@@ -5208,7 +5211,7 @@ pub fn timeline_month_summary(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timeline_weekly_summary(
     state: State<'_, AppState>,
     input: DateInput,
@@ -5227,7 +5230,7 @@ pub fn timeline_weekly_summary(
     Ok(summary)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timeline_list_for_week_view(
     state: State<'_, AppState>,
     input: DateInput,
@@ -5262,7 +5265,7 @@ pub fn timeline_list_for_week_view(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn quick_add_suggestions(
     state: State<'_, AppState>,
     input: QuickAddSuggestionInput,
@@ -5275,7 +5278,7 @@ pub fn quick_add_suggestions(
     Ok(QuickAddSuggestionResult { suggestions })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn summary_export_weekly_excel(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -5347,7 +5350,7 @@ pub fn summary_export_weekly_excel(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timeline_update_entry(
     state: State<'_, AppState>,
     input: TimelineUpdateInput,
@@ -5448,7 +5451,7 @@ fn validate_manual_create_refs(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timeline_create_entry(
     state: State<'_, AppState>,
     input: TimelineCreateInput,
@@ -5457,7 +5460,7 @@ pub fn timeline_create_entry(
     create_manual_timeline_entry(&connection, input)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timer_get_active(state: State<'_, AppState>) -> Result<Option<ActiveTimer>, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
     db::get_active_timer(&connection).map_err(|error| error.to_string())
@@ -5483,7 +5486,7 @@ fn validate_timer_start_window(start_date: &str, start_minute: i64) -> Result<()
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timer_start(
     state: State<'_, AppState>,
     input: TimerStartInput,
@@ -5583,7 +5586,7 @@ fn start_timer_from_entry(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timer_start_from_entry(
     state: State<'_, AppState>,
     input: TimerStartFromEntryInput,
@@ -5592,7 +5595,7 @@ pub fn timer_start_from_entry(
     start_timer_from_entry(&connection, input)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timer_update_active(
     state: State<'_, AppState>,
     input: TimerUpdateInput,
@@ -5633,13 +5636,13 @@ pub fn timer_update_active(
         .ok_or_else(|| "timer could not be loaded after updating".to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timer_cancel(state: State<'_, AppState>) -> Result<(), String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
     db::clear_active_timer(&connection).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timer_stop(
     state: State<'_, AppState>,
     input: TimerStopInput,
@@ -5822,7 +5825,7 @@ fn create_timeline_entry_with_source(
     Ok(IdResult { id })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn timeline_delete_entry(state: State<'_, AppState>, input: IdInput) -> Result<(), String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
 
@@ -6089,7 +6092,7 @@ pub async fn calendar_extract_events(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn calendar_import_entries(
     state: State<'_, AppState>,
     input: CalendarImportInput,
@@ -7861,7 +7864,7 @@ pub async fn interpret_text_message(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diagnostics_record_frontend_event(
     state: State<'_, AppState>,
     input: DiagnosticsRecordInput,
@@ -7903,7 +7906,7 @@ pub fn diagnostics_record_frontend_event(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diagnostics_list(
     state: State<'_, AppState>,
     input: DiagnosticsListInput,
@@ -7922,7 +7925,7 @@ pub fn diagnostics_list(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diagnostics_copy_bundle(state: State<'_, AppState>) -> Result<DiagnosticsBundle, String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
 
@@ -12593,7 +12596,7 @@ mod tests {
             engagements: vec![ContextEngagement {
                 id: "engagement-1".to_string(),
                 engagement_ref: "eng-001".to_string(),
-                code: Some("ORANGE-FY26".to_string()),
+                code: Some("DEMO-001".to_string()),
                 name: "ExampleCo SOC2".to_string(),
                 tags: vec![],
                 describe_when_to_use: None,
@@ -12771,10 +12774,10 @@ mod tests {
                 ContextEngagement {
                     id: "engagement-1".to_string(),
                     engagement_ref: "eng-001".to_string(),
-                    code: Some("ORANGE-FY26".to_string()),
-                    name: "Orange FY26".to_string(),
+                    code: Some("DEMO-001".to_string()),
+                    name: "Example Project".to_string(),
                     tags: vec!["SOX".to_string(), "FAIT".to_string()],
-                    describe_when_to_use: Some("For the Orange SOX/FAIT audit.".to_string()),
+                    describe_when_to_use: Some("For the example controls review.".to_string()),
                     activities: vec![
                         ContextActivity {
                             id: "activity-1".to_string(),
@@ -12921,9 +12924,9 @@ mod tests {
                 id: "engagement-1".to_string(),
                 engagement_ref: "eng-001".to_string(),
                 code: Some("E-1".to_string()),
-                name: "Orange FY26".to_string(),
+                name: "Example Project".to_string(),
                 tags: vec![],
-                describe_when_to_use: Some("For the Orange SOX/FAIT audit.".to_string()),
+                describe_when_to_use: Some("For the example controls review.".to_string()),
                 activities: vec![ContextActivity {
                     id: "activity-1".to_string(),
                     activity_ref: "act-001-001".to_string(),
@@ -12965,9 +12968,9 @@ mod tests {
                 id: "engagement-1".to_string(),
                 engagement_ref: "eng-001".to_string(),
                 code: Some("E-1".to_string()),
-                name: "Orange FY26".to_string(),
+                name: "Example Project".to_string(),
                 tags: vec![],
-                describe_when_to_use: Some("For the Orange SOX/FAIT audit.".to_string()),
+                describe_when_to_use: Some("For the example controls review.".to_string()),
                 activities: vec![ContextActivity {
                     id: "activity-1".to_string(),
                     activity_ref: "act-001-001".to_string(),

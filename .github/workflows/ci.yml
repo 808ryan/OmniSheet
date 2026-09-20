@@ -42,9 +42,16 @@ jobs:
         working-directory: app
         run: npm ci
 
+      - name: Check repository file hygiene
+        run: node scripts/check-public-files.mjs
+
       - name: Lint frontend
         working-directory: app
         run: npm run lint
+
+      - name: Test frontend
+        working-directory: app
+        run: npm test
 
       - name: Build frontend
         working-directory: app
@@ -55,3 +62,6 @@ jobs:
 
       - name: Check Rust build
         run: cargo check --manifest-path app/src-tauri/Cargo.toml
+
+      - name: Test Rust
+        run: cargo test --lib --manifest-path app/src-tauri/Cargo.toml

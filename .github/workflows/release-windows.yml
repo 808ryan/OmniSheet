@@ -31,10 +31,13 @@ jobs:
       - name: Resolve release metadata
         id: release_meta
         shell: pwsh
+        env:
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+          REQUESTED_RELEASE_NAME: ${{ inputs.release_name }}
         run: |
           if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
-            $tagName = "${{ github.event.inputs.release_tag }}"
-            $releaseName = "${{ github.event.inputs.release_name }}"
+            $tagName = $env:REQUESTED_RELEASE_TAG
+            $releaseName = $env:REQUESTED_RELEASE_NAME
           } else {
             $tagName = $env:GITHUB_REF_NAME
             $releaseName = ""
@@ -47,6 +50,11 @@ jobs:
 
           if ([string]::IsNullOrWhiteSpace($releaseName)) {
             $releaseName = "OmniSheet $tagName"
+          }
+
+          if ($releaseName.Contains("`n") -or $releaseName.Contains("`r")) {
+            Write-Error "release_name must be a single line"
+            exit 1
           }
 
           "tag_name=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append

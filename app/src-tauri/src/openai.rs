@@ -1,6 +1,5 @@
 use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
@@ -167,7 +166,7 @@ Examples:
 - Message: "for the past hour i've been in meetings for RR ITACs"
   clientLocalTime: "21:48"
   Expected temporal intent: startTime "20:48", endTime "21:48", durationMinutes 60.
-- Message: "in the morning i spent 30 minutes on a ExampleCo related meeting"
+- Message: "in the morning i spent 30 minutes on an ExampleCo related meeting"
   clientLocalTime: "22:13"
   Expected temporal intent: startTime "09:30", endTime "10:00", durationMinutes 30.
 - Message: "going to spend 30 minutes at 6pm for exampleco"
@@ -553,7 +552,7 @@ pub async fn interpret_message(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
                 return Err(AppError::Network(error));
@@ -585,7 +584,7 @@ pub async fn interpret_message(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
@@ -615,7 +614,7 @@ pub async fn interpret_message(
             });
 
             if let Some(delay_ms) = delay_ms {
-                thread::sleep(Duration::from_millis(delay_ms));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 continue;
             }
 
@@ -762,7 +761,7 @@ pub async fn extract_calendar_events(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
                 return Err(AppError::Network(error));
@@ -791,7 +790,7 @@ pub async fn extract_calendar_events(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
@@ -817,7 +816,7 @@ pub async fn extract_calendar_events(
             });
 
             if let Some(delay_ms) = delay_ms {
-                thread::sleep(Duration::from_millis(delay_ms));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 continue;
             }
 
@@ -941,7 +940,7 @@ pub async fn transcribe_audio(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
@@ -974,7 +973,7 @@ pub async fn transcribe_audio(
                 });
 
                 if let Some(delay_ms) = delay_ms {
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
@@ -1004,7 +1003,7 @@ pub async fn transcribe_audio(
             });
 
             if let Some(delay_ms) = delay_ms {
-                thread::sleep(Duration::from_millis(delay_ms));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 continue;
             }
 
@@ -1134,9 +1133,8 @@ mod tests {
     #[test]
     fn prompt_includes_morning_duration_example() {
         let prompt = build_system_prompt();
-        assert!(
-            prompt.contains("\"in the morning i spent 30 minutes on a ExampleCo related meeting\"")
-        );
+        assert!(prompt
+            .contains("\"in the morning i spent 30 minutes on an ExampleCo related meeting\""));
         assert!(prompt.contains(
             "Expected temporal intent: startTime \"09:30\", endTime \"10:00\", durationMinutes 30."
         ));

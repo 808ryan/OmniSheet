@@ -30,13 +30,35 @@ Thumbs.db
 
 # Codex
 .codex/
+.agents/
+AGENTS.md
 
 # Tauri / Rust
 app/src-tauri/target/
-**/Cargo.lock
 
 build/
 coverage/
 /Proposed_Plan.md
 implementation_status.md
 /Brainstorming.txt
+
+# Local data, exports, credentials, and release material
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.p8
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
+*.dmg
+*.msi
+*.exe
+exports/
+personal-data/
+scratch/
+/cal*.png
+/OmniSheetApp/
