@@ -771,51 +771,6 @@ fn ensure_standard_time_off_activity(
     Ok(definition.activity_id.to_string())
 }
 
-fn seed_activity_id(prefix: &str, code: &str) -> String {
-    let normalized_code = code
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(|character| character.to_lowercase())
-        .collect::<String>();
-    format!("{prefix}-{normalized_code}")
-}
-
-fn find_engagement_id_by_code(conn: &Connection, code: &str) -> AppResult<Option<String>> {
-    let id = conn
-        .query_row(
-            r#"
-            SELECT id
-            FROM engagements
-            WHERE upper(trim(COALESCE(code, ''))) = ?1
-            ORDER BY created_at ASC
-            LIMIT 1
-            "#,
-            params![code.trim().to_ascii_uppercase()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-
-    Ok(id)
-}
-
-fn find_engagement_id_by_name(conn: &Connection, name: &str) -> AppResult<Option<String>> {
-    let id = conn
-        .query_row(
-            r#"
-            SELECT id
-            FROM engagements
-            WHERE lower(trim(name)) = ?1
-            ORDER BY created_at ASC
-            LIMIT 1
-            "#,
-            params![name.trim().to_ascii_lowercase()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-
-    Ok(id)
-}
-
 fn engagement_code_exists_elsewhere(
     conn: &Connection,
     code: &str,
@@ -2926,13 +2881,6 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("vacation count should load");
-        let legacy_vacation_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM engagements WHERE upper(trim(code)) = 'VACATION'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("legacy vacation count should load");
         let existing_status: (String, String, i64) = connection
             .query_row(
                 "SELECT code, engagement_type, is_active FROM engagements WHERE id = 'existing-vacation'",
@@ -2949,7 +2897,6 @@ mod tests {
             .expect("existing activity should load");
 
         assert_eq!(vacation_count, 1);
-        assert_eq!(legacy_vacation_count, 0);
         assert_eq!(
             existing_status,
             ("VACATION".to_string(), "internal".to_string(), 1)
