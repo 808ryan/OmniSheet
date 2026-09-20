@@ -9,7 +9,7 @@ OmniSheet is a desktop timesheet and time-tracking app with optional AI assistan
 - **Review your week.** See entries on a daily or weekly timeline and drag blocks to adjust them.
 - **Prepare your timesheet.** Organize time by project and activity code, choose your report columns, and export to Excel for weekly submission.
 
-Add your projects (called engagements in the app) and their activity codes to get started. Manual entries and timers work without an API key. AI features use your own OpenAI API key.
+New installations include Public Holiday, Vacation, and a fictional Orange FY26 project with one example activity, RSK - SAP ITGCs. Edit or delete the example and add your own projects (called engagements in the app) and activity codes. Manual entries and timers work without an API key. AI features use your own OpenAI API key.
 
 ## Running OmniSheet
 
