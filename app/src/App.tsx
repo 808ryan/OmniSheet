@@ -6845,7 +6845,7 @@ function App() {
   )
 
   const createTimelineEntryFromSelection = useCallback(
-    (engagement: Engagement, activity: Activity) => {
+    (engagement: Engagement | null, activity: Activity | null) => {
       if (!timelineCreateSelection || timelineMutationInFlightRef.current) {
         return
       }
@@ -6856,8 +6856,8 @@ function App() {
           date: selection.date,
           startMinute: selection.startMinute,
           endMinute: selection.endMinute,
-          engagementId: engagement.id,
-          activityId: activity.id,
+          engagementId: engagement?.id ?? null,
+          activityId: activity?.id ?? null,
           description: '',
         })
         setTimelineCreateSelection(null)
@@ -6877,7 +6877,7 @@ function App() {
             scrollDayTimelineToEntry(createdEntry)
           }
         }
-        setSuccessMessage(`Added ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
+        setSuccessMessage(`Added ${formatEntityDisplayLabel(activity?.name, activity?.code)}.`)
       })
     },
     [
@@ -12612,6 +12612,7 @@ function App() {
             onSubmit={(item) => {
               createTimelineEntryFromSelection(item.engagement, item.activity)
             }}
+            onSubmitUncategorized={() => createTimelineEntryFromSelection(null, null)}
           />
         </div>,
         document.body,

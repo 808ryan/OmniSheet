@@ -8,7 +8,7 @@ import App from '../src/App'
 import * as api from '../src/lib/api'
 import { buildDefaultReportingState } from '../src/lib/reporting'
 import { buildDefaultSummaryLayoutState } from '../src/lib/summaryLayout'
-import type { TimelineEntry, TimelineWeekView } from '../src/lib/types'
+import type { Engagement, TimelineEntry, TimelineWeekView } from '../src/lib/types'
 
 vi.mock('../src/lib/api', async (importOriginal) => {
   const original = await importOriginal<typeof api>()
@@ -104,6 +104,67 @@ function selectedDay() {
 function blockCount() {
   return container.querySelectorAll('.timeline-grid[aria-label="Timeline entries"] .timeline-block').length
 }
+
+describe('timeline activity search', () => {
+  it.each(['click', 'submit'])('creates an uncategorized block from a search with no matches via %s', async (method) => {
+    const engagement: Engagement = {
+      id: 'engagement-1', name: 'Client', code: null, client: null,
+      engagementType: 'external', colorHex: null, tags: [], describeWhenToUse: null,
+      isActive: true, createdAt: 0, updatedAt: 0,
+      activities: [{
+        id: 'activity-1', engagementId: 'engagement-1', name: 'Audit', code: null,
+        colorHex: null, tags: [], describeWhenToUse: null, isActive: true,
+        createdAt: 0, updatedAt: 0,
+      }],
+    }
+    vi.mocked(api.engagementList).mockResolvedValue([engagement])
+    vi.mocked(api.timelineCreateEntry).mockResolvedValue({ id: 'created-entry' })
+    await render()
+    const canvas = container.querySelector('.timeline-grid[aria-label="Timeline entries"] .timeline-canvas')!
+    await act(async () => canvas.dispatchEvent(new MouseEvent('dblclick', {
+      bubbles: true, clientX: 100, clientY: 300,
+    })))
+    const dialog = document.querySelector('[aria-label="Create timeline entry"]')!
+    expect(dialog).not.toBeNull()
+    const input = dialog.querySelector('input')!
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    const search = async (value: string) => {
+      await act(async () => {
+        setValue.call(input, value)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+
+    expect(dialog.textContent).toContain('Audit')
+    expect(dialog.querySelector('[aria-label="Create Uncategorized"]')).toBeNull()
+    await search('a query with no matching activity')
+    expect(dialog.textContent).not.toContain('No matching activities')
+    const fallback = dialog.querySelector<HTMLButtonElement>('[aria-label="Create Uncategorized"]')!
+    expect(fallback).not.toBeNull()
+    await act(async () => input.focus())
+    expect(input.getAttribute('aria-activedescendant')).toBe(fallback.id)
+
+    await search('Audit')
+    expect(dialog.textContent).toContain('Audit')
+    expect(dialog.querySelector('[aria-label="Create Uncategorized"]')).toBeNull()
+    await search('a query with no matching activity')
+    await act(async () => {
+      if (method === 'click') {
+        dialog.querySelector<HTMLButtonElement>('[aria-label="Create Uncategorized"]')!.click()
+      } else {
+        dialog.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      }
+    })
+    expect(api.timelineCreateEntry).toHaveBeenCalledOnce()
+    expect(api.timelineCreateEntry).toHaveBeenCalledWith({
+      date: '2026-09-19', startMinute: expect.any(Number), endMinute: expect.any(Number),
+      engagementId: null, activityId: null, description: '',
+    })
+    const saved = vi.mocked(api.timelineCreateEntry).mock.calls[0][0]
+    expect(saved.endMinute - saved.startMinute).toBe(30)
+    expect(document.querySelector('[aria-label="Create timeline entry"]')).toBeNull()
+  })
+})
 
 describe('timeline lifecycle', () => {
   it('follows today after overnight resume without reinitializing, and preserves yesterday’s entries', async () => {
