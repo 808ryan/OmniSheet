@@ -31,6 +31,8 @@ npm run tauri dev
 
 Your time entries and settings are saved locally on your computer in an unencrypted database. Your API key is saved in your operating system's credential store when available, or kept for the current session otherwise.
 
+You can share selected engagements and their activities through **Settings > Engagement codes**. Export a JSON file and send it privately; importing adds new engagements and skips existing ones. See [Sharing engagement codes](docs/sharing-codes.md).
+
 Using an AI feature sends the text, audio, or screenshot you provide, along with relevant project context, to OpenAI. Diagnostic logs are also stored locally and can include entry text; check them before sharing a bug report.
 
 ## License

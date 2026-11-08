@@ -11,6 +11,7 @@ import { createPortal, flushSync } from 'react-dom'
 import { emit, listen } from '@tauri-apps/api/event'
 
 import { ActivityCommandBar } from './ActivityCommandBar'
+import { CodeTransferSettings } from './CodeTransferSettings'
 import { PlusIcon, StopIcon, TimerIcon, TrashIcon } from './InterfaceIcons'
 import {
   activityDelete,
@@ -662,9 +663,9 @@ const MAX_CONCURRENT_SUBMISSIONS = 5
 const SYSTEM_NOTICE_AUTO_DISMISS_MS = 4000
 const LLM_SUBMISSION_STATUS_DISMISS_MS = 5000
 const CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD = 0.75
-const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
-const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-5.5-instant'
-const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-4o-mini-transcribe'
+const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-6.1-sol-low'
+const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-6.1-terra-medium'
+const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-transcribe'
 const LLM_ENTRY_EXAMPLE_TEXT = 'Spent an hour on project planning...'
 const MISSING_OPENAI_KEY_HINT = 'No API key is configured in settings'
 const MAX_VOICE_RECORDING_DURATION_MS = 120_000
@@ -985,6 +986,13 @@ function App() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
   const [settingsStatus, setSettingsStatus] = useState<SettingsStatus | null>(null)
+  const openAiModelGroups = useMemo(() => {
+    const options = settingsStatus?.availableOpenAiModels ?? []
+    return [...new Set(options.map((option) => option.group))].map((group) => ({
+      label: group,
+      options: options.filter((option) => option.group === group),
+    }))
+  }, [settingsStatus?.availableOpenAiModels])
   const [openAiKey, setOpenAiKey] = useState('')
   const credentialStatusTone =
     settingsStatus === null
@@ -12055,10 +12063,12 @@ function App() {
                       }
                       disabled={isBusy || settingsStatus === null}
                     >
-                      {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
+                      {openAiModelGroups.map((group) => (
+                        <optgroup key={group.label} label={group.label}>
+                          {group.options.map((model) => (
+                            <option key={model.id} value={model.id}>{model.label}</option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                     <button
@@ -12085,10 +12095,12 @@ function App() {
                       }
                       disabled={isBusy || settingsStatus === null}
                     >
-                      {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
+                      {openAiModelGroups.map((group) => (
+                        <optgroup key={group.label} label={group.label}>
+                          {group.options.map((model) => (
+                            <option key={model.id} value={model.id}>{model.label}</option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                     <button
@@ -12350,6 +12362,15 @@ function App() {
                   </div>
                 </div>
               </section>
+
+              <CodeTransferSettings
+                engagements={engagements}
+                disabled={isBusy}
+                onImported={async () => {
+                  await Promise.all([loadEngagements(), loadQuickAddSuggestions()])
+                }}
+                onViewCodes={() => onSelectView('codes')}
+              />
 
               <section className="settings-card">
                 <div className="settings-card-header">

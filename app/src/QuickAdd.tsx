@@ -52,7 +52,7 @@ import './QuickAdd.css'
 
 type QuickAddStatus = 'idle' | 'loading' | 'submitting' | 'success' | 'error'
 
-const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
+const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-6.1-sol-low'
 const LLM_ENTRY_EXAMPLE_TEXT = 'Spent an hour on project planning...'
 const MISSING_OPENAI_KEY_HINT = 'No API key is configured in settings'
 const QUICK_ADD_MIN_WINDOW_HEIGHT = 260

@@ -58,6 +58,7 @@ implementation_status.md
 *.msi
 *.exe
 exports/
+OmniSheet-codes-*.json
 personal-data/
 scratch/
 /cal*.png

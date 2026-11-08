@@ -54,9 +54,14 @@ beforeEach(() => {
   vi.mocked(api.reportingStateGet).mockResolvedValue(buildDefaultReportingState())
   vi.mocked(api.settingsGetStatus).mockResolvedValue({
     hasOpenAiKey: false, storageHealth: 'ok', keySource: 'none', statusLevel: 'ok', lastError: null,
-    selectedOpenAiModel: 'gpt-5.5-instant', availableOpenAiModels: [],
-    selectedCalendarBulkModel: 'gpt-5.5-instant', selectedTranscriptionModel: 'gpt-4o-mini-transcribe',
-    availableTranscriptionModels: [], timelineExcludeUncategorizedFromDailyTotals: false,
+    selectedOpenAiModel: 'gpt-6.1-sol-low', availableOpenAiModels: [
+      { id: 'gpt-6.1-sol-low', label: 'GPT-6.1 Sol — Low', group: 'GPT-6.1 Sol' },
+      { id: 'gpt-6.1-terra-medium', label: 'GPT-6.1 Terra — Medium', group: 'GPT-6.1 Terra' },
+      { id: 'gpt-6-luna-none', label: 'GPT-6 Luna — No reasoning', group: 'GPT-6 Luna' },
+      { id: 'gpt-6-astra-low', label: 'GPT-6 Astra — Low', group: 'GPT-6 Astra' },
+    ],
+    selectedCalendarBulkModel: 'gpt-6.1-terra-medium', selectedTranscriptionModel: 'gpt-transcribe',
+    availableTranscriptionModels: [{ id: 'gpt-transcribe', label: 'GPT-Transcribe' }], timelineExcludeUncategorizedFromDailyTotals: false,
     timelineShowUncategorizedDailyTotal: false, timelineIncludeExternalInTotals: true,
     timelineIncludeInternalInTotals: true, timelineSeparateEngagementTypeTotals: false,
     timelineWeekStartDay: 'saturday', calendarBulkIgnoredKeywords: [],
@@ -104,6 +109,31 @@ function selectedDay() {
 function blockCount() {
   return container.querySelectorAll('.timeline-grid[aria-label="Timeline entries"] .timeline-block').length
 }
+
+describe('model settings', () => {
+  it('offers current models for both workloads and saves the selected preset', async () => {
+    await render()
+    const settings = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((item) => item.textContent === 'Settings')!
+    expect(settings).toBeDefined()
+    await act(async () => settings.click())
+    const interpretation = container.querySelector<HTMLSelectElement>('#settings-openai-model')!
+    const calendar = container.querySelector<HTMLSelectElement>('#settings-calendar-bulk-model')!
+    const speech = container.querySelector<HTMLSelectElement>('#settings-transcription-model')!
+    for (const select of [interpretation, calendar]) {
+      expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['GPT-6.1 Sol', 'GPT-6.1 Terra', 'GPT-6 Luna', 'GPT-6 Astra'])
+      expect(select.textContent).not.toMatch(/GPT-5\./)
+    }
+    expect(interpretation.value).toBe('gpt-6.1-sol-low')
+    expect(calendar.value).toBe('gpt-6.1-terra-medium')
+    expect([...speech.options].map((option) => option.value)).toEqual(['gpt-transcribe'])
+    await act(async () => {
+      interpretation.value = 'gpt-6-luna-none'
+      interpretation.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => interpretation.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
+    expect(api.settingsSetOpenAiModel).toHaveBeenCalledWith('gpt-6-luna-none')
+  })
+})
 
 describe('timeline activity search', () => {
   it.each(['click', 'submit'])('creates an uncategorized block from a search with no matches via %s', async (method) => {
