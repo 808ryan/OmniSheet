@@ -2376,7 +2376,7 @@ pub fn list_diagnostics_events(
     Ok(events)
 }
 
-fn normalize_color_hex(raw_value: Option<String>) -> AppResult<Option<String>> {
+pub(crate) fn normalize_color_hex(raw_value: Option<String>) -> AppResult<Option<String>> {
     let Some(value) = raw_value else {
         return Ok(None);
     };
@@ -2402,7 +2402,7 @@ fn normalize_color_hex(raw_value: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(candidate))
 }
 
-fn normalize_optional_code(raw_value: Option<String>) -> Option<String> {
+pub(crate) fn normalize_optional_code(raw_value: Option<String>) -> Option<String> {
     raw_value.and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -2441,7 +2441,7 @@ fn db_value_to_engagement_type(value: Option<&str>, code: Option<&str>) -> Engag
     }
 }
 
-fn normalize_usage_description(raw_value: String) -> AppResult<Option<String>> {
+pub(crate) fn normalize_usage_description(raw_value: String) -> AppResult<Option<String>> {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -2463,7 +2463,7 @@ fn parse_tags(tags_json: &str) -> Option<Vec<String>> {
         .map(normalize_tags)
 }
 
-fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_tags(tags: Vec<String>) -> Vec<String> {
     tags.into_iter()
         .map(|tag| tag.trim().to_string())
         .filter(|tag| !tag.is_empty())

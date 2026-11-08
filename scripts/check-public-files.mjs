@@ -11,6 +11,7 @@ const disallowed = [
   /\.(?:db(?:-.*)?|sqlite(?:3)?(?:-.*)?|p8|p12|pfx|pem|key|mobileprovision)$/i,
   /^(?:personal-data|scratch|exports|OmniSheetApp)\//i,
   /^cal\d+\.png$/i,
+  /(^|\/)OmniSheet-codes-[^/]*\.json$/i,
 ]
 const violations = paths.filter((path) => disallowed.some((pattern) => pattern.test(path)))
 if (violations.length) {

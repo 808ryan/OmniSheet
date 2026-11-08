@@ -8,7 +8,7 @@ import App from '../src/App'
 import * as api from '../src/lib/api'
 import { buildDefaultReportingState } from '../src/lib/reporting'
 import { buildDefaultSummaryLayoutState } from '../src/lib/summaryLayout'
-import type { TimelineEntry, TimelineWeekView } from '../src/lib/types'
+import type { Engagement, TimelineEntry, TimelineWeekView } from '../src/lib/types'
 
 vi.mock('../src/lib/api', async (importOriginal) => {
   const original = await importOriginal<typeof api>()
@@ -54,9 +54,14 @@ beforeEach(() => {
   vi.mocked(api.reportingStateGet).mockResolvedValue(buildDefaultReportingState())
   vi.mocked(api.settingsGetStatus).mockResolvedValue({
     hasOpenAiKey: false, storageHealth: 'ok', keySource: 'none', statusLevel: 'ok', lastError: null,
-    selectedOpenAiModel: 'gpt-5.5-instant', availableOpenAiModels: [],
-    selectedCalendarBulkModel: 'gpt-5.5-instant', selectedTranscriptionModel: 'gpt-4o-mini-transcribe',
-    availableTranscriptionModels: [], timelineExcludeUncategorizedFromDailyTotals: false,
+    selectedOpenAiModel: 'gpt-6.1-sol-low', availableOpenAiModels: [
+      { id: 'gpt-6.1-sol-low', label: 'GPT-6.1 Sol — Low', group: 'GPT-6.1 Sol' },
+      { id: 'gpt-6.1-terra-medium', label: 'GPT-6.1 Terra — Medium', group: 'GPT-6.1 Terra' },
+      { id: 'gpt-6-luna-none', label: 'GPT-6 Luna — No reasoning', group: 'GPT-6 Luna' },
+      { id: 'gpt-6-astra-low', label: 'GPT-6 Astra — Low', group: 'GPT-6 Astra' },
+    ],
+    selectedCalendarBulkModel: 'gpt-6.1-terra-medium', selectedTranscriptionModel: 'gpt-transcribe',
+    availableTranscriptionModels: [{ id: 'gpt-transcribe', label: 'GPT-Transcribe' }], timelineExcludeUncategorizedFromDailyTotals: false,
     timelineShowUncategorizedDailyTotal: false, timelineIncludeExternalInTotals: true,
     timelineIncludeInternalInTotals: true, timelineSeparateEngagementTypeTotals: false,
     timelineWeekStartDay: 'saturday', calendarBulkIgnoredKeywords: [],
@@ -104,6 +109,92 @@ function selectedDay() {
 function blockCount() {
   return container.querySelectorAll('.timeline-grid[aria-label="Timeline entries"] .timeline-block').length
 }
+
+describe('model settings', () => {
+  it('offers current models for both workloads and saves the selected preset', async () => {
+    await render()
+    const settings = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((item) => item.textContent === 'Settings')!
+    expect(settings).toBeDefined()
+    await act(async () => settings.click())
+    const interpretation = container.querySelector<HTMLSelectElement>('#settings-openai-model')!
+    const calendar = container.querySelector<HTMLSelectElement>('#settings-calendar-bulk-model')!
+    const speech = container.querySelector<HTMLSelectElement>('#settings-transcription-model')!
+    for (const select of [interpretation, calendar]) {
+      expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['GPT-6.1 Sol', 'GPT-6.1 Terra', 'GPT-6 Luna', 'GPT-6 Astra'])
+      expect(select.textContent).not.toMatch(/GPT-5\./)
+    }
+    expect(interpretation.value).toBe('gpt-6.1-sol-low')
+    expect(calendar.value).toBe('gpt-6.1-terra-medium')
+    expect([...speech.options].map((option) => option.value)).toEqual(['gpt-transcribe'])
+    await act(async () => {
+      interpretation.value = 'gpt-6-luna-none'
+      interpretation.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => interpretation.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
+    expect(api.settingsSetOpenAiModel).toHaveBeenCalledWith('gpt-6-luna-none')
+  })
+})
+
+describe('timeline activity search', () => {
+  it.each(['click', 'submit'])('creates an uncategorized block from a search with no matches via %s', async (method) => {
+    const engagement: Engagement = {
+      id: 'engagement-1', name: 'Client', code: null, client: null,
+      engagementType: 'external', colorHex: null, tags: [], describeWhenToUse: null,
+      isActive: true, createdAt: 0, updatedAt: 0,
+      activities: [{
+        id: 'activity-1', engagementId: 'engagement-1', name: 'Audit', code: null,
+        colorHex: null, tags: [], describeWhenToUse: null, isActive: true,
+        createdAt: 0, updatedAt: 0,
+      }],
+    }
+    vi.mocked(api.engagementList).mockResolvedValue([engagement])
+    vi.mocked(api.timelineCreateEntry).mockResolvedValue({ id: 'created-entry' })
+    await render()
+    const canvas = container.querySelector('.timeline-grid[aria-label="Timeline entries"] .timeline-canvas')!
+    await act(async () => canvas.dispatchEvent(new MouseEvent('dblclick', {
+      bubbles: true, clientX: 100, clientY: 300,
+    })))
+    const dialog = document.querySelector('[aria-label="Create timeline entry"]')!
+    expect(dialog).not.toBeNull()
+    const input = dialog.querySelector('input')!
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    const search = async (value: string) => {
+      await act(async () => {
+        setValue.call(input, value)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+
+    expect(dialog.textContent).toContain('Audit')
+    expect(dialog.querySelector('[aria-label="Create Uncategorized"]')).toBeNull()
+    await search('a query with no matching activity')
+    expect(dialog.textContent).not.toContain('No matching activities')
+    const fallback = dialog.querySelector<HTMLButtonElement>('[aria-label="Create Uncategorized"]')!
+    expect(fallback).not.toBeNull()
+    await act(async () => input.focus())
+    expect(input.getAttribute('aria-activedescendant')).toBe(fallback.id)
+
+    await search('Audit')
+    expect(dialog.textContent).toContain('Audit')
+    expect(dialog.querySelector('[aria-label="Create Uncategorized"]')).toBeNull()
+    await search('a query with no matching activity')
+    await act(async () => {
+      if (method === 'click') {
+        dialog.querySelector<HTMLButtonElement>('[aria-label="Create Uncategorized"]')!.click()
+      } else {
+        dialog.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      }
+    })
+    expect(api.timelineCreateEntry).toHaveBeenCalledOnce()
+    expect(api.timelineCreateEntry).toHaveBeenCalledWith({
+      date: '2026-09-19', startMinute: expect.any(Number), endMinute: expect.any(Number),
+      engagementId: null, activityId: null, description: '',
+    })
+    const saved = vi.mocked(api.timelineCreateEntry).mock.calls[0][0]
+    expect(saved.endMinute - saved.startMinute).toBe(30)
+    expect(document.querySelector('[aria-label="Create timeline entry"]')).toBeNull()
+  })
+})
 
 describe('timeline lifecycle', () => {
   it('follows today after overnight resume without reinitializing, and preserves yesterday’s entries', async () => {

@@ -145,7 +145,7 @@ fn resolve_saved_openai_model_value(
 ) -> (OpenAiModelId, Option<String>) {
     match saved_value {
         Some(value) => match OpenAiModelId::from_api_name(&value) {
-            Some(model) => (model, None),
+            Some(model) => (model.current_selection(), None),
             None => (OpenAiModelId::default(), Some(value)),
         },
         None => (OpenAiModelId::default(), None),
@@ -154,7 +154,18 @@ fn resolve_saved_openai_model_value(
 
 fn read_saved_openai_model(connection: &Connection) -> AppResult<(OpenAiModelId, Option<String>)> {
     let saved_value = db::get_app_setting(connection, APP_SETTING_OPENAI_MODEL)?;
-    Ok(resolve_saved_openai_model_value(saved_value))
+    let resolved = resolve_saved_openai_model_value(saved_value.clone());
+    if saved_value.is_some()
+        && resolved.1.is_none()
+        && saved_value.as_deref() != Some(resolved.0.storage_value())
+    {
+        db::upsert_app_setting(
+            connection,
+            APP_SETTING_OPENAI_MODEL,
+            resolved.0.storage_value(),
+        )?;
+    }
+    Ok(resolved)
 }
 
 fn resolve_saved_calendar_bulk_model_value(
@@ -162,7 +173,7 @@ fn resolve_saved_calendar_bulk_model_value(
 ) -> (OpenAiModelId, Option<String>) {
     match saved_value {
         Some(value) => match OpenAiModelId::from_api_name(&value) {
-            Some(model) => (model, None),
+            Some(model) => (model.current_selection(), None),
             None => (OpenAiModelId::default_calendar_bulk_model(), Some(value)),
         },
         None => (OpenAiModelId::default_calendar_bulk_model(), None),
@@ -173,7 +184,18 @@ fn read_saved_calendar_bulk_model(
     connection: &Connection,
 ) -> AppResult<(OpenAiModelId, Option<String>)> {
     let saved_value = db::get_app_setting(connection, APP_SETTING_CALENDAR_BULK_OPENAI_MODEL)?;
-    Ok(resolve_saved_calendar_bulk_model_value(saved_value))
+    let resolved = resolve_saved_calendar_bulk_model_value(saved_value.clone());
+    if saved_value.is_some()
+        && resolved.1.is_none()
+        && saved_value.as_deref() != Some(resolved.0.storage_value())
+    {
+        db::upsert_app_setting(
+            connection,
+            APP_SETTING_CALENDAR_BULK_OPENAI_MODEL,
+            resolved.0.storage_value(),
+        )?;
+    }
+    Ok(resolved)
 }
 
 fn resolve_saved_transcription_model_value(
@@ -181,7 +203,7 @@ fn resolve_saved_transcription_model_value(
 ) -> (TranscriptionModelId, Option<String>) {
     match saved_value {
         Some(value) => match TranscriptionModelId::from_api_name(&value) {
-            Some(model) => (model, None),
+            Some(model) => (model.current_selection(), None),
             None => (TranscriptionModelId::default(), Some(value)),
         },
         None => (TranscriptionModelId::default(), None),
@@ -192,7 +214,18 @@ fn read_saved_transcription_model(
     connection: &Connection,
 ) -> AppResult<(TranscriptionModelId, Option<String>)> {
     let saved_value = db::get_app_setting(connection, APP_SETTING_TRANSCRIPTION_MODEL)?;
-    Ok(resolve_saved_transcription_model_value(saved_value))
+    let resolved = resolve_saved_transcription_model_value(saved_value.clone());
+    if saved_value.is_some()
+        && resolved.1.is_none()
+        && saved_value.as_deref() != Some(resolved.0.api_name())
+    {
+        db::upsert_app_setting(
+            connection,
+            APP_SETTING_TRANSCRIPTION_MODEL,
+            resolved.0.api_name(),
+        )?;
+    }
+    Ok(resolved)
 }
 
 fn read_saved_openai_key_configured_marker(connection: &Connection) -> AppResult<Option<bool>> {
@@ -1020,7 +1053,7 @@ fn resolve_requested_openai_model(
     requested_model: Option<OpenAiModelId>,
     saved_model: OpenAiModelId,
 ) -> OpenAiModelId {
-    requested_model.unwrap_or(saved_model)
+    requested_model.unwrap_or(saved_model).current_selection()
 }
 
 fn capture_source_label(value: CaptureSourceId) -> &'static str {
@@ -1056,7 +1089,7 @@ fn record_invalid_saved_openai_model(
         None,
         None,
         json!({
-          "message": "Invalid saved OpenAI model; defaulted to GPT-5.5 Instant.",
+          "message": "Invalid saved OpenAI model; defaulted to GPT-6.1 Sol Low.",
           "invalidValue": invalid_value,
           "fallbackModel": OpenAiModelId::default().storage_value(),
           "fallbackApiModel": OpenAiModelId::default().api_name(),
@@ -1081,7 +1114,7 @@ fn record_invalid_saved_calendar_bulk_model(
         None,
         None,
         json!({
-          "message": "Invalid saved calendar bulk model; defaulted to GPT-5.5 Instant.",
+          "message": "Invalid saved calendar bulk model; defaulted to GPT-6.1 Terra Medium.",
           "setting": APP_SETTING_CALENDAR_BULK_OPENAI_MODEL,
           "invalidValue": invalid_value,
           "fallbackModel": fallback_model.storage_value(),
@@ -1106,7 +1139,7 @@ fn record_invalid_saved_transcription_model(
         None,
         None,
         json!({
-          "message": "Invalid saved transcription model; defaulted to GPT-4o Mini Transcribe.",
+          "message": "Invalid saved transcription model; defaulted to GPT-Transcribe.",
           "invalidValue": invalid_value,
           "fallbackModel": TranscriptionModelId::default().api_name(),
           "fallbackModelLabel": TranscriptionModelId::default().display_label(),
@@ -4204,7 +4237,7 @@ pub fn settings_set_openai_model(
     let command = "settings_set_openai_model";
     let correlation_id = Uuid::new_v4().to_string();
     let started_at = Instant::now();
-    let selected_model = input.model;
+    let selected_model = input.model.current_selection();
 
     let connection = state.connection.lock().map_err(|_| {
         let message = state_lock_error();
@@ -4290,7 +4323,7 @@ pub fn settings_set_calendar_bulk_model(
     let command = "settings_set_calendar_bulk_model";
     let correlation_id = Uuid::new_v4().to_string();
     let started_at = Instant::now();
-    let selected_model = input.model;
+    let selected_model = input.model.current_selection();
 
     let connection = state.connection.lock().map_err(|_| {
         let message = state_lock_error();
@@ -4376,7 +4409,7 @@ pub fn settings_set_transcription_model(
     let command = "settings_set_transcription_model";
     let correlation_id = Uuid::new_v4().to_string();
     let started_at = Instant::now();
-    let selected_model = input.model;
+    let selected_model = input.model.current_selection();
 
     let connection = state.connection.lock().map_err(|_| {
         let message = state_lock_error();
@@ -10915,39 +10948,123 @@ mod tests {
     #[test]
     fn saved_openai_model_defaults_when_missing_or_invalid() {
         let (missing_model, missing_invalid_value) = resolve_saved_openai_model_value(None);
-        assert_eq!(missing_model, OpenAiModelId::Gpt55Instant);
+        assert_eq!(missing_model, OpenAiModelId::Gpt61SolLow);
         assert!(missing_invalid_value.is_none());
 
         let (legacy_gpt55_model, legacy_gpt55_invalid_value) =
             resolve_saved_openai_model_value(Some("gpt-5.5".to_string()));
-        assert_eq!(legacy_gpt55_model, OpenAiModelId::Gpt55Instant);
+        assert_eq!(legacy_gpt55_model, OpenAiModelId::Gpt61SolLow);
         assert!(legacy_gpt55_invalid_value.is_none());
 
         let (saved_model, saved_invalid_value) =
             resolve_saved_openai_model_value(Some("gpt-5.5-high".to_string()));
-        assert_eq!(saved_model, OpenAiModelId::Gpt55High);
+        assert_eq!(saved_model, OpenAiModelId::Gpt61SolHigh);
         assert!(saved_invalid_value.is_none());
 
         let (invalid_model, invalid_value) =
             resolve_saved_openai_model_value(Some("gpt-5-nano".to_string()));
-        assert_eq!(invalid_model, OpenAiModelId::Gpt55Instant);
+        assert_eq!(invalid_model, OpenAiModelId::Gpt61SolLow);
         assert_eq!(invalid_value.as_deref(), Some("gpt-5-nano"));
     }
 
     #[test]
-    fn saved_calendar_bulk_model_defaults_to_gpt55_instant_when_missing_or_invalid() {
+    fn legacy_saved_model_settings_migrate_and_persist_current_ids() {
+        let connection = test_connection();
+        for (old, expected) in [
+            ("gpt-5.5", OpenAiModelId::Gpt61SolLow),
+            ("gpt-5.5-instant", OpenAiModelId::Gpt61SolLow),
+            ("gpt-5.5-medium", OpenAiModelId::Gpt61SolMedium),
+            ("gpt-5.4-nano-instant", OpenAiModelId::Gpt6LunaNone),
+            ("gpt-5.4-nano-high", OpenAiModelId::Gpt6LunaHigh),
+        ] {
+            db::upsert_app_setting(&connection, super::APP_SETTING_OPENAI_MODEL, old).unwrap();
+            let (model, invalid) = super::read_saved_openai_model(&connection).unwrap();
+            assert_eq!(model, expected);
+            assert!(invalid.is_none());
+            assert_eq!(
+                db::get_app_setting(&connection, super::APP_SETTING_OPENAI_MODEL)
+                    .unwrap()
+                    .as_deref(),
+                Some(expected.storage_value())
+            );
+        }
+        db::upsert_app_setting(
+            &connection,
+            super::APP_SETTING_CALENDAR_BULK_OPENAI_MODEL,
+            "gpt-5.5-high",
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_saved_calendar_bulk_model(&connection)
+                .unwrap()
+                .0,
+            OpenAiModelId::Gpt61SolHigh
+        );
+        assert_eq!(
+            db::get_app_setting(&connection, super::APP_SETTING_CALENDAR_BULK_OPENAI_MODEL)
+                .unwrap()
+                .as_deref(),
+            Some("gpt-6.1-sol-high")
+        );
+        for old in ["gpt-4o-mini-transcribe", "whisper-1"] {
+            db::upsert_app_setting(&connection, super::APP_SETTING_TRANSCRIPTION_MODEL, old)
+                .unwrap();
+            assert_eq!(
+                super::read_saved_transcription_model(&connection)
+                    .unwrap()
+                    .0,
+                TranscriptionModelId::GptTranscribe
+            );
+            assert_eq!(
+                db::get_app_setting(&connection, super::APP_SETTING_TRANSCRIPTION_MODEL)
+                    .unwrap()
+                    .as_deref(),
+                Some("gpt-transcribe")
+            );
+        }
+        // Migration applies only to active settings; history parsing preserves original identities.
+        assert_eq!(
+            OpenAiModelId::from_api_name("gpt-5.5-high"),
+            Some(OpenAiModelId::Gpt55High)
+        );
+        assert_eq!(
+            TranscriptionModelId::from_api_name("whisper-1"),
+            Some(TranscriptionModelId::Whisper1)
+        );
+    }
+
+    #[test]
+    fn stale_requested_model_ids_use_their_current_replacement() {
+        assert_eq!(
+            resolve_requested_openai_model(
+                Some(OpenAiModelId::Gpt55Instant),
+                OpenAiModelId::Gpt6LunaNone
+            ),
+            OpenAiModelId::Gpt61SolLow
+        );
+        assert_eq!(
+            resolve_requested_openai_model(
+                Some(OpenAiModelId::Gpt54NanoHigh),
+                OpenAiModelId::Gpt61SolLow
+            ),
+            OpenAiModelId::Gpt6LunaHigh
+        );
+    }
+
+    #[test]
+    fn saved_calendar_bulk_model_defaults_to_terra_when_missing_or_invalid() {
         let (missing_model, missing_invalid_value) = resolve_saved_calendar_bulk_model_value(None);
-        assert_eq!(missing_model, OpenAiModelId::Gpt55Instant);
+        assert_eq!(missing_model, OpenAiModelId::Gpt61TerraMedium);
         assert!(missing_invalid_value.is_none());
 
         let (saved_model, saved_invalid_value) =
             resolve_saved_calendar_bulk_model_value(Some("gpt-5.5-medium".to_string()));
-        assert_eq!(saved_model, OpenAiModelId::Gpt55Medium);
+        assert_eq!(saved_model, OpenAiModelId::Gpt61SolMedium);
         assert!(saved_invalid_value.is_none());
 
         let (invalid_model, invalid_value) =
             resolve_saved_calendar_bulk_model_value(Some("gpt-5.4".to_string()));
-        assert_eq!(invalid_model, OpenAiModelId::Gpt55Instant);
+        assert_eq!(invalid_model, OpenAiModelId::Gpt61TerraMedium);
         assert_eq!(invalid_value.as_deref(), Some("gpt-5.4"));
     }
 
@@ -10955,26 +11072,26 @@ mod tests {
     fn requested_openai_model_override_takes_precedence() {
         assert_eq!(
             resolve_requested_openai_model(
-                Some(OpenAiModelId::Gpt55High),
-                OpenAiModelId::Gpt55Instant
+                Some(OpenAiModelId::Gpt61SolHigh),
+                OpenAiModelId::Gpt61SolLow
             ),
-            OpenAiModelId::Gpt55High
+            OpenAiModelId::Gpt61SolHigh
         );
         assert_eq!(
-            resolve_requested_openai_model(None, OpenAiModelId::Gpt55Low),
-            OpenAiModelId::Gpt55Low
+            resolve_requested_openai_model(None, OpenAiModelId::Gpt61SolLow),
+            OpenAiModelId::Gpt61SolLow
         );
     }
 
     #[test]
     fn saved_transcription_model_defaults_when_missing_or_invalid() {
         let (missing_model, missing_invalid_value) = resolve_saved_transcription_model_value(None);
-        assert_eq!(missing_model, TranscriptionModelId::Gpt4oMiniTranscribe);
+        assert_eq!(missing_model, TranscriptionModelId::GptTranscribe);
         assert!(missing_invalid_value.is_none());
 
         let (invalid_model, invalid_value) =
             resolve_saved_transcription_model_value(Some("legacy-transcribe".to_string()));
-        assert_eq!(invalid_model, TranscriptionModelId::Gpt4oMiniTranscribe);
+        assert_eq!(invalid_model, TranscriptionModelId::GptTranscribe);
         assert_eq!(invalid_value.as_deref(), Some("legacy-transcribe"));
     }
 

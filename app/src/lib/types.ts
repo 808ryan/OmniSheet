@@ -1,5 +1,19 @@
 export type WarningType = 'low_confidence' | 'overlap' | 'unmatched'
 export type OpenAiModelId =
+  | 'gpt-6.1-sol-low'
+  | 'gpt-6.1-sol-medium'
+  | 'gpt-6.1-sol-high'
+  | 'gpt-6.1-terra-none'
+  | 'gpt-6.1-terra-low'
+  | 'gpt-6.1-terra-medium'
+  | 'gpt-6.1-terra-high'
+  | 'gpt-6-luna-none'
+  | 'gpt-6-luna-low'
+  | 'gpt-6-luna-medium'
+  | 'gpt-6-luna-high'
+  | 'gpt-6-astra-low'
+  | 'gpt-6-astra-medium'
+  | 'gpt-6-astra-high'
   | 'gpt-5.5-instant'
   | 'gpt-5.5-low'
   | 'gpt-5.5-medium'
@@ -8,11 +22,12 @@ export type OpenAiModelId =
   | 'gpt-5.4-nano-low'
   | 'gpt-5.4-nano-medium'
   | 'gpt-5.4-nano-high'
-export type TranscriptionModelId = 'gpt-4o-mini-transcribe' | 'whisper-1'
+export type TranscriptionModelId = 'gpt-transcribe' | 'gpt-4o-mini-transcribe' | 'whisper-1'
 export type CaptureSourceId = 'text' | 'voice' | 'calendar'
 export type TimelineWeekStartDay = 'saturday' | 'sunday' | 'monday'
 
 export interface OpenAiModelOption {
+  group: string
   id: OpenAiModelId
   label: string
 }
@@ -77,6 +92,17 @@ export interface ActivityUpsertInput {
 
 export interface IdResult {
   id: string
+}
+
+export interface CodesImportResult {
+  addedEngagements: number
+  addedActivities: number
+  skippedEngagements: number
+}
+
+export interface CodesExportResult {
+  exportedEngagements: number
+  exportedActivities: number
 }
 
 export interface DateInput {

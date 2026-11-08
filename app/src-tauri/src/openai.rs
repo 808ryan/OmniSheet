@@ -452,10 +452,12 @@ fn build_transcription_form(
         .mime_str(mime_type)
         .map_err(|error| AppError::InvalidInput(format!("unsupported audio mime type: {error}")))?;
 
-    Ok(Form::new()
-        .text("model", model.api_name().to_string())
-        .text("response_format", "json".to_string())
-        .part("file", file_part))
+    // GPT-Transcribe returns JSON by default. Older formats are kept for historical support.
+    let mut form = Form::new().text("model", model.api_name().to_string());
+    if model != TranscriptionModelId::GptTranscribe {
+        form = form.text("response_format", "json");
+    }
+    Ok(form.part("file", file_part))
 }
 
 fn extract_responses_output_text(response_json: &Value) -> Option<String> {
@@ -1312,7 +1314,7 @@ mod tests {
     #[test]
     fn request_body_uses_resolved_model_id() {
         let request_body = build_request_body(
-            OpenAiModelId::Gpt55Instant,
+            OpenAiModelId::Gpt61SolLow,
             "worked on controls testing",
             "2026-03-15T18:00:00Z",
             "2026-03-15",
@@ -1330,14 +1332,14 @@ mod tests {
                 .get("model")
                 .and_then(Value::as_str)
                 .expect("model should be serialized"),
-            "gpt-5.5"
+            "gpt-6.1-sol"
         );
         assert_eq!(
             request_body
                 .get("reasoning_effort")
                 .and_then(Value::as_str)
                 .expect("reasoning effort should be serialized"),
-            "none"
+            "low"
         );
         let user_prompt = request_body
             .get("messages")
@@ -1352,7 +1354,7 @@ mod tests {
     #[test]
     fn request_body_sets_configured_reasoning_effort() {
         let request_body = build_request_body(
-            OpenAiModelId::Gpt54NanoHigh,
+            OpenAiModelId::Gpt6LunaHigh,
             "worked on controls testing",
             "2026-03-15T18:00:00Z",
             "2026-03-15",
@@ -1370,7 +1372,7 @@ mod tests {
                 .get("model")
                 .and_then(Value::as_str)
                 .expect("model should be serialized"),
-            "gpt-5.4-nano"
+            "gpt-6-luna"
         );
         assert_eq!(
             request_body
@@ -1384,7 +1386,7 @@ mod tests {
     #[test]
     fn calendar_request_body_sets_configured_reasoning_effort() {
         let request_body = build_calendar_extraction_request_body(
-            OpenAiModelId::Gpt54NanoLow,
+            OpenAiModelId::Gpt61TerraMedium,
             "abc123",
             "image/png",
             "2026-03-15T18:00:00Z",
@@ -1403,7 +1405,7 @@ mod tests {
                 .get("model")
                 .and_then(Value::as_str)
                 .expect("model should be serialized"),
-            "gpt-5.4-nano"
+            "gpt-6.1-terra"
         );
         assert_eq!(
             request_body
@@ -1411,7 +1413,7 @@ mod tests {
                 .and_then(|reasoning| reasoning.get("effort"))
                 .and_then(Value::as_str)
                 .expect("reasoning effort should be serialized"),
-            "low"
+            "medium"
         );
     }
 

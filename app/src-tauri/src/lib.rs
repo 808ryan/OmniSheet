@@ -1,3 +1,4 @@
+mod codes;
 mod commands;
 mod db;
 mod error;
@@ -27,6 +28,7 @@ pub fn run() {
     );
 
     let app = builder
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let connection = db::init_database(&app.handle())?;
             let session_id = Uuid::new_v4().to_string();
@@ -70,6 +72,8 @@ pub fn run() {
             commands::engagement_delete,
             commands::activity_upsert,
             commands::activity_delete,
+            codes::codes_import_file,
+            codes::codes_export_file,
             commands::timeline_list_for_date,
             commands::timeline_list_for_week_view,
             commands::quick_add_suggestions,

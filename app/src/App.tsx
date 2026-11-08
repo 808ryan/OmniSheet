@@ -11,6 +11,7 @@ import { createPortal, flushSync } from 'react-dom'
 import { emit, listen } from '@tauri-apps/api/event'
 
 import { ActivityCommandBar } from './ActivityCommandBar'
+import { CodeTransferSettings } from './CodeTransferSettings'
 import { PlusIcon, StopIcon, TimerIcon, TrashIcon } from './InterfaceIcons'
 import {
   activityDelete,
@@ -662,9 +663,9 @@ const MAX_CONCURRENT_SUBMISSIONS = 5
 const SYSTEM_NOTICE_AUTO_DISMISS_MS = 4000
 const LLM_SUBMISSION_STATUS_DISMISS_MS = 5000
 const CALENDAR_REVIEW_LOW_CONFIDENCE_THRESHOLD = 0.75
-const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-5.5-instant'
-const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-5.5-instant'
-const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-4o-mini-transcribe'
+const DEFAULT_OPENAI_MODEL: OpenAiModelId = 'gpt-6.1-sol-low'
+const DEFAULT_CALENDAR_BULK_MODEL: OpenAiModelId = 'gpt-6.1-terra-medium'
+const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModelId = 'gpt-transcribe'
 const LLM_ENTRY_EXAMPLE_TEXT = 'Spent an hour on project planning...'
 const MISSING_OPENAI_KEY_HINT = 'No API key is configured in settings'
 const MAX_VOICE_RECORDING_DURATION_MS = 120_000
@@ -985,6 +986,13 @@ function App() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
   const [settingsStatus, setSettingsStatus] = useState<SettingsStatus | null>(null)
+  const openAiModelGroups = useMemo(() => {
+    const options = settingsStatus?.availableOpenAiModels ?? []
+    return [...new Set(options.map((option) => option.group))].map((group) => ({
+      label: group,
+      options: options.filter((option) => option.group === group),
+    }))
+  }, [settingsStatus?.availableOpenAiModels])
   const [openAiKey, setOpenAiKey] = useState('')
   const credentialStatusTone =
     settingsStatus === null
@@ -2346,6 +2354,18 @@ function App() {
     ),
     [engagements, normalizedCodesEngagementSearch],
   )
+  const codesEngagementGroups = [
+    {
+      id: 'active',
+      label: 'Active engagements',
+      engagements: filteredCodesEngagements.filter((engagement) => engagement.isActive),
+    },
+    {
+      id: 'inactive',
+      label: 'Inactive engagements',
+      engagements: filteredCodesEngagements.filter((engagement) => !engagement.isActive),
+    },
+  ].filter((group) => group.engagements.length > 0)
   const normalizedCodesActivitySearch = codesActivitySearch.trim().toLocaleLowerCase()
   const filteredCodesActivities = useMemo(
     () => {
@@ -6845,7 +6865,7 @@ function App() {
   )
 
   const createTimelineEntryFromSelection = useCallback(
-    (engagement: Engagement, activity: Activity) => {
+    (engagement: Engagement | null, activity: Activity | null) => {
       if (!timelineCreateSelection || timelineMutationInFlightRef.current) {
         return
       }
@@ -6856,8 +6876,8 @@ function App() {
           date: selection.date,
           startMinute: selection.startMinute,
           endMinute: selection.endMinute,
-          engagementId: engagement.id,
-          activityId: activity.id,
+          engagementId: engagement?.id ?? null,
+          activityId: activity?.id ?? null,
           description: '',
         })
         setTimelineCreateSelection(null)
@@ -6877,7 +6897,7 @@ function App() {
             scrollDayTimelineToEntry(createdEntry)
           }
         }
-        setSuccessMessage(`Added ${formatEntityDisplayLabel(activity.name, activity.code)}.`)
+        setSuccessMessage(`Added ${formatEntityDisplayLabel(activity?.name, activity?.code)}.`)
       })
     },
     [
@@ -11444,82 +11464,97 @@ function App() {
                   ) : filteredCodesEngagements.length === 0 ? (
                     <p className="code-list-empty">No matching engagements.</p>
                   ) : (
-                    filteredCodesEngagements.map((engagement) => {
-                      const engagementColor =
-                        normalizeColorHexInput(engagement.colorHex) ?? TIMELINE_NEUTRAL_COLOR
-                      const isSelected = selectedCodesEngagement?.id === engagement.id
-
-                      return (
-                        <div
-                          key={engagement.id}
-                          className={`codes-rail-item ${isSelected ? 'active' : ''} ${
-                            engagement.isActive ? '' : 'is-inactive'
-                          }`}
-                          style={{ '--codes-engagement-color': engagementColor } as CSSProperties}
-                        >
-                          <button
-                            type="button"
-                            className="codes-rail-select"
-                            onClick={() => {
-                              setCodesSelectedEngagementId(engagement.id)
-                              setCodesCreateContextEngagementId(engagement.id)
-                              setCodesActivitySearch('')
-                              closeCodeEditor()
-                            }}
-                          >
-                            <span className="codes-rail-copy">
-                              <span className="codes-rail-title">
-                                {engagement.code ? (
-                                  <span className="code-item-badge">{engagement.code}</span>
-                                ) : null}
-                                <span>{engagement.name}</span>
-                                {engagement.isActive ? null : (
-                                  <span className="codes-state-pill">Inactive</span>
-                                )}
-                              </span>
-                              {engagement.describeWhenToUse?.trim() ? (
-                                <small>{engagement.describeWhenToUse}</small>
-                              ) : null}
+                    codesEngagementGroups.map((group) => (
+                      <section
+                        key={group.id}
+                        className={`codes-rail-group is-${group.id}`}
+                        aria-label={group.label}
+                      >
+                        {group.id === 'inactive' ? (
+                          <div className="codes-rail-group-heading">
+                            <h3>{group.label}</h3>
+                            <span className="codes-rail-group-count" aria-label={`${group.engagements.length} inactive engagements`}>
+                              {group.engagements.length}
                             </span>
-                          </button>
-                          <div className="codes-rail-actions">
-                            <button
-                              type="button"
-                              className="icon-action-button"
-                              aria-label={`Edit engagement ${formatEntityDisplayLabel(
-                                engagement.name,
-                                engagement.code,
-                              )}`}
-                              title={`Edit engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
-                              onClick={() => {
-                                setCodesSelectedEngagementId(engagement.id)
-                                setCodesCreateContextEngagementId(engagement.id)
-                                setCodesActivitySearch('')
-                                onEditEngagement(engagement)
-                                setCodesDetailMode('edit-engagement')
-                              }}
-                            >
-                              <img src={editIcon} alt="" aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="icon-action-button is-danger"
-                              aria-label={`Delete engagement ${formatEntityDisplayLabel(
-                                engagement.name,
-                                engagement.code,
-                              )}`}
-                              title={`Delete engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
-                              onClick={() => {
-                                setCodesDetailMode('activities')
-                                onDeleteEngagement(engagement.id)
-                              }}
-                            >
-                              <img src={deleteIcon} alt="" aria-hidden="true" />
-                            </button>
                           </div>
-                        </div>
-                      )
-                    })
+                        ) : null}
+                        {group.engagements.map((engagement) => {
+                          const engagementColor = engagement.isActive
+                            ? normalizeColorHexInput(engagement.colorHex) ?? TIMELINE_NEUTRAL_COLOR
+                            : 'var(--ink-soft)'
+                          const isSelected = selectedCodesEngagement?.id === engagement.id
+
+                          return (
+                            <div
+                              key={engagement.id}
+                              className={`codes-rail-item ${isSelected ? 'active' : ''} ${
+                                engagement.isActive ? '' : 'is-inactive'
+                              }`}
+                              style={{ '--codes-engagement-color': engagementColor } as CSSProperties}
+                            >
+                              <button
+                                type="button"
+                                className="codes-rail-select"
+                                aria-pressed={isSelected}
+                                onClick={() => {
+                                  setCodesSelectedEngagementId(engagement.id)
+                                  setCodesCreateContextEngagementId(engagement.id)
+                                  setCodesActivitySearch('')
+                                  closeCodeEditor()
+                                }}
+                              >
+                                <span className="codes-rail-copy">
+                                  <span className="codes-rail-title">
+                                    {engagement.code ? (
+                                      <span className="code-item-badge">{engagement.code}</span>
+                                    ) : null}
+                                    <span>{engagement.name}</span>
+                                  </span>
+                                  {engagement.describeWhenToUse?.trim() ? (
+                                    <small>{engagement.describeWhenToUse}</small>
+                                  ) : null}
+                                </span>
+                              </button>
+                              <div className="codes-rail-actions">
+                                <button
+                                  type="button"
+                                  className="icon-action-button"
+                                  aria-label={`Edit engagement ${formatEntityDisplayLabel(
+                                    engagement.name,
+                                    engagement.code,
+                                  )}`}
+                                  title={`Edit engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
+                                  onClick={() => {
+                                    setCodesSelectedEngagementId(engagement.id)
+                                    setCodesCreateContextEngagementId(engagement.id)
+                                    setCodesActivitySearch('')
+                                    onEditEngagement(engagement)
+                                    setCodesDetailMode('edit-engagement')
+                                  }}
+                                >
+                                  <img src={editIcon} alt="" aria-hidden="true" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="icon-action-button is-danger"
+                                  aria-label={`Delete engagement ${formatEntityDisplayLabel(
+                                    engagement.name,
+                                    engagement.code,
+                                  )}`}
+                                  title={`Delete engagement ${formatEntityDisplayLabel(engagement.name, engagement.code)}`}
+                                  onClick={() => {
+                                    setCodesDetailMode('activities')
+                                    onDeleteEngagement(engagement.id)
+                                  }}
+                                >
+                                  <img src={deleteIcon} alt="" aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </section>
+                    ))
                   )}
                 </div>
                 <button
@@ -12028,10 +12063,12 @@ function App() {
                       }
                       disabled={isBusy || settingsStatus === null}
                     >
-                      {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
+                      {openAiModelGroups.map((group) => (
+                        <optgroup key={group.label} label={group.label}>
+                          {group.options.map((model) => (
+                            <option key={model.id} value={model.id}>{model.label}</option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                     <button
@@ -12058,10 +12095,12 @@ function App() {
                       }
                       disabled={isBusy || settingsStatus === null}
                     >
-                      {(settingsStatus?.availableOpenAiModels ?? []).map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
+                      {openAiModelGroups.map((group) => (
+                        <optgroup key={group.label} label={group.label}>
+                          {group.options.map((model) => (
+                            <option key={model.id} value={model.id}>{model.label}</option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                     <button
@@ -12323,6 +12362,15 @@ function App() {
                   </div>
                 </div>
               </section>
+
+              <CodeTransferSettings
+                engagements={engagements}
+                disabled={isBusy}
+                onImported={async () => {
+                  await Promise.all([loadEngagements(), loadQuickAddSuggestions()])
+                }}
+                onViewCodes={() => onSelectView('codes')}
+              />
 
               <section className="settings-card">
                 <div className="settings-card-header">
@@ -12612,6 +12660,7 @@ function App() {
             onSubmit={(item) => {
               createTimelineEntryFromSelection(item.engagement, item.activity)
             }}
+            onSubmitUncategorized={() => createTimelineEntryFromSelection(null, null)}
           />
         </div>,
         document.body,

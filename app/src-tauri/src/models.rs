@@ -10,6 +10,35 @@ pub struct ApiKeyInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OpenAiModelId {
+    #[serde(rename = "gpt-6.1-sol-low")]
+    Gpt61SolLow,
+    #[serde(rename = "gpt-6.1-sol-medium")]
+    Gpt61SolMedium,
+    #[serde(rename = "gpt-6.1-sol-high")]
+    Gpt61SolHigh,
+    #[serde(rename = "gpt-6.1-terra-none")]
+    Gpt61TerraNone,
+    #[serde(rename = "gpt-6.1-terra-low")]
+    Gpt61TerraLow,
+    #[serde(rename = "gpt-6.1-terra-medium")]
+    Gpt61TerraMedium,
+    #[serde(rename = "gpt-6.1-terra-high")]
+    Gpt61TerraHigh,
+    #[serde(rename = "gpt-6-luna-none")]
+    Gpt6LunaNone,
+    #[serde(rename = "gpt-6-luna-low")]
+    Gpt6LunaLow,
+    #[serde(rename = "gpt-6-luna-medium")]
+    Gpt6LunaMedium,
+    #[serde(rename = "gpt-6-luna-high")]
+    Gpt6LunaHigh,
+    #[serde(rename = "gpt-6-astra-low")]
+    Gpt6AstraLow,
+    #[serde(rename = "gpt-6-astra-medium")]
+    Gpt6AstraMedium,
+    #[serde(rename = "gpt-6-astra-high")]
+    Gpt6AstraHigh,
+    // Historical IDs are retained only for provenance and saved-setting migration.
     #[serde(rename = "gpt-5.5-instant", alias = "gpt-5.5")]
     Gpt55Instant,
     #[serde(rename = "gpt-5.5-low")]
@@ -30,28 +59,63 @@ pub enum OpenAiModelId {
 
 impl Default for OpenAiModelId {
     fn default() -> Self {
-        Self::Gpt55Instant
+        Self::Gpt61SolLow
     }
 }
 
 impl OpenAiModelId {
-    pub const ALL: [Self; 8] = [
-        Self::Gpt55Instant,
-        Self::Gpt55Low,
-        Self::Gpt55Medium,
-        Self::Gpt55High,
-        Self::Gpt54NanoInstant,
-        Self::Gpt54NanoLow,
-        Self::Gpt54NanoMedium,
-        Self::Gpt54NanoHigh,
+    // Current API catalog: https://developers.openai.com/api/docs/models (verified 2026-11-07).
+    // Sol/Astra require at least low reasoning; Terra/Luna also support none.
+    pub const ALL: [Self; 14] = [
+        Self::Gpt61SolLow,
+        Self::Gpt61SolMedium,
+        Self::Gpt61SolHigh,
+        Self::Gpt61TerraNone,
+        Self::Gpt61TerraLow,
+        Self::Gpt61TerraMedium,
+        Self::Gpt61TerraHigh,
+        Self::Gpt6LunaNone,
+        Self::Gpt6LunaLow,
+        Self::Gpt6LunaMedium,
+        Self::Gpt6LunaHigh,
+        Self::Gpt6AstraLow,
+        Self::Gpt6AstraMedium,
+        Self::Gpt6AstraHigh,
     ];
 
     pub fn default_calendar_bulk_model() -> Self {
-        Self::Gpt55Instant
+        Self::Gpt61TerraMedium
+    }
+
+    pub fn current_selection(self) -> Self {
+        match self {
+            Self::Gpt55Instant | Self::Gpt55Low => Self::Gpt61SolLow,
+            Self::Gpt55Medium => Self::Gpt61SolMedium,
+            Self::Gpt55High => Self::Gpt61SolHigh,
+            Self::Gpt54NanoInstant => Self::Gpt6LunaNone,
+            Self::Gpt54NanoLow => Self::Gpt6LunaLow,
+            Self::Gpt54NanoMedium => Self::Gpt6LunaMedium,
+            Self::Gpt54NanoHigh => Self::Gpt6LunaHigh,
+            current => current,
+        }
     }
 
     pub fn api_name(self) -> &'static str {
         match self {
+            Self::Gpt61SolLow => "gpt-6.1-sol",
+            Self::Gpt61SolMedium => "gpt-6.1-sol",
+            Self::Gpt61SolHigh => "gpt-6.1-sol",
+            Self::Gpt61TerraNone => "gpt-6.1-terra",
+            Self::Gpt61TerraLow => "gpt-6.1-terra",
+            Self::Gpt61TerraMedium => "gpt-6.1-terra",
+            Self::Gpt61TerraHigh => "gpt-6.1-terra",
+            Self::Gpt6LunaNone => "gpt-6-luna",
+            Self::Gpt6LunaLow => "gpt-6-luna",
+            Self::Gpt6LunaMedium => "gpt-6-luna",
+            Self::Gpt6LunaHigh => "gpt-6-luna",
+            Self::Gpt6AstraLow => "gpt-6-astra",
+            Self::Gpt6AstraMedium => "gpt-6-astra",
+            Self::Gpt6AstraHigh => "gpt-6-astra",
             Self::Gpt55Instant | Self::Gpt55Low | Self::Gpt55Medium | Self::Gpt55High => "gpt-5.5",
             Self::Gpt54NanoInstant
             | Self::Gpt54NanoLow
@@ -62,6 +126,20 @@ impl OpenAiModelId {
 
     pub fn storage_value(self) -> &'static str {
         match self {
+            Self::Gpt61SolLow => "gpt-6.1-sol-low",
+            Self::Gpt61SolMedium => "gpt-6.1-sol-medium",
+            Self::Gpt61SolHigh => "gpt-6.1-sol-high",
+            Self::Gpt61TerraNone => "gpt-6.1-terra-none",
+            Self::Gpt61TerraLow => "gpt-6.1-terra-low",
+            Self::Gpt61TerraMedium => "gpt-6.1-terra-medium",
+            Self::Gpt61TerraHigh => "gpt-6.1-terra-high",
+            Self::Gpt6LunaNone => "gpt-6-luna-none",
+            Self::Gpt6LunaLow => "gpt-6-luna-low",
+            Self::Gpt6LunaMedium => "gpt-6-luna-medium",
+            Self::Gpt6LunaHigh => "gpt-6-luna-high",
+            Self::Gpt6AstraLow => "gpt-6-astra-low",
+            Self::Gpt6AstraMedium => "gpt-6-astra-medium",
+            Self::Gpt6AstraHigh => "gpt-6-astra-high",
             Self::Gpt55Instant => "gpt-5.5-instant",
             Self::Gpt55Low => "gpt-5.5-low",
             Self::Gpt55Medium => "gpt-5.5-medium",
@@ -75,6 +153,20 @@ impl OpenAiModelId {
 
     pub fn display_label(self) -> &'static str {
         match self {
+            Self::Gpt61SolLow => "GPT-6.1 Sol — Low",
+            Self::Gpt61SolMedium => "GPT-6.1 Sol — Medium",
+            Self::Gpt61SolHigh => "GPT-6.1 Sol — High",
+            Self::Gpt61TerraNone => "GPT-6.1 Terra — No reasoning",
+            Self::Gpt61TerraLow => "GPT-6.1 Terra — Low",
+            Self::Gpt61TerraMedium => "GPT-6.1 Terra — Medium",
+            Self::Gpt61TerraHigh => "GPT-6.1 Terra — High",
+            Self::Gpt6LunaNone => "GPT-6 Luna — No reasoning",
+            Self::Gpt6LunaLow => "GPT-6 Luna — Low",
+            Self::Gpt6LunaMedium => "GPT-6 Luna — Medium",
+            Self::Gpt6LunaHigh => "GPT-6 Luna — High",
+            Self::Gpt6AstraLow => "GPT-6 Astra — Low",
+            Self::Gpt6AstraMedium => "GPT-6 Astra — Medium",
+            Self::Gpt6AstraHigh => "GPT-6 Astra — High",
             Self::Gpt55Instant => "GPT-5.5 Instant",
             Self::Gpt55Low => "GPT-5.5 Low",
             Self::Gpt55Medium => "GPT-5.5 Medium",
@@ -88,6 +180,20 @@ impl OpenAiModelId {
 
     pub fn reasoning_effort(self) -> Option<&'static str> {
         match self {
+            Self::Gpt61SolLow => Some("low"),
+            Self::Gpt61SolMedium => Some("medium"),
+            Self::Gpt61SolHigh => Some("high"),
+            Self::Gpt61TerraNone => Some("none"),
+            Self::Gpt61TerraLow => Some("low"),
+            Self::Gpt61TerraMedium => Some("medium"),
+            Self::Gpt61TerraHigh => Some("high"),
+            Self::Gpt6LunaNone => Some("none"),
+            Self::Gpt6LunaLow => Some("low"),
+            Self::Gpt6LunaMedium => Some("medium"),
+            Self::Gpt6LunaHigh => Some("high"),
+            Self::Gpt6AstraLow => Some("low"),
+            Self::Gpt6AstraMedium => Some("medium"),
+            Self::Gpt6AstraHigh => Some("high"),
             Self::Gpt55Instant | Self::Gpt54NanoInstant => Some("none"),
             Self::Gpt55Low | Self::Gpt54NanoLow => Some("low"),
             Self::Gpt55Medium | Self::Gpt54NanoMedium => Some("medium"),
@@ -97,6 +203,24 @@ impl OpenAiModelId {
 
     pub fn from_api_name(value: &str) -> Option<Self> {
         match value.trim() {
+            "gpt-6.1-sol-low" => Some(Self::Gpt61SolLow),
+            "gpt-6.1-sol-medium" => Some(Self::Gpt61SolMedium),
+            "gpt-6.1-sol-high" => Some(Self::Gpt61SolHigh),
+            "gpt-6.1-terra-none" => Some(Self::Gpt61TerraNone),
+            "gpt-6.1-terra-low" => Some(Self::Gpt61TerraLow),
+            "gpt-6.1-terra-medium" => Some(Self::Gpt61TerraMedium),
+            "gpt-6.1-terra-high" => Some(Self::Gpt61TerraHigh),
+            "gpt-6-luna-none" => Some(Self::Gpt6LunaNone),
+            "gpt-6-luna-low" => Some(Self::Gpt6LunaLow),
+            "gpt-6-luna-medium" => Some(Self::Gpt6LunaMedium),
+            "gpt-6-luna-high" => Some(Self::Gpt6LunaHigh),
+            "gpt-6-astra-low" => Some(Self::Gpt6AstraLow),
+            "gpt-6-astra-medium" => Some(Self::Gpt6AstraMedium),
+            "gpt-6-astra-high" => Some(Self::Gpt6AstraHigh),
+            "gpt-6.1-sol" => Some(Self::Gpt61SolMedium),
+            "gpt-6.1-terra" => Some(Self::Gpt61TerraMedium),
+            "gpt-6-luna" => Some(Self::Gpt6LunaMedium),
+            "gpt-6-astra" => Some(Self::Gpt6AstraMedium),
             "gpt-5.5" | "gpt-5.5-instant" => Some(Self::Gpt55Instant),
             "gpt-5.5-low" => Some(Self::Gpt55Low),
             "gpt-5.5-medium" => Some(Self::Gpt55Medium),
@@ -114,6 +238,14 @@ impl OpenAiModelId {
             .into_iter()
             .map(|model| OpenAiModelOption {
                 id: model,
+                group: match model.api_name() {
+                    "gpt-6.1-sol" => "GPT-6.1 Sol",
+                    "gpt-6.1-terra" => "GPT-6.1 Terra",
+                    "gpt-6-luna" => "GPT-6 Luna",
+                    "gpt-6-astra" => "GPT-6 Astra",
+                    _ => unreachable!("only current models are offered in settings"),
+                }
+                .to_string(),
                 label: model.display_label().to_string(),
             })
             .collect()
@@ -138,6 +270,8 @@ pub struct TimelineTotalBreakdown {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TranscriptionModelId {
+    #[serde(rename = "gpt-transcribe")]
+    GptTranscribe,
     #[serde(rename = "gpt-4o-mini-transcribe")]
     Gpt4oMiniTranscribe,
     #[serde(rename = "whisper-1")]
@@ -146,15 +280,20 @@ pub enum TranscriptionModelId {
 
 impl Default for TranscriptionModelId {
     fn default() -> Self {
-        Self::Gpt4oMiniTranscribe
+        Self::GptTranscribe
     }
 }
 
 impl TranscriptionModelId {
-    pub const ALL: [Self; 2] = [Self::Gpt4oMiniTranscribe, Self::Whisper1];
+    pub const ALL: [Self; 1] = [Self::GptTranscribe];
+
+    pub fn current_selection(self) -> Self {
+        Self::GptTranscribe
+    }
 
     pub fn api_name(self) -> &'static str {
         match self {
+            Self::GptTranscribe => "gpt-transcribe",
             Self::Gpt4oMiniTranscribe => "gpt-4o-mini-transcribe",
             Self::Whisper1 => "whisper-1",
         }
@@ -162,6 +301,7 @@ impl TranscriptionModelId {
 
     pub fn display_label(self) -> &'static str {
         match self {
+            Self::GptTranscribe => "GPT-Transcribe",
             Self::Gpt4oMiniTranscribe => "GPT-4o Mini Transcribe",
             Self::Whisper1 => "Whisper",
         }
@@ -169,6 +309,7 @@ impl TranscriptionModelId {
 
     pub fn from_api_name(value: &str) -> Option<Self> {
         match value.trim() {
+            "gpt-transcribe" => Some(Self::GptTranscribe),
             "gpt-4o-mini-transcribe" => Some(Self::Gpt4oMiniTranscribe),
             "whisper-1" => Some(Self::Whisper1),
             _ => None,
@@ -230,6 +371,7 @@ pub enum CaptureSourceId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAiModelOption {
+    pub group: String,
     pub id: OpenAiModelId,
     pub label: String,
 }
@@ -1200,15 +1342,15 @@ mod tests {
     #[test]
     fn openai_model_default_and_labels_match_expected_values() {
         let default_model = OpenAiModelId::default();
-
-        assert_eq!(default_model, OpenAiModelId::Gpt55Instant);
-        assert_eq!(default_model.api_name(), "gpt-5.5");
-        assert_eq!(default_model.storage_value(), "gpt-5.5-instant");
-        assert_eq!(default_model.display_label(), "GPT-5.5 Instant");
+        assert_eq!(default_model, OpenAiModelId::Gpt61SolLow);
+        assert_eq!(default_model.api_name(), "gpt-6.1-sol");
+        assert_eq!(default_model.storage_value(), "gpt-6.1-sol-low");
+        assert_eq!(default_model.display_label(), "GPT-6.1 Sol — Low");
         assert_eq!(
             OpenAiModelId::default_calendar_bulk_model(),
-            OpenAiModelId::Gpt55Instant
+            OpenAiModelId::Gpt61TerraMedium
         );
+        // Historical labels retain their original model and reasoning effort.
         assert_eq!(OpenAiModelId::Gpt55Instant.api_name(), "gpt-5.5");
         assert_eq!(
             OpenAiModelId::Gpt55Instant.display_label(),
@@ -1325,39 +1467,35 @@ mod tests {
         assert_eq!(OpenAiModelId::from_api_name("gpt-4.1-nano"), None);
 
         let options = OpenAiModelId::options();
+        assert_eq!(options.len(), 14);
         assert!(options
             .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt55Instant));
-        assert!(options
-            .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt55Low));
-        assert!(options
-            .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt55Medium));
-        assert!(options
-            .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt55High));
-        assert!(options
-            .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt54NanoInstant));
-        assert!(options
-            .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt54NanoLow));
-        assert!(options
-            .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt54NanoMedium));
-        assert!(options
-            .iter()
-            .any(|option| option.id == OpenAiModelId::Gpt54NanoHigh));
+            .all(|option| option.id.current_selection() == option.id));
+        assert!(options.iter().all(|option| !option.label.contains("GPT-5")));
+        for model in OpenAiModelId::ALL {
+            let serialized = serde_json::to_string(&model).unwrap();
+            assert_eq!(
+                serde_json::from_str::<OpenAiModelId>(&serialized).unwrap(),
+                model
+            );
+            assert_eq!(
+                OpenAiModelId::from_api_name(model.storage_value()),
+                Some(model)
+            );
+            if matches!(model.api_name(), "gpt-6.1-sol" | "gpt-6-astra") {
+                assert_ne!(model.reasoning_effort(), Some("none"));
+            }
+        }
     }
 
     #[test]
     fn transcription_model_default_and_labels_match_expected_values() {
         let default_model = TranscriptionModelId::default();
 
-        assert_eq!(default_model, TranscriptionModelId::Gpt4oMiniTranscribe);
-        assert_eq!(default_model.api_name(), "gpt-4o-mini-transcribe");
-        assert_eq!(default_model.display_label(), "GPT-4o Mini Transcribe");
+        assert_eq!(default_model, TranscriptionModelId::GptTranscribe);
+        assert_eq!(default_model.api_name(), "gpt-transcribe");
+        assert_eq!(default_model.display_label(), "GPT-Transcribe");
+        assert_eq!(TranscriptionModelId::options().len(), 1);
         assert_eq!(TranscriptionModelId::Whisper1.display_label(), "Whisper");
     }
 
@@ -1372,6 +1510,16 @@ mod tests {
 
     #[test]
     fn transcription_model_serialization_round_trips_supported_ids() {
+        let current = serde_json::to_string(&TranscriptionModelId::GptTranscribe).unwrap();
+        assert_eq!(current, "\"gpt-transcribe\"");
+        assert_eq!(
+            serde_json::from_str::<TranscriptionModelId>(&current).unwrap(),
+            TranscriptionModelId::GptTranscribe
+        );
+        assert_eq!(
+            TranscriptionModelId::from_api_name("gpt-transcribe"),
+            Some(TranscriptionModelId::GptTranscribe)
+        );
         let serialized = serde_json::to_string(&TranscriptionModelId::Whisper1)
             .expect("model serialization should work");
         assert_eq!(serialized, "\"whisper-1\"");

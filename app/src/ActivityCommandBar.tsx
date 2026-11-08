@@ -38,6 +38,7 @@ interface ActivityCommandBarProps {
   resultsPresentation?: 'popover' | 'inline'
   actionIcon?: 'plus'
   onSubmit: (activity: QuickEntryActivityView, durationMinutes: number) => void | Promise<void>
+  onSubmitUncategorized?: (durationMinutes: number) => void | Promise<void>
   onCancel?: () => void
   onOpenChange?: (isOpen: boolean) => void
   resultDragState?: QuickEntryDragState | null
@@ -75,6 +76,7 @@ export function ActivityCommandBar({
   resultsPresentation = 'popover',
   actionIcon,
   onSubmit,
+  onSubmitUncategorized,
   onCancel,
   onOpenChange,
   resultDragState,
@@ -95,6 +97,7 @@ export function ActivityCommandBar({
     const sourceActivities = hasQuery ? activities : (defaultActivities ?? activities)
     return rankActivityCommandResults(sourceActivities, query).slice(0, Math.max(1, resultLimit))
   }, [activities, defaultActivities, hasQuery, query, resultLimit])
+  const showUncategorized = hasQuery && results.length === 0 && Boolean(onSubmitUncategorized)
   const resolvedActiveIndex = Math.min(activeIndex, Math.max(0, results.length - 1))
   const shouldShowResults = alwaysShowResults || isOpen
 
@@ -116,6 +119,18 @@ export function ActivityCommandBar({
 
   const selectedDurationMinutes = fixedDurationMinutes ?? durationMinutes
 
+  const submitUncategorized = () => {
+    if (disabled || !onSubmitUncategorized) {
+      return
+    }
+
+    void onSubmitUncategorized(selectedDurationMinutes)
+    if (clearAfterSubmit) {
+      setQuery('')
+      setActiveIndex(0)
+    }
+  }
+
   const submitActivity = (activity: QuickEntryActivityView | undefined) => {
     if (!activity || disabled) {
       return
@@ -130,6 +145,10 @@ export function ActivityCommandBar({
 
   const onFormSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (showUncategorized) {
+      submitUncategorized()
+      return
+    }
     submitActivity(results[resolvedActiveIndex] ?? results[0])
   }
 
@@ -194,7 +213,9 @@ export function ActivityCommandBar({
             aria-expanded={shouldShowResults}
             aria-controls={listboxId}
             aria-activedescendant={
-              isOpen && activeResult ? `${listboxId}-${activeResult.activity.id}` : undefined
+              isOpen && showUncategorized
+                ? `${listboxId}-uncategorized`
+                : isOpen && activeResult ? `${listboxId}-${activeResult.activity.id}` : undefined
             }
             value={query}
             placeholder={placeholder}
@@ -231,7 +252,32 @@ export function ActivityCommandBar({
 
       {shouldShowResults ? (
         <div className="activity-command-results" id={listboxId} role="listbox">
-          {results.length === 0 ? (
+          {showUncategorized ? (
+            <button
+              id={`${listboxId}-uncategorized`}
+              type="button"
+              role="option"
+              aria-selected={isOpen}
+              aria-label={`${actionLabel} Uncategorized`}
+              className={`activity-command-result ${isOpen ? 'is-active' : ''}`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={submitUncategorized}
+              disabled={disabled}
+            >
+              <span className="activity-command-result-accent" aria-hidden="true" />
+              <span className="activity-command-result-copy">
+                <strong>Uncategorized</strong>
+              </span>
+              <span
+                className={`activity-command-result-action ${actionIcon ? 'is-icon' : ''}`}
+                aria-hidden="true"
+              >
+                {actionIcon === 'plus'
+                  ? <PlusIcon className="activity-command-result-action-icon" />
+                  : actionLabel}
+              </span>
+            </button>
+          ) : results.length === 0 ? (
             <p className="activity-command-empty">
               {!hasQuery && defaultEmptyMessage ? defaultEmptyMessage : emptyMessage}
             </p>

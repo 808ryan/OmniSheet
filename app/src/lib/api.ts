@@ -9,6 +9,8 @@ import type {
   CalendarExtractResult,
   CalendarImportInput,
   CalendarImportResult,
+  CodesImportResult,
+  CodesExportResult,
   DateInput,
   DiagnosticsBundle,
   DiagnosticsEvent,
@@ -275,6 +277,14 @@ export function reportingStateSet(input: ReportingState): Promise<ReportingState
 
 export function engagementList(): Promise<Engagement[]> {
   return invokeCommand<Engagement[]>('engagement_list')
+}
+
+export function codesImportFile(): Promise<CodesImportResult | null> {
+  return invokeCommand<CodesImportResult | null>('codes_import_file')
+}
+
+export function codesExportFile(engagementIds: string[]): Promise<CodesExportResult | null> {
+  return invokeCommand<CodesExportResult | null>('codes_export_file', { input: { engagementIds } })
 }
 
 export function engagementUpsert(input: EngagementUpsertInput): Promise<IdResult> {
