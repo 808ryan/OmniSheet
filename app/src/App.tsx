@@ -10591,7 +10591,7 @@ function App() {
                 resultsMaterial="opaque"
                 resultsPresentation="inline"
                 resultLimit={activityCommandItems.length}
-                showDuration={!isTimerSelectionMode}
+                showDuration={false}
                 contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
                 onCancel={() => setIsTimerSelectionMode(false)}
                 resultDragState={isTimerSelectionMode ? null : quickBlockDragState}
