@@ -10591,7 +10591,7 @@ function App() {
                 resultsMaterial="opaque"
                 resultsPresentation="inline"
                 resultLimit={activityCommandItems.length}
-                showDuration={!isTimerSelectionMode}
+                showDuration={false}
                 contextLabel={isTimerSelectionMode ? 'Starting now — choose what you are working on' : undefined}
                 onCancel={() => setIsTimerSelectionMode(false)}
                 resultDragState={isTimerSelectionMode ? null : quickBlockDragState}
@@ -12655,7 +12655,7 @@ function App() {
             showDuration={false}
             contextLabel="Type a few characters, then press Enter"
             clearAfterSubmit={false}
-            resultLimit={6}
+            resultLimit={activityCommandItems.length}
             onCancel={() => setTimelineCreateSelection(null)}
             onSubmit={(item) => {
               createTimelineEntryFromSelection(item.engagement, item.activity)
