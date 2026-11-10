@@ -12655,7 +12655,7 @@ function App() {
             showDuration={false}
             contextLabel="Type a few characters, then press Enter"
             clearAfterSubmit={false}
-            resultLimit={6}
+            resultLimit={activityCommandItems.length}
             onCancel={() => setTimelineCreateSelection(null)}
             onSubmit={(item) => {
               createTimelineEntryFromSelection(item.engagement, item.activity)
