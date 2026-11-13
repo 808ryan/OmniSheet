@@ -15,6 +15,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::{Engagement, EngagementType};
 use crate::state::AppState;
 
+// Preserve interoperability with code files from earlier versions.
 const FORMAT: &str = "omnisheet.codes";
 const VERSION: u32 = 1;
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
@@ -106,11 +107,11 @@ fn invalid(message: impl Into<String>) -> AppError {
 
 fn validate_catalog(catalog: &mut CodesFile) -> AppResult<()> {
     if catalog.format != FORMAT {
-        return Err(invalid("Choose an OmniSheet engagement codes JSON file."));
+        return Err(invalid("Choose an WhiteRabbit engagement codes JSON file."));
     }
     if catalog.version != VERSION {
         return Err(invalid(
-            "This code file uses an unsupported version. Update OmniSheet or export it again.",
+            "This code file uses an unsupported version. Update WhiteRabbit or export it again.",
         ));
     }
     if chrono::DateTime::parse_from_rfc3339(&catalog.exported_at).is_err() {
@@ -197,7 +198,7 @@ fn parse_catalog(bytes: &[u8]) -> AppResult<CodesFile> {
     }
     // Do not echo file contents or field values into UI errors or diagnostic logs.
     let mut catalog: CodesFile = serde_json::from_slice(bytes).map_err(|error| {
-        invalid(format!("Invalid OmniSheet code file at line {}, column {}. Use a JSON file exported by OmniSheet.", error.line(), error.column()))
+        invalid(format!("Invalid WhiteRabbit code file at line {}, column {}. Use a JSON file exported by WhiteRabbit.", error.line(), error.column()))
     })?;
     validate_catalog(&mut catalog)?;
     Ok(catalog)
@@ -316,7 +317,7 @@ pub fn codes_import_file(
         .file()
         .set_parent(&window)
         .set_title("Import engagement codes")
-        .add_filter("OmniSheet codes", &["json"])
+        .add_filter("WhiteRabbit codes", &["json"])
         .blocking_pick_file()
     else {
         return Ok(None);
@@ -365,9 +366,9 @@ pub fn codes_export_file(
         .file()
         .set_parent(&window)
         .set_title("Export engagement codes")
-        .add_filter("OmniSheet codes", &["json"])
+        .add_filter("WhiteRabbit codes", &["json"])
         .set_file_name(format!(
-            "OmniSheet-codes-{}.json",
+            "WhiteRabbit-codes-{}.json",
             Utc::now().format("%Y-%m-%d")
         ))
         .blocking_save_file()

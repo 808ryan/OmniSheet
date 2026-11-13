@@ -5336,7 +5336,7 @@ pub fn summary_export_weekly_excel(
     let week_end_date = summary.week_end_date.clone();
     let downloads_dir = resolve_downloads_dir(&app)?;
     let base_name = format!(
-        "OmniSheet_Weekly_Summary_{}_to_{}",
+        "WhiteRabbit_Weekly_Summary_{}_to_{}",
         summary.week_start_date, week_end_date
     );
     let file_path = choose_export_file_path(&downloads_dir, &base_name);
@@ -7975,7 +7975,7 @@ pub fn diagnostics_copy_bundle(state: State<'_, AppState>) -> Result<Diagnostics
     let key_status = read_key_status(&state, open_ai_key_configured);
 
     let mut lines = Vec::<String>::new();
-    lines.push("# OmniSheet Diagnostics Bundle".to_string());
+    lines.push("# WhiteRabbit Diagnostics Bundle".to_string());
     lines.push(format!("generatedAt: {}", Local::now().to_rfc3339()));
     lines.push(format!("appVersion: {}", state.app_version));
     lines.push(format!("sessionId: {}", state.session_id));

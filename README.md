@@ -1,10 +1,12 @@
-# OmniSheet
+# WhiteRabbit
 
-OmniSheet helps you track time across projects and activity codes and put together your weekly timesheet. Use a timer, enter hours yourself, or let AI turn a description of your work into time entries. Built-in reports let you review the week and export your timesheet to Excel.
+WhiteRabbit helps you track time across projects and activity codes and put together your weekly timesheet. Use a timer, enter hours yourself, or let AI turn a description of your work into time entries. Built-in reports let you review the week and export your timesheet to Excel.
 
-**[Download for macOS](https://github.com/808ryan/OmniSheet/releases/latest/download/OmniSheet-macOS.dmg)** — Apple Silicon and Intel. Open the `.dmg` and drag OmniSheet into Applications.
+**[Download for macOS](https://github.com/808ryan/OmniSheet/releases/latest/download/OmniSheet-macOS.dmg)** for Apple Silicon and Intel. Open the `.dmg` and drag the app into Applications.
 
-[Release notes](https://github.com/808ryan/OmniSheet/releases/latest)
+[Windows downloads and release notes](https://github.com/808ryan/OmniSheet/releases/latest)
+
+If you’re upgrading from OmniSheet, quit it before opening WhiteRabbit. WhiteRabbit uses your existing entries, settings, and saved API key. If you uninstall OmniSheet on Windows, leave the option to delete app data unchecked.
 
 ## Logging time
 

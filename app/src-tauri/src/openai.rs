@@ -28,7 +28,7 @@ pub struct LlmAttemptTelemetry {
 
 fn build_system_prompt() -> &'static str {
     r#"
-You are OmniSheet, a timesheet interpretation assistant.
+You are WhiteRabbit, a timesheet interpretation assistant.
 Return strict JSON with this shape:
 {
   "entries": [
@@ -255,7 +255,7 @@ fn build_request_body(
 
 fn build_calendar_extraction_system_prompt() -> &'static str {
     r#"
-You are OmniSheet's calendar screenshot extraction assistant.
+You are WhiteRabbit's calendar screenshot extraction assistant.
 Return strict JSON matching the provided schema.
 
 Task:
@@ -368,7 +368,7 @@ fn build_calendar_extraction_request_body(
         "clientLocalTime": client_local_time,
         "clientUtcOffsetMinutes": client_utc_offset_minutes,
         "timezone": timezone,
-        "selectedOmniSheetDate": selected_date,
+        "selectedDate": selected_date,
         "engagementActivityContext": code_context,
     });
 

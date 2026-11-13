@@ -6,4 +6,4 @@ If GitHub's private vulnerability reporting is enabled, use the repository's **S
 
 For an accidentally exposed credential, revoke or rotate it at its provider. Removing a file in a later commit does not remove its earlier copies from Git history, pull requests, build logs, caches, or downloaded releases.
 
-OmniSheet stores its application database locally without application-level encryption. Optional AI features submit content to OpenAI. See the data and privacy section of [README.md](README.md) before using confidential information.
+WhiteRabbit stores its application database locally without application-level encryption. Optional AI features submit content to OpenAI. See the data and privacy section of [README.md](README.md) before using confidential information.

@@ -1,6 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "OmniSheet",
+  "productName": "WhiteRabbit",
+  "mainBinaryName": "WhiteRabbit",
   "version": "0.5.0",
   "identifier": "com.omnisheet.desktop",
   "build": {
@@ -12,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "OmniSheet",
+        "title": "WhiteRabbit",
         "width": 1320,
         "minWidth": 1180,
         "height": 860,
@@ -27,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "WhiteRabbit",
     "targets": "all",
     "macOS": {
       "entitlements": "Entitlements.plist",

@@ -15,9 +15,9 @@ It excludes database IDs, time entries, notes, settings, diagnostics, and creden
 
 ## Import
 
-Choose **Import…** and select a file previously exported by OmniSheet. Selecting a valid file
-immediately saves new engagements; there is no additional confirmation. Canceling the file picker
-does nothing. Completion reports the number of engagements and activities added and engagements skipped.
+Choose **Import…** and select a file previously exported by WhiteRabbit or OmniSheet.
+Selecting a valid file immediately saves new engagements. Canceling the file picker does nothing.
+Completion reports the number of engagements and activities added and engagements skipped.
 
 An engagement with an existing code is skipped, together with all its activities. Code matching
 ignores leading/trailing whitespace and letter case. Engagements without codes are matched by name
@@ -35,7 +35,7 @@ and an `engagements` array with nested `activities`. Fields use camelCase. Files
 5 MB, 5,000 engagements, and 50,000 activities. Unknown fields are rejected. New local IDs and
 creation/update timestamps are assigned on import.
 
-Share actual code files through a private channel. Default `OmniSheet-codes-*.json` filenames are
-ignored by Git and rejected by the public-file hygiene check. Renaming a file does not make its
-contents public-safe; keep privately named files in the ignored `exports/` directory or outside the repo.
+Share actual code files through a private channel. Git ignores both `WhiteRabbit-codes-*.json`
+and the earlier `OmniSheet-codes-*.json` filenames, and the public-file hygiene check rejects them.
+Keep privately named files in the ignored `exports/` directory or outside the repo.
 Diagnostics do not record imported/exported contents or selected file paths.

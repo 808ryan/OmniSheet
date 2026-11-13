@@ -10389,7 +10389,7 @@ function App() {
   if (!appRuntime) {
     return (
       <div className="runtime-shell">
-        <h1>OmniSheet</h1>
+        <h1>WhiteRabbit</h1>
         <p>This application requires the Tauri runtime.</p>
         <p>Start it with `npm run tauri dev` after installing Rust toolchain.</p>
       </div>
@@ -10397,7 +10397,7 @@ function App() {
   }
 
   return (
-    <div className="app-shell" data-testid="omnisheet-app-shell">
+    <div className="app-shell" data-testid="whiterabbit-app-shell">
       <div className={`workspace-shell ${activeView === 'timeline' ? 'with-timeline' : 'without-timeline'}`}>
         <aside className="sidebar-panel">
           <section className={`sidebar-section sidebar-capture ${isLlmEntryCollapsed ? 'is-llm-collapsed' : ''}`}>
@@ -14103,11 +14103,11 @@ function formatVoiceSupportUnavailableMessage(support: VoiceEnvironmentSupport):
     && support.platform === 'macos'
     && support.isTauriDev
   ) {
-    return 'Voice recording is unavailable in this macOS development runtime. Test voice from the packaged OmniSheet.app so macOS can grant microphone access.'
+    return 'Voice recording is unavailable in this macOS development runtime. Test voice from the packaged WhiteRabbit.app so macOS can grant microphone access.'
   }
 
   if (support.failureReasonCode === 'missing_media_recorder' && support.platform === 'macos') {
-    return 'This macOS WebKit runtime does not support voice recording yet. Test the packaged OmniSheet.app on a supported macOS version.'
+    return 'This macOS WebKit runtime does not support voice recording yet. Test the packaged WhiteRabbit.app on a supported macOS version.'
   }
 
   if (support.failureReasonCode === 'missing_media_devices') {
@@ -14135,7 +14135,7 @@ function mapVoiceRecordingError(error: unknown): VoiceRecordingErrorDetails {
   if (permissionErrorName === 'NotAllowedError' || permissionErrorName === 'SecurityError') {
     return {
       errorCategory: 'permission_denied',
-      message: 'Microphone access was denied. Enable OmniSheet in System Settings > Privacy & Security > Microphone, then try again.',
+      message: 'Microphone access was denied. Enable WhiteRabbit in System Settings > Privacy & Security > Microphone, then try again.',
       permissionErrorName,
       permissionOutcome: 'denied',
     }
@@ -14199,7 +14199,7 @@ function mapMacosNativeMicrophonePermissionStatus(
   if (status === 'denied') {
     return {
       errorCategory: 'permission_denied',
-      message: 'Microphone access was denied. Enable OmniSheet in System Settings > Privacy & Security > Microphone, then try again.',
+      message: 'Microphone access was denied. Enable WhiteRabbit in System Settings > Privacy & Security > Microphone, then try again.',
       permissionErrorName: null,
       permissionOutcome: 'denied',
     }
@@ -14208,7 +14208,7 @@ function mapMacosNativeMicrophonePermissionStatus(
   if (status === 'restricted') {
     return {
       errorCategory: 'permission_restricted',
-      message: 'Microphone access is restricted by macOS or an administrator policy, so OmniSheet cannot start voice recording on this Mac.',
+      message: 'Microphone access is restricted by macOS or an administrator policy, so WhiteRabbit cannot start voice recording on this Mac.',
       permissionErrorName: null,
       permissionOutcome: 'restricted',
     }
@@ -14216,7 +14216,7 @@ function mapMacosNativeMicrophonePermissionStatus(
 
   return {
     errorCategory: 'permission_request_failed',
-    message: 'OmniSheet could not confirm microphone access with macOS. Respond to the macOS permission prompt if it is open, then try again.',
+    message: 'WhiteRabbit could not confirm microphone access with macOS. Respond to the macOS permission prompt if it is open, then try again.',
     permissionErrorName: null,
     permissionOutcome: 'unknown',
   }
@@ -14227,7 +14227,7 @@ function buildMacosNativePermissionRequestFailedDetails(
 ): VoiceRecordingErrorDetails {
   return {
     errorCategory: 'permission_request_failed',
-    message: 'OmniSheet could not request microphone access from macOS. Close the app, reopen it from Finder, and try again.',
+    message: 'WhiteRabbit could not request microphone access from macOS. Close the app, reopen it from Finder, and try again.',
     permissionErrorName: getVoiceErrorName(error),
     permissionOutcome: 'unknown',
   }

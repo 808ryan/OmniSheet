@@ -49,7 +49,7 @@ jobs:
           fi
 
           if [[ -z "$RELEASE_NAME" ]]; then
-            RELEASE_NAME="OmniSheet ${TAG_NAME}"
+            RELEASE_NAME="WhiteRabbit ${TAG_NAME}"
           fi
 
           if [[ "$RELEASE_NAME" == *$'\n'* || "$RELEASE_NAME" == *$'\r'* ]]; then
@@ -125,8 +125,8 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          CERTIFICATE_PATH="$RUNNER_TEMP/omnisheet-signing-certificate.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/omnisheet-build.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/whiterabbit-signing-certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/whiterabbit-build.keychain-db"
           KEYCHAIN_PASSWORD="$(uuidgen)"
 
           printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
@@ -146,8 +146,8 @@ jobs:
             "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
 
-          echo "OMNISHEET_CERTIFICATE_PATH=$CERTIFICATE_PATH" >> "$GITHUB_ENV"
-          echo "OMNISHEET_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "WHITERABBIT_CERTIFICATE_PATH=$CERTIFICATE_PATH" >> "$GITHUB_ENV"
+          echo "WHITERABBIT_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Build and upload macOS release
         uses: tauri-apps/tauri-action@v0
@@ -178,20 +178,22 @@ jobs:
             exit 1
           fi
 
+          cp "${dmg_files[0]}" "$RUNNER_TEMP/WhiteRabbit-macOS.dmg"
           cp "${dmg_files[0]}" "$RUNNER_TEMP/OmniSheet-macOS.dmg"
-          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/OmniSheet-macOS.dmg" \
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/WhiteRabbit-macOS.dmg" "$RUNNER_TEMP/OmniSheet-macOS.dmg" \
             --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Clean up signing material
         if: ${{ always() }}
         shell: bash
         run: |
-          if [[ -n "${OMNISHEET_KEYCHAIN_PATH:-}" ]]; then
-            security delete-keychain "$OMNISHEET_KEYCHAIN_PATH" || true
+          if [[ -n "${WHITERABBIT_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$WHITERABBIT_KEYCHAIN_PATH" || true
           fi
 
-          if [[ -n "${OMNISHEET_CERTIFICATE_PATH:-}" ]]; then
-            rm -f "$OMNISHEET_CERTIFICATE_PATH"
+          if [[ -n "${WHITERABBIT_CERTIFICATE_PATH:-}" ]]; then
+            rm -f "$WHITERABBIT_CERTIFICATE_PATH"
           fi
 
           if [[ -n "${APPLE_API_KEY_PATH:-}" ]]; then

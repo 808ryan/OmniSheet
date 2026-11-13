@@ -1,6 +1,6 @@
-# Releasing OmniSheet for macOS
+# Releasing WhiteRabbit for macOS
 
-OmniSheet voice capture should be validated from a packaged macOS `.app`, not from `npm run tauri dev`. The dev runtime is best-effort for microphone support because it does not behave like an installed, signed app bundle in System Settings.
+WhiteRabbit voice capture should be validated from a packaged macOS `.app`, not from `npm run tauri dev`. The dev runtime is best-effort for microphone support because it does not behave like an installed, signed app bundle in System Settings.
 
 This document covers the full path:
 
@@ -12,8 +12,8 @@ This document covers the full path:
 ## Before you start
 
 - Creating a new `Developer ID Application` certificate does not break another app that is already using an older certificate.
-- The risky action is revoking an old certificate or old API key. Do not revoke anything while setting up OmniSheet.
-- Ignore old `.key` files for this workflow. OmniSheet signs from a `.p12` certificate export and an App Store Connect `.p8` API key.
+- The risky action is revoking an old certificate or old API key. Do not revoke anything while setting up WhiteRabbit.
+- Ignore old `.key` files for this workflow. WhiteRabbit signs from a `.p12` certificate export and an App Store Connect `.p8` API key.
 - If you have an older `.p12` but do not trust its password, it is simpler to create a new certificate and export a fresh `.p12`.
 
 ## GitHub workflows in this repo
@@ -34,7 +34,7 @@ Use this path unless you already know an existing `.p12` password and want to re
 2. In the menu bar, click `Keychain Access` -> `Certificate Assistant` -> `Request a Certificate From a Certificate Authority...`
 3. Fill in:
    - `User Email Address`: your Apple Developer email
-   - `Common Name`: `OmniSheet Developer ID`
+   - `Common Name`: `WhiteRabbit Developer ID`
    - `CA Email Address`: leave blank
    - `Request is`: `Saved to disk`
 4. Save the CSR file somewhere easy to find.
@@ -53,7 +53,7 @@ Use this path unless you already know an existing `.p12` password and want to re
 
 1. In `Keychain Access`, right-click the new `Developer ID Application` certificate.
 2. Click `Export`.
-3. Save it as something clear, for example `OmniSheet-DeveloperID.p12`.
+3. Save it as something clear, for example `WhiteRabbit-DeveloperID.p12`.
 4. Set a password you will remember.
 5. Keep that password. It will become `APPLE_CERTIFICATE_PASSWORD`.
 
@@ -86,7 +86,7 @@ You can also use the helper script in this repo:
 Run:
 
 ```powershell
-.\scripts\prepare-apple-certificate-secret.ps1 -P12Path "C:\full\path\to\OmniSheet-DeveloperID.p12" -CopyToClipboard
+.\scripts\prepare-apple-certificate-secret.ps1 -P12Path "C:\full\path\to\WhiteRabbit-DeveloperID.p12" -CopyToClipboard
 ```
 
 This reads the `.p12`, prints the base64-encoded value, and copies it to the clipboard. That value becomes `APPLE_CERTIFICATE`.
@@ -94,7 +94,7 @@ This reads the `.p12`, prints the base64-encoded value, and copies it to the cli
 If you prefer a one-liner:
 
 ```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\full\path\to\OmniSheet-DeveloperID.p12")) | Set-Clipboard
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\full\path\to\WhiteRabbit-DeveloperID.p12")) | Set-Clipboard
 ```
 
 ### On macOS
@@ -102,7 +102,7 @@ If you prefer a one-liner:
 Run:
 
 ```bash
-./scripts/prepare-apple-certificate-secret.sh /full/path/to/OmniSheet-DeveloperID.p12
+./scripts/prepare-apple-certificate-secret.sh /full/path/to/WhiteRabbit-DeveloperID.p12
 ```
 
 If `pbcopy` is available, the script also copies the value to the clipboard.
@@ -117,7 +117,7 @@ Use a `Team Key`, not an `Individual Key`.
 3. Open `Integrations`.
 4. Open `Team Keys`.
 5. Click `Generate API Key`.
-6. Name it something like `OmniSheet CI`.
+6. Name it something like `WhiteRabbit CI`.
 7. Set the access level to `Admin`.
 8. Generate the key.
 9. Download the `.p8` file immediately. Apple only lets you download it once.
@@ -128,7 +128,7 @@ Use a `Team Key`, not an `Individual Key`.
 
 ## Step 6: Add the required GitHub repository secrets
 
-Open the OmniSheet GitHub repository and go to:
+Open the WhiteRabbit GitHub repository and go to:
 
 `Settings` -> `Secrets and variables` -> `Actions`
 
@@ -155,22 +155,22 @@ The release workflow writes the `.p8` contents to a temporary file and exposes i
 2. Open the `Release macOS` workflow.
 3. Click `Run workflow`.
 4. Select `main` after merging the changes you want to release.
-5. Enter a new semver tag such as `v0.1.0`. Keep it consistent with the app version in `app/src-tauri/tauri.conf.json` and `app/src-tauri/Cargo.toml`; entering a tag does not change the app version. Leave the release name blank to use `OmniSheet v0.1.0`.
+5. Enter a new semver tag such as `v0.1.0`. Keep it consistent with the app version in `app/src-tauri/tauri.conf.json` and `app/src-tauri/Cargo.toml`; entering a tag does not change the app version. Leave the release name blank to use `WhiteRabbit v0.1.0`.
 6. Wait for the entire workflow to finish, including the stable download upload step.
 7. Open the repository's [Releases page](https://github.com/808ryan/OmniSheet/releases). The workflow creates a draft and attaches the installers automatically.
-8. Download `OmniSheet-macOS.dmg` from the draft on your MacBook. It supports both Apple Silicon and Intel Macs.
-9. Open the disk image, drag OmniSheet into Applications, and launch it from Finder.
+8. Download `WhiteRabbit-macOS.dmg` from the draft on your MacBook. It supports both Apple Silicon and Intel Macs.
+9. Open the disk image, drag WhiteRabbit into Applications, and launch it from Finder.
 10. Click the microphone button and verify the macOS microphone permission prompt appears.
 
 ## Publish the download
 
 Once you've checked the build, edit the draft on the Releases page, add release notes, select **Set as latest release**, and click **Publish release**. Keep **This is a pre-release** unchecked for the stable download link.
 
-The README's **Download for macOS** link points to:
+The direct download for the WhiteRabbit macOS installer is:
 
-https://github.com/808ryan/OmniSheet/releases/latest/download/OmniSheet-macOS.dmg
+https://github.com/808ryan/OmniSheet/releases/latest/download/WhiteRabbit-macOS.dmg
 
-The workflow uploads a copy of the universal installer with that fixed filename, so the README does not need changing for each version. The link works after the first release containing that asset is published. Draft releases do not activate it, and a private repository's published releases still require repository access.
+The workflow uploads the universal installer under that name and the previous `OmniSheet-macOS.dmg` filename. The previous filename keeps the README link and existing bookmarks working through the rename.
 
 If you also build Windows installers, use the same release tag for both workflows so the latest release includes the macOS download. Wait for both workflows to finish before publishing.
 
@@ -183,7 +183,7 @@ npm run tauri build -- --target universal-apple-darwin
 ```
 
 The app bundle includes `NSMicrophoneUsageDescription`, so the packaged app is the correct place to verify the first-run microphone permission prompt.
-The macOS bundle now also includes an entitlements file with `com.apple.security.device.audio-input`, and OmniSheet proactively requests microphone permission through native AVFoundation before the web recorder starts.
+The macOS bundle now also includes an entitlements file with `com.apple.security.device.audio-input`, and WhiteRabbit proactively requests microphone permission through native AVFoundation before the web recorder starts.
 
 ## Troubleshooting
 
@@ -200,7 +200,7 @@ The macOS bundle now also includes an entitlements file with `com.apple.security
 
 After downloading the CI-built artifact on a Mac:
 
-1. Launch OmniSheet normally from Finder.
+1. Launch WhiteRabbit normally from Finder.
 2. Confirm Gatekeeper allows the signed app to open without manual override.
 3. Click the microphone button on first use.
 4. Confirm macOS prompts for microphone access.
@@ -210,9 +210,9 @@ After downloading the CI-built artifact on a Mac:
 Optional command-line checks:
 
 ```bash
-spctl -a -vvvv /path/to/OmniSheet.app
-xcrun stapler validate /path/to/OmniSheet.dmg
-codesign -d --entitlements :- /path/to/OmniSheet.app
+spctl -a -vvvv /path/to/WhiteRabbit.app
+xcrun stapler validate /path/to/WhiteRabbit.dmg
+codesign -d --entitlements :- /path/to/WhiteRabbit.app
 tccutil reset Microphone com.omnisheet.desktop
 ```
 
