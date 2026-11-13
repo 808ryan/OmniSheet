@@ -9,12 +9,12 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    ActiveTimer, Activity, ActivityUpsertInput, CodeContext, ContextActivity, ContextEngagement,
-    DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput, NormalizedEntry,
-    OpenAiModelId, QuickAddSuggestion, TimelineDaySummary, TimelineEntry, TimelineTotalBreakdown,
-    TimelineWeeklySummary, TimelineWeeklySummaryCell, TimelineWeeklySummaryDay,
-    TimelineWeeklySummaryNote, TimelineWeeklySummaryRow, TranscriptionModelId, Warning,
-    WarningType,
+    ActiveTimer, Activity, ActivityUpsertInput, AdHocCodes, CodeContext, ContextActivity,
+    ContextEngagement, DiagnosticsEvent, Engagement, EngagementType, EngagementUpsertInput,
+    NormalizedEntry, OpenAiModelId, QuickAddSuggestion, TimelineDaySummary, TimelineEntry,
+    TimelineTotalBreakdown, TimelineWeeklySummary, TimelineWeeklySummaryCell,
+    TimelineWeeklySummaryDay, TimelineWeeklySummaryNote, TimelineWeeklySummaryRow,
+    TranscriptionModelId, Warning, WarningType,
 };
 
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.75;
@@ -312,6 +312,14 @@ fn ensure_expected_columns(conn: &Connection) -> AppResult<()> {
         "duration_defaulted",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_column_exists(
+        conn,
+        "timesheet_entries",
+        "is_ad_hoc",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(conn, "timesheet_entries", "ad_hoc_engagement_code", "TEXT")?;
+    ensure_column_exists(conn, "timesheet_entries", "ad_hoc_activity_code", "TEXT")?;
     ensure_column_exists(conn, "timesheet_entries", "fallback_summary", "TEXT")?;
     ensure_column_exists(conn, "timesheet_entries", "user_submission_text", "TEXT")?;
     ensure_column_exists(
@@ -1314,6 +1322,7 @@ pub fn insert_manual_timeline_entry(
         activity_id,
         "manual",
         "Manual Entry",
+        None,
     )
 }
 
@@ -1338,6 +1347,31 @@ pub fn insert_timer_timeline_entry(
         activity_id,
         "timer",
         "Timer Entry",
+        None,
+    )
+}
+
+pub fn insert_ad_hoc_timeline_entry(
+    conn: &Connection,
+    date: &str,
+    start_minute: i64,
+    end_minute: i64,
+    duration_minutes: i64,
+    description: &str,
+    codes: &AdHocCodes,
+) -> AppResult<String> {
+    insert_timeline_entry_with_source(
+        conn,
+        date,
+        start_minute,
+        end_minute,
+        duration_minutes,
+        description,
+        None,
+        None,
+        "manual",
+        "Manual Entry",
+        Some(codes),
     )
 }
 
@@ -1352,6 +1386,7 @@ fn insert_timeline_entry_with_source(
     activity_id: Option<&str>,
     source: &str,
     user_submission_text: &str,
+    ad_hoc: Option<&AdHocCodes>,
 ) -> AppResult<String> {
     let id = Uuid::new_v4().to_string();
     let now = current_unix_timestamp();
@@ -1362,9 +1397,10 @@ fn insert_timeline_entry_with_source(
         id, engagement_id, activity_id, date, start_minute, end_minute,
         duration_minutes, description, user_submission_text, source, raw_message_id, confidence,
         used_activity_fallback, used_temporal_fallback, duration_defaulted,
-        fallback_summary, source_message_entry_index, source_message_entry_count, created_at, updated_at
+        fallback_summary, source_message_entry_index, source_message_entry_count, created_at, updated_at,
+        is_ad_hoc, ad_hoc_engagement_code, ad_hoc_activity_code
       )
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, 1.0, 0, 0, 0, NULL, NULL, NULL, ?11, ?11)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, 1.0, 0, 0, 0, NULL, NULL, NULL, ?11, ?11, ?12, ?13, ?14)
     "#,
         params![
             id,
@@ -1378,6 +1414,9 @@ fn insert_timeline_entry_with_source(
             user_submission_text,
             source,
             now,
+            ad_hoc.is_some(),
+            ad_hoc.map(|codes| codes.engagement_code.as_str()),
+            ad_hoc.and_then(|codes| codes.activity_code.as_deref()),
         ],
     )?;
 
@@ -1635,14 +1674,21 @@ where
             let engagement_id = row.get::<_, Option<String>>(9)?;
             let engagement_code = row.get::<_, Option<String>>(11)?;
             let engagement_type_raw = row.get::<_, Option<String>>(13)?;
-            let engagement_type = engagement_id.as_ref().map(|_| {
+            let is_ad_hoc = row.get::<_, bool>(26)?;
+            let engagement_type = (is_ad_hoc || engagement_id.is_some()).then(|| {
                 db_value_to_engagement_type(
                     engagement_type_raw.as_deref(),
                     engagement_code.as_deref(),
                 )
             });
 
+            let activity_code: Option<String> = row.get(14)?;
+            let ad_hoc = is_ad_hoc.then(|| AdHocCodes {
+                engagement_code: engagement_code.clone().unwrap_or_default(),
+                activity_code: activity_code.clone(),
+            });
             Ok(TimelineEntry {
+                ad_hoc,
                 id: row.get(0)?,
                 date: row.get(1)?,
                 start_minute: row.get(2)?,
@@ -1657,7 +1703,7 @@ where
                 engagement_code,
                 engagement_name: row.get(12)?,
                 engagement_type,
-                activity_code: row.get(14)?,
+                activity_code,
                 activity_name: row.get(15)?,
                 used_activity_fallback: row.get::<_, i64>(16)? == 1,
                 used_temporal_fallback: row.get::<_, i64>(17)? == 1,
@@ -1700,10 +1746,10 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         te.confidence,
         te.engagement_id,
         te.activity_id,
-        e.code,
+        CASE WHEN te.is_ad_hoc THEN te.ad_hoc_engagement_code ELSE e.code END,
         e.name,
         e.engagement_type,
-        a.code,
+        CASE WHEN te.is_ad_hoc THEN te.ad_hoc_activity_code ELSE a.code END,
         a.name,
         te.used_activity_fallback,
         te.used_temporal_fallback,
@@ -1714,7 +1760,8 @@ pub fn list_timeline_entries(conn: &Connection, date: &str) -> AppResult<Vec<Tim
         rm.open_ai_model,
         rm.transcription_model,
         te.created_at,
-        te.updated_at
+        te.updated_at,
+        te.is_ad_hoc
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -1746,10 +1793,10 @@ pub fn list_timeline_entries_for_date_range(
         te.confidence,
         te.engagement_id,
         te.activity_id,
-        e.code,
+        CASE WHEN te.is_ad_hoc THEN te.ad_hoc_engagement_code ELSE e.code END,
         e.name,
         e.engagement_type,
-        a.code,
+        CASE WHEN te.is_ad_hoc THEN te.ad_hoc_activity_code ELSE a.code END,
         a.name,
         te.used_activity_fallback,
         te.used_temporal_fallback,
@@ -1760,7 +1807,8 @@ pub fn list_timeline_entries_for_date_range(
         rm.open_ai_model,
         rm.transcription_model,
         te.created_at,
-        te.updated_at
+        te.updated_at,
+        te.is_ad_hoc
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -1814,6 +1862,7 @@ struct WeeklySummaryRowKey {
     client_name: String,
     engagement_type: Option<EngagementType>,
     is_uncategorized: bool,
+    is_ad_hoc: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1827,6 +1876,7 @@ struct WeeklySummaryRowAccumulator {
     client_name: String,
     engagement_type: Option<EngagementType>,
     is_uncategorized: bool,
+    is_ad_hoc: bool,
     day_minutes: [i64; 7],
     day_notes: [Vec<TimelineWeeklySummaryNote>; 7],
 }
@@ -1850,12 +1900,13 @@ pub fn list_timeline_weekly_summary(
         te.description,
         te.engagement_id,
         te.activity_id,
-        e.code,
+        CASE WHEN te.is_ad_hoc THEN te.ad_hoc_engagement_code ELSE e.code END,
         e.name,
         e.client,
         e.engagement_type,
-        a.code,
-        a.name
+        CASE WHEN te.is_ad_hoc THEN te.ad_hoc_activity_code ELSE a.code END,
+        a.name,
+        te.is_ad_hoc
       FROM timesheet_entries te
       LEFT JOIN engagements e ON e.id = te.engagement_id
       LEFT JOIN activities a ON a.id = te.activity_id
@@ -1881,6 +1932,7 @@ pub fn list_timeline_weekly_summary(
             row.get::<_, Option<String>>(10)?,
             row.get::<_, Option<String>>(11)?,
             row.get::<_, Option<String>>(12)?,
+            row.get::<_, bool>(13)?,
         ))
     })?;
 
@@ -1899,6 +1951,7 @@ pub fn list_timeline_weekly_summary(
             engagement_type_raw,
             activity_code_raw,
             activity_name_raw,
+            is_ad_hoc,
         ) = row?;
 
         let parsed_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(|_| {
@@ -1941,16 +1994,18 @@ pub fn list_timeline_weekly_summary(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.to_string());
-        let is_uncategorized = engagement_id.is_none() || activity_id.is_none();
+        let is_uncategorized = !is_ad_hoc && (engagement_id.is_none() || activity_id.is_none());
 
         let engagement_code = engagement_code_trimmed.map(|value| value.to_string());
-        let engagement_type = engagement_id.as_ref().map(|_| {
+        let engagement_type = (is_ad_hoc || engagement_id.is_some()).then(|| {
             db_value_to_engagement_type(engagement_type_raw.as_deref(), engagement_code_trimmed)
         });
         let activity_code = activity_code_trimmed.map(|value| value.to_string());
-        let activity_name = activity_name_trimmed.unwrap_or("Uncategorized").to_string();
+        let activity_name = activity_name_trimmed
+            .unwrap_or(if is_ad_hoc { "" } else { "Uncategorized" })
+            .to_string();
         let engagement_name = engagement_name_trimmed
-            .unwrap_or("Uncategorized")
+            .unwrap_or(if is_ad_hoc { "" } else { "Uncategorized" })
             .to_string();
         let client_name = client_name_trimmed.unwrap_or("").to_string();
 
@@ -1964,6 +2019,7 @@ pub fn list_timeline_weekly_summary(
             client_name: client_name.clone(),
             engagement_type,
             is_uncategorized,
+            is_ad_hoc,
         };
 
         let accumulator = rows_by_key
@@ -1978,6 +2034,7 @@ pub fn list_timeline_weekly_summary(
                 client_name: client_name.clone(),
                 engagement_type,
                 is_uncategorized,
+                is_ad_hoc,
                 day_minutes: [0; 7],
                 day_notes: std::array::from_fn(|_| Vec::new()),
             });
@@ -2015,6 +2072,7 @@ pub fn list_timeline_weekly_summary(
                 client_name: accumulator.client_name,
                 engagement_type: accumulator.engagement_type,
                 is_uncategorized: accumulator.is_uncategorized,
+                is_ad_hoc: accumulator.is_ad_hoc,
                 row_total_minutes: accumulator.day_minutes.iter().sum(),
                 cells,
             }
@@ -2172,6 +2230,7 @@ pub fn update_timeline_entry(
     description: &str,
     engagement_id: Option<&str>,
     activity_id: Option<&str>,
+    ad_hoc: Option<&AdHocCodes>,
 ) -> AppResult<()> {
     conn.execute(
         r#"
@@ -2183,7 +2242,10 @@ pub fn update_timeline_entry(
           end_minute = ?6,
           duration_minutes = ?7,
           description = ?8,
-          updated_at = ?9
+          updated_at = ?9,
+          is_ad_hoc = ?10,
+          ad_hoc_engagement_code = ?11,
+          ad_hoc_activity_code = ?12
       WHERE id = ?1
     "#,
         params![
@@ -2196,6 +2258,9 @@ pub fn update_timeline_entry(
             duration_minutes,
             description.trim(),
             current_unix_timestamp(),
+            ad_hoc.is_some(),
+            ad_hoc.map(|codes| codes.engagement_code.as_str()),
+            ad_hoc.and_then(|codes| codes.activity_code.as_deref()),
         ],
     )?;
 
@@ -2501,6 +2566,55 @@ mod tests {
         ActivityUpsertInput, EngagementType, EngagementUpsertInput, NormalizedEntry, OpenAiModelId,
         TranscriptionModelId,
     };
+
+    #[test]
+    fn ad_hoc_migration_preserves_existing_entries_and_repeated_runs() {
+        let connection = test_connection();
+        let id = insert_manual_timeline_entry(
+            &connection,
+            "2026-04-01",
+            540,
+            570,
+            30,
+            "Existing",
+            None,
+            None,
+        )
+        .unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE timesheet_entries DROP COLUMN is_ad_hoc;
+            ALTER TABLE timesheet_entries DROP COLUMN ad_hoc_engagement_code;
+            ALTER TABLE timesheet_entries DROP COLUMN ad_hoc_activity_code;",
+            )
+            .unwrap();
+        run_migrations(&connection).unwrap();
+        let saved = list_timeline_entries(&connection, "2026-04-01")
+            .unwrap()
+            .remove(0);
+        assert_eq!(saved.id, id);
+        assert_eq!(saved.description, "Existing");
+        assert!(saved.ad_hoc.is_none());
+        super::insert_ad_hoc_timeline_entry(
+            &connection,
+            "2026-04-02",
+            540,
+            570,
+            30,
+            "One-off",
+            &crate::models::AdHocCodes {
+                engagement_code: "E-1234".to_string(),
+                activity_code: Some("0124".to_string()),
+            },
+        )
+        .unwrap();
+        run_migrations(&connection).unwrap();
+        let saved = list_timeline_entries(&connection, "2026-04-02")
+            .unwrap()
+            .remove(0);
+        assert_eq!(saved.ad_hoc.unwrap().engagement_code, "E-1234");
+        assert_eq!(saved.activity_code.as_deref(), Some("0124"));
+    }
 
     fn test_connection() -> Connection {
         let connection = Connection::open_in_memory().expect("in-memory db should open");

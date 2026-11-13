@@ -11,6 +11,7 @@ import {
   formatEntityPrimaryLabel,
 } from './lib/quickEntry'
 import type { QuickEntryActivityView, QuickEntryDragState } from './lib/quickEntry'
+import { normalizeAdHocEngagementCode } from './lib/adHocCodes'
 import './ActivityCommandBar.css'
 
 const DEFAULT_RESULT_LIMIT = 7
@@ -38,6 +39,8 @@ interface ActivityCommandBarProps {
   resultsPresentation?: 'popover' | 'inline'
   actionIcon?: 'plus'
   onSubmit: (activity: QuickEntryActivityView, durationMinutes: number) => void | Promise<void>
+  existingEngagementCodes?: (string | null)[]
+  onSubmitAdHoc?: (engagementCode: string, durationMinutes: number) => void | Promise<void>
   onSubmitUncategorized?: (durationMinutes: number) => void | Promise<void>
   onCancel?: () => void
   onOpenChange?: (isOpen: boolean) => void
@@ -77,6 +80,8 @@ export function ActivityCommandBar({
   actionIcon,
   onSubmit,
   onSubmitUncategorized,
+  onSubmitAdHoc,
+  existingEngagementCodes,
   onCancel,
   onOpenChange,
   resultDragState,
@@ -97,7 +102,10 @@ export function ActivityCommandBar({
     const sourceActivities = hasQuery ? activities : (defaultActivities ?? activities)
     return rankActivityCommandResults(sourceActivities, query).slice(0, Math.max(1, resultLimit))
   }, [activities, defaultActivities, hasQuery, query, resultLimit])
-  const showUncategorized = hasQuery && results.length === 0 && Boolean(onSubmitUncategorized)
+  const adHocCode = normalizeAdHocEngagementCode(query)
+  const showAdHoc = results.length === 0 && Boolean(onSubmitAdHoc) && adHocCode !== null
+    && !existingEngagementCodes?.some((code) => code?.trim().toUpperCase() === adHocCode)
+  const showUncategorized = !showAdHoc && hasQuery && results.length === 0 && Boolean(onSubmitUncategorized)
   const resolvedActiveIndex = Math.min(activeIndex, Math.max(0, results.length - 1))
   const shouldShowResults = alwaysShowResults || isOpen
 
@@ -118,6 +126,17 @@ export function ActivityCommandBar({
   }, [onOpenChange, shouldShowResults])
 
   const selectedDurationMinutes = fixedDurationMinutes ?? durationMinutes
+
+  const submitAdHoc = () => {
+    if (disabled || !onSubmitAdHoc || !adHocCode) {
+      return
+    }
+    void onSubmitAdHoc(adHocCode, selectedDurationMinutes)
+    if (clearAfterSubmit) {
+      setQuery('')
+      setActiveIndex(0)
+    }
+  }
 
   const submitUncategorized = () => {
     if (disabled || !onSubmitUncategorized) {
@@ -145,6 +164,10 @@ export function ActivityCommandBar({
 
   const onFormSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (showAdHoc) {
+      submitAdHoc()
+      return
+    }
     if (showUncategorized) {
       submitUncategorized()
       return
@@ -213,9 +236,11 @@ export function ActivityCommandBar({
             aria-expanded={shouldShowResults}
             aria-controls={listboxId}
             aria-activedescendant={
-              isOpen && showUncategorized
-                ? `${listboxId}-uncategorized`
-                : isOpen && activeResult ? `${listboxId}-${activeResult.activity.id}` : undefined
+              isOpen && showAdHoc
+                ? `${listboxId}-ad-hoc`
+                : isOpen && showUncategorized
+                  ? `${listboxId}-uncategorized`
+                  : isOpen && activeResult ? `${listboxId}-${activeResult.activity.id}` : undefined
             }
             value={query}
             placeholder={placeholder}
@@ -252,7 +277,28 @@ export function ActivityCommandBar({
 
       {shouldShowResults ? (
         <div className="activity-command-results" id={listboxId} role="listbox">
-          {showUncategorized ? (
+          {showAdHoc ? (
+            <button
+              id={`${listboxId}-ad-hoc`}
+              type="button"
+              role="option"
+              aria-selected={isOpen}
+              aria-label={`Insert ${adHocCode}`}
+              className={`activity-command-result ${isOpen ? 'is-active' : ''}`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={submitAdHoc}
+              disabled={disabled}
+            >
+              <span className="activity-command-result-accent" aria-hidden="true" />
+              <span className="activity-command-result-copy">
+                <strong>Insert {adHocCode}</strong>
+                <small>Use for this entry</small>
+              </span>
+              <span className="activity-command-result-action is-icon" aria-hidden="true">
+                <PlusIcon className="activity-command-result-action-icon" />
+              </span>
+            </button>
+          ) : showUncategorized ? (
             <button
               id={`${listboxId}-uncategorized`}
               type="button"

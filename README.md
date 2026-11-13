@@ -11,6 +11,7 @@ If youâ€™re upgrading from OmniSheet, quit it before opening WhiteRabbit. WhiteR
 ## Logging time
 
 - Start a timer while you work or add entries afterward.
+- Use a one-off engagement code from the timeline’s Create entry search (for example, `E-123456`). Choose **Insert**, then enter an activity code in the entry editor. These codes stay on the entry without being added to Codes; missing activity codes can be filled in later.
 - Type or speak what you worked on, and AI helps match it to your projects and activity codes.
 - **Add entries in bulk from a calendar screenshot.** Upload a screenshot of your calendar view to extract multiple time entries, then review and adjust them before adding them to your timeline.
 - Use the quick-entry window to log time without opening the full app.

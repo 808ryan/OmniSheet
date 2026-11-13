@@ -196,6 +196,217 @@ describe('timeline activity search', () => {
   })
 })
 
+async function changeInput(input: HTMLInputElement, value: string) {
+  const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+  await act(async () => {
+    setValue.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+async function openCreateSearch() {
+  const canvas = container.querySelector('.timeline-grid[aria-label="Timeline entries"] .timeline-canvas')!
+  await act(async () => canvas.dispatchEvent(new MouseEvent('dblclick', {
+    bubbles: true, clientX: 100, clientY: 300,
+  })))
+  return document.querySelector<HTMLElement>('[aria-label="Create timeline entry"]')!
+}
+
+function adHocEntry(activityCode: string | null = null): TimelineEntry {
+  return {
+    ...entry('2026-09-19'),
+    adHoc: { engagementCode: 'E-1234', activityCode },
+    engagementCode: 'E-1234', activityCode, engagementType: 'external', description: '',
+  }
+}
+
+function mockAdHocPersistence(initial: TimelineEntry[] = []) {
+  let saved = initial
+  vi.mocked(api.timelineListForDate).mockImplementation(async ({ date }) => saved.filter((item) => item.date === date))
+  vi.mocked(api.timelineListForWeekView).mockImplementation(async ({ date }) => ({
+    weekStartDate: date, weekEndDate: date, days: [{ date }], entries: saved,
+  }))
+  vi.mocked(api.timelineCreateEntry).mockImplementation(async (input) => {
+    const created = {
+      ...adHocEntry(), ...input, id: 'created-ad-hoc',
+      engagementCode: input.adHoc?.engagementCode ?? null,
+      activityCode: input.adHoc?.activityCode ?? null,
+      durationMinutes: input.endMinute - input.startMinute,
+      description: input.description ?? '', engagementId: null, activityId: null,
+    }
+    saved = [...saved, created]
+    return { id: created.id }
+  })
+  vi.mocked(api.timelineUpdateEntry).mockImplementation(async (input) => {
+    saved = saved.map((item) => item.id === input.id ? {
+      ...item, ...input,
+      engagementCode: input.adHoc?.engagementCode ?? null,
+      activityCode: input.adHoc?.activityCode ?? null,
+      engagementType: input.adHoc?.engagementCode.startsWith('E-') ? 'external' : 'internal',
+      durationMinutes: input.endMinute - input.startMinute,
+    } : item)
+  })
+  return () => saved
+}
+
+async function selectView(label: string) {
+  const tab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+    .find((button) => button.textContent === label)!
+  await act(async () => tab.click())
+}
+
+describe('ad hoc timeline entries', () => {
+  it.each(['click', 'submit'])('inserts an entry via %s, saves without an activity, and focuses the text field', async (method) => {
+    const saved = mockAdHocPersistence()
+    await render()
+    const dialog = await openCreateSearch()
+    await changeInput(dialog.querySelector('input')!, ' e-1234 ')
+    const insert = dialog.querySelector<HTMLButtonElement>('[aria-label="Insert E-1234"]')!
+    expect(insert).not.toBeNull()
+    expect(dialog.querySelector('[aria-label="Create Uncategorized"]')).toBeNull()
+    expect(dialog.querySelector('input')!.getAttribute('aria-activedescendant')).toBe(insert.id)
+    await act(async () => {
+      if (method === 'click') insert.click()
+      else dialog.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(20) })
+    expect(api.timelineCreateEntry).toHaveBeenCalledOnce()
+    expect(saved()[0].adHoc).toEqual({ engagementCode: 'E-1234', activityCode: null })
+    expect(api.engagementUpsert).not.toHaveBeenCalled()
+    expect(api.activityUpsert).not.toHaveBeenCalled()
+    expect(document.querySelector('[aria-label="Create timeline entry"]')).toBeNull()
+    const editor = container.querySelector('.timeline-editor')!
+    expect(editor.querySelector('select')).toBeNull()
+    expect(editor.querySelector<HTMLInputElement>('[aria-label="Engagement code"]')!.value).toBe('E-1234')
+    const activity = editor.querySelector<HTMLInputElement>('[aria-label="Activity code"]')!
+    expect(activity.placeholder).toBe('Activity Code (e.g. 0124)')
+    expect(activity.getAttribute('aria-invalid')).toBe('true')
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Activity code')
+    expect(editor.textContent).toContain('Activity code missing')
+    expect(container.querySelector('.timeline-block.missing-activity.selected')).not.toBeNull()
+    const live = editor.querySelector<HTMLButtonElement>('.timeline-editor-live-button')!
+    expect(live.disabled).toBe(true)
+    expect(live.parentElement!.title).toContain('Live timers require saved engagement and activity codes')
+  })
+
+  it.each(['E-', 'I-', 'A-', 'random text', 'B-1234', 'E-1234 notes'])('keeps Uncategorized for non-code query %s', async (query) => {
+    mockAdHocPersistence()
+    await render()
+    const dialog = await openCreateSearch()
+    await changeInput(dialog.querySelector('input')!, query)
+    expect(dialog.querySelector('[aria-label^="Insert "]')).toBeNull()
+    expect(dialog.querySelector('[aria-label="Create Uncategorized"]')).not.toBeNull()
+  })
+
+  it.each(['I-1234', 'A-343412'])('offers the ad hoc result for %s', async (query) => {
+    mockAdHocPersistence()
+    await render()
+    const dialog = await openCreateSearch()
+    await changeInput(dialog.querySelector('input')!, query)
+    expect(dialog.querySelector(`[aria-label="Insert ${query}"]`)).not.toBeNull()
+  })
+
+  it.each([true, false])('does not offer Insert for a saved engagement with available activities: %s', async (withActivity) => {
+    const engagement: Engagement = {
+      id: 'saved-engagement', name: 'Client', code: 'E-1234', client: null,
+      engagementType: 'external', colorHex: null, tags: [], describeWhenToUse: null,
+      isActive: withActivity, createdAt: 0, updatedAt: 0,
+      activities: withActivity ? [{
+        id: 'saved-activity', engagementId: 'saved-engagement', code: '0124', name: 'Audit',
+        colorHex: null, tags: [], describeWhenToUse: null, isActive: true, createdAt: 0, updatedAt: 0,
+      }] : [],
+    }
+    vi.mocked(api.engagementList).mockResolvedValue([engagement])
+    await render()
+    const dialog = await openCreateSearch()
+    await changeInput(dialog.querySelector('input')!, ' e-1234 ')
+    expect(dialog.querySelector('[aria-label^="Insert "]')).toBeNull()
+    if (withActivity) expect(dialog.textContent).toContain('Audit')
+  })
+
+  it('autosaves codes as text, clears and restores the warning, and survives reopening and date changes', async () => {
+    const saved = mockAdHocPersistence([adHocEntry()])
+    await render()
+    await act(async () => container.querySelector<HTMLButtonElement>('.timeline-block')!.click())
+    const activity = container.querySelector<HTMLInputElement>('[aria-label="Activity code"]')!
+    await changeInput(activity, '0124')
+    expect(activity.getAttribute('aria-invalid')).toBe('false')
+    expect(container.querySelector('.timeline-block.missing-activity')).toBeNull()
+    await act(async () => { await vi.advanceTimersByTimeAsync(750) })
+    expect(saved()[0].adHoc?.activityCode).toBe('0124')
+    const engagement = container.querySelector<HTMLInputElement>('[aria-label="Engagement code"]')!
+    await changeInput(engagement, ' a-343412 ')
+    await act(async () => { await vi.advanceTimersByTimeAsync(750) })
+    expect(saved()[0].adHoc?.engagementCode).toBe('A-343412')
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close edit entry"]')!.click())
+    await selectView('Week')
+    expect(container.querySelector('.timeline-block')!.textContent).toContain('A-343412')
+    await act(async () => container.querySelector<HTMLButtonElement>('.timeline-block')!.click())
+    const reopened = container.querySelector<HTMLInputElement>('[aria-label="Activity code"]')!
+    expect(reopened.value).toBe('0124')
+    await changeInput(reopened, '  ')
+    await act(async () => { await vi.advanceTimersByTimeAsync(750) })
+    expect(saved()[0].adHoc?.activityCode).toBeNull()
+    expect(container.querySelector('.timeline-block.missing-activity.selected')).not.toBeNull()
+    const date = container.querySelector<HTMLInputElement>('.timeline-editor input[type="date"]')!
+    await changeInput(date, '2026-09-20')
+    await act(async () => { await vi.advanceTimersByTimeAsync(750) })
+    expect(saved()[0].date).toBe('2026-09-20')
+    expect(saved()[0].adHoc).toEqual({ engagementCode: 'A-343412', activityCode: null })
+    expect(api.engagementUpsert).not.toHaveBeenCalled()
+  })
+
+  it('preserves the ad hoc codes when dragging a timeline block', async () => {
+    const saved = mockAdHocPersistence([adHocEntry('0124')])
+    await render()
+    const block = container.querySelector<HTMLButtonElement>('.timeline-block')!
+    const startY = Number.parseFloat(block.style.top) + 10
+    const pointer = (type: string, y: number) => {
+      const event = new MouseEvent(type, { bubbles: true, clientX: 100, clientY: y, button: 0 })
+      Object.defineProperty(event, 'pointerId', { value: 1 })
+      return event
+    }
+    await act(async () => block.dispatchEvent(pointer('pointerdown', startY)))
+    await act(async () => window.dispatchEvent(pointer('pointermove', startY + 30)))
+    await act(async () => window.dispatchEvent(pointer('pointerup', startY + 30)))
+    expect(api.timelineUpdateEntry).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'drag', startMinute: 510, endMinute: 570,
+      adHoc: { engagementCode: 'E-1234', activityCode: '0124' },
+    }))
+    expect(saved()[0].adHoc).toEqual({ engagementCode: 'E-1234', activityCode: '0124' })
+    expect(saved()[0].startMinute).toBe(510)
+  })
+
+  it('displays the engagement with blank activity in reporting and includes the hours in totals', async () => {
+    mockAdHocPersistence([adHocEntry()])
+    const breakdown = { primaryMinutes: 60, externalMinutes: 60, internalMinutes: 0, uncategorizedMinutes: 0 }
+    vi.mocked(api.timelineWeeklySummary).mockResolvedValue({
+      weekStartDate: '2026-09-19', weekEndDate: '2026-09-25', days: [{ date: '2026-09-19' }],
+      rows: [{ isAdHoc: true, isUncategorized: false, engagementId: null, activityId: null,
+        engagementCode: 'E-1234', activityCode: null, engagementName: '', activityName: '', clientName: '',
+        engagementType: 'external', cells: [{ totalMinutes: 60, notes: [] }], rowTotalMinutes: 60 }],
+      dayTotalMinutes: [60], weekTotalMinutes: 60, dayTotalBreakdowns: [breakdown], weekTotalBreakdown: breakdown,
+    })
+    const reporting = buildDefaultReportingState()
+    reporting.displayPresets[0].columns = [
+      { kind: 'field', id: 'engagement-code', fieldKey: 'engagementCode' },
+      { kind: 'field', id: 'activity-code', fieldKey: 'activityCode' },
+      { kind: 'field', id: 'activity', fieldKey: 'activity' },
+      { kind: 'dayGroup', id: 'days' }, { kind: 'rowTotal', id: 'total' },
+    ]
+    vi.mocked(api.reportingStateGet).mockResolvedValue(reporting)
+    await render()
+    await selectView('Reporting')
+    const row = container.querySelector('.reporting-v2-body .reporting-v2-row')!
+    expect(row).not.toBeNull()
+    expect(row.textContent).toContain('E-1234')
+    expect(row.textContent).not.toContain('UNCAT')
+    const fields = row.querySelectorAll('.reporting-v2-field-cell')
+    expect(fields[1].textContent).toBe('')
+    expect(fields[2].textContent).toBe('')
+  })
+})
+
 describe('timeline lifecycle', () => {
   it('follows today after overnight resume without reinitializing, and preserves yesterday’s entries', async () => {
     await render()

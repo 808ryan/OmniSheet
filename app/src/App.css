@@ -2056,6 +2056,27 @@ button.danger:hover:not(:disabled) {
   display: none;
 }
 
+/* Keep the missing-activity cue visible together with selection and focus. */
+.timeline-block.missing-activity {
+  border: 2px dashed var(--timeline-block-accent);
+  --timeline-block-leading-indent: 0px;
+  background-clip: padding-box;
+}
+
+.timeline-block.missing-activity::before {
+  display: none;
+}
+
+.timeline-editor input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.ad-hoc-field-warning {
+  color: var(--danger);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
 .timeline-block:hover {
   transform: translateY(-1px);
 }
