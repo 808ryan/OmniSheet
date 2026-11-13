@@ -1,7 +1,7 @@
 {
-  "name": "omnisheet",
+  "name": "whiterabbit",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.6.0",
   "type": "module",
   "license": "MIT",
   "description": "A local-first desktop time tracker with optional AI-assisted entry.",

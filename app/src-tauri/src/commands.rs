@@ -1614,6 +1614,16 @@ fn summary_export_footer_label_column_index(columns: &[SummaryExportSheetColumn]
 }
 
 fn summary_export_row_key(row: &crate::models::TimelineWeeklySummaryRow) -> String {
+    if row.is_ad_hoc {
+        return format!(
+            "adHoc:{}",
+            serde_json::to_string(&[
+                row.engagement_code.as_deref().unwrap_or(""),
+                row.activity_code.as_deref().unwrap_or(""),
+            ])
+            .expect("string array is serializable")
+        );
+    }
     if let Some(activity_id) = row
         .activity_id
         .as_ref()
@@ -5336,7 +5346,7 @@ pub fn summary_export_weekly_excel(
     let week_end_date = summary.week_end_date.clone();
     let downloads_dir = resolve_downloads_dir(&app)?;
     let base_name = format!(
-        "OmniSheet_Weekly_Summary_{}_to_{}",
+        "WhiteRabbit_Weekly_Summary_{}_to_{}",
         summary.week_start_date, week_end_date
     );
     let file_path = choose_export_file_path(&downloads_dir, &base_name);
@@ -5389,8 +5399,14 @@ pub fn timeline_update_entry(
     input: TimelineUpdateInput,
 ) -> Result<(), String> {
     let connection = state.connection.lock().map_err(|_| state_lock_error())?;
+    update_manual_timeline_entry(&connection, input)
+}
 
-    let previous_date = db::get_entry_date(&connection, &input.id)
+fn update_manual_timeline_entry(
+    connection: &Connection,
+    input: TimelineUpdateInput,
+) -> Result<(), String> {
+    let previous_date = db::get_entry_date(connection, &input.id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "timeline entry not found".to_string())?;
 
@@ -5404,8 +5420,19 @@ pub fn timeline_update_entry(
         }
     };
 
+    let ad_hoc = normalize_ad_hoc_codes(
+        input.ad_hoc.as_ref(),
+        input.engagement_id.as_deref(),
+        input.activity_id.as_deref(),
+    )?;
+    validate_manual_create_refs(
+        connection,
+        input.engagement_id.as_deref(),
+        input.activity_id.as_deref(),
+    )?;
+
     db::update_timeline_entry(
-        &connection,
+        connection,
         &input.id,
         next_date,
         start_minute,
@@ -5414,11 +5441,12 @@ pub fn timeline_update_entry(
         &input.description,
         input.engagement_id.as_deref(),
         input.activity_id.as_deref(),
+        ad_hoc.as_ref(),
     )
     .map_err(|error| error.to_string())?;
 
     db::clear_entry_warnings(
-        &connection,
+        connection,
         &input.id,
         &[
             WarningType::LowConfidence,
@@ -5428,9 +5456,9 @@ pub fn timeline_update_entry(
     )
     .map_err(|error| error.to_string())?;
 
-    if input.engagement_id.is_none() || input.activity_id.is_none() {
+    if ad_hoc.is_none() && (input.engagement_id.is_none() || input.activity_id.is_none()) {
         db::add_warning(
-            &connection,
+            connection,
             &input.id,
             WarningType::Unmatched,
             Some("Entry is uncategorized".to_string()),
@@ -5438,11 +5466,11 @@ pub fn timeline_update_entry(
         .map_err(|error| error.to_string())?;
     }
 
-    let _ = db::recompute_overlap_warnings(&connection, &previous_date)
+    let _ = db::recompute_overlap_warnings(connection, &previous_date)
         .map_err(|error| error.to_string())?;
 
     if next_date != previous_date {
-        let _ = db::recompute_overlap_warnings(&connection, next_date)
+        let _ = db::recompute_overlap_warnings(connection, next_date)
             .map_err(|error| error.to_string())?;
     }
 
@@ -5454,6 +5482,33 @@ fn normalize_optional_id(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn normalize_ad_hoc_codes(
+    codes: Option<&crate::models::AdHocCodes>,
+    engagement_id: Option<&str>,
+    activity_id: Option<&str>,
+) -> Result<Option<crate::models::AdHocCodes>, String> {
+    let Some(codes) = codes else {
+        return Ok(None);
+    };
+    if engagement_id.is_some() || activity_id.is_some() {
+        return Err("Ad hoc entries cannot reference saved codes".to_string());
+    }
+    let engagement_code = codes.engagement_code.trim().to_ascii_uppercase();
+    let Some((prefix, digits)) = engagement_code.split_once('-') else {
+        return Err("Enter an engagement code such as E-123456".to_string());
+    };
+    if !matches!(prefix, "E" | "I" | "A")
+        || digits.is_empty()
+        || !digits.bytes().all(|value| value.is_ascii_digit())
+    {
+        return Err("Enter an engagement code such as E-123456".to_string());
+    }
+    Ok(Some(crate::models::AdHocCodes {
+        engagement_code,
+        activity_code: normalize_optional_id(codes.activity_code.as_deref()),
+    }))
 }
 
 fn validate_manual_create_refs(
@@ -5698,6 +5753,7 @@ pub fn timer_stop(
             let result = create_timer_timeline_entry(
                 &connection,
                 TimelineCreateInput {
+                    ad_hoc: None,
                     date: date.clone(),
                     start_minute,
                     end_minute,
@@ -5826,24 +5882,44 @@ fn create_timeline_entry_with_source(
 
     validate_manual_create_refs(connection, engagement_id.as_deref(), activity_id.as_deref())?;
 
+    let ad_hoc = normalize_ad_hoc_codes(
+        input.ad_hoc.as_ref(),
+        engagement_id.as_deref(),
+        activity_id.as_deref(),
+    )?;
+    if is_timer_entry && ad_hoc.is_some() {
+        return Err("Ad hoc entries do not support live timers".to_string());
+    }
     let insert_entry = if is_timer_entry {
         db::insert_timer_timeline_entry
     } else {
         db::insert_manual_timeline_entry
     };
-    let id = insert_entry(
-        connection,
-        date,
-        start_minute,
-        end_minute,
-        duration_minutes,
-        input.description.as_deref().unwrap_or(""),
-        engagement_id.as_deref(),
-        activity_id.as_deref(),
-    )
+    let id = if let Some(codes) = ad_hoc.as_ref() {
+        db::insert_ad_hoc_timeline_entry(
+            connection,
+            date,
+            start_minute,
+            end_minute,
+            duration_minutes,
+            input.description.as_deref().unwrap_or(""),
+            codes,
+        )
+    } else {
+        insert_entry(
+            connection,
+            date,
+            start_minute,
+            end_minute,
+            duration_minutes,
+            input.description.as_deref().unwrap_or(""),
+            engagement_id.as_deref(),
+            activity_id.as_deref(),
+        )
+    }
     .map_err(|error| error.to_string())?;
 
-    if engagement_id.is_none() || activity_id.is_none() {
+    if ad_hoc.is_none() && (engagement_id.is_none() || activity_id.is_none()) {
         db::add_warning(
             connection,
             &id,
@@ -7975,7 +8051,7 @@ pub fn diagnostics_copy_bundle(state: State<'_, AppState>) -> Result<Diagnostics
     let key_status = read_key_status(&state, open_ai_key_configured);
 
     let mut lines = Vec::<String>::new();
-    lines.push("# OmniSheet Diagnostics Bundle".to_string());
+    lines.push("# WhiteRabbit Diagnostics Bundle".to_string());
     lines.push(format!("generatedAt: {}", Local::now().to_rfc3339()));
     lines.push(format!("appVersion: {}", state.app_version));
     lines.push(format!("sessionId: {}", state.session_id));
@@ -9870,6 +9946,7 @@ mod tests {
         let entry = create_manual_timeline_entry(
             &connection,
             TimelineCreateInput {
+                ad_hoc: None,
                 date: "2020-08-09".to_string(),
                 start_minute: 600,
                 end_minute: 660,
@@ -9935,6 +10012,7 @@ mod tests {
         end_minute: i64,
     ) -> TimelineEntry {
         TimelineEntry {
+            ad_hoc: None,
             id: id.to_string(),
             date: date.to_string(),
             start_minute,
@@ -10671,6 +10749,7 @@ mod tests {
         let result = create_manual_timeline_entry(
             &connection,
             TimelineCreateInput {
+                ad_hoc: None,
                 date: "2026-04-01".to_string(),
                 start_minute: 9 * 60,
                 end_minute: 9 * 60 + 30,
@@ -10709,6 +10788,7 @@ mod tests {
         let result = create_timer_timeline_entry(
             &connection,
             TimelineCreateInput {
+                ad_hoc: None,
                 date: "2026-04-02".to_string(),
                 start_minute: 9 * 60,
                 end_minute: 10 * 60,
@@ -10731,12 +10811,230 @@ mod tests {
     }
 
     #[test]
+    fn ad_hoc_entries_group_and_export_codes_without_catalog_records() {
+        let connection = test_connection();
+        let catalog_before = db::list_engagements(&connection).unwrap();
+        let cases = [
+            (" e-001234 ", None),
+            ("E-001234", Some("  ")),
+            ("E-001234", Some(" 0124 ")),
+            ("I-5678", Some("0010")),
+            ("A-9012", None),
+        ];
+        for (index, (code, activity)) in cases.iter().enumerate() {
+            create_manual_timeline_entry(
+                &connection,
+                TimelineCreateInput {
+                    ad_hoc: Some(crate::models::AdHocCodes {
+                        engagement_code: code.to_string(),
+                        activity_code: activity.map(str::to_string),
+                    }),
+                    date: "2026-04-01".to_string(),
+                    start_minute: 540 + index as i64 * 30,
+                    end_minute: 570 + index as i64 * 30,
+                    engagement_id: None,
+                    activity_id: None,
+                    description: None,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db::list_engagements(&connection).unwrap().len(),
+            catalog_before.len()
+        );
+        let entries =
+            db::list_timeline_entries_for_date_range(&connection, "2026-04-01", "2026-04-08")
+                .unwrap();
+        assert_eq!(entries.len(), 5);
+        assert!(entries.iter().all(|entry| entry.ad_hoc.is_some()
+            && entry.engagement_id.is_none()
+            && entry.activity_id.is_none()
+            && !entry.warning_flags.contains(&WarningType::Unmatched)));
+        assert_eq!(entries[0].engagement_code.as_deref(), Some("E-001234"));
+        assert_eq!(entries[2].activity_code.as_deref(), Some("0124"));
+        let mut summary =
+            db::list_timeline_weekly_summary(&connection, "2026-04-01", "2026-04-08").unwrap();
+        assert_eq!(summary.rows.len(), 4);
+        assert_eq!(summary.week_total_breakdown.external_minutes, 90);
+        assert_eq!(summary.week_total_breakdown.internal_minutes, 60);
+        assert_eq!(summary.week_total_breakdown.uncategorized_minutes, 0);
+        let (engagements, activities) = build_export_metadata_maps(&catalog_before);
+        let mut keys = std::collections::HashSet::new();
+        for row in &summary.rows {
+            assert!(row.is_ad_hoc && !row.is_uncategorized);
+            assert_eq!(row.activity_name, "");
+            assert_eq!(row.engagement_name, "");
+            assert!(keys.insert(super::summary_export_row_key(row)));
+            assert_eq!(
+                resolve_summary_export_field_value(
+                    SummaryLayoutFieldKey::EngagementCode,
+                    row,
+                    &engagements,
+                    &activities
+                ),
+                row.engagement_code.clone().unwrap()
+            );
+            assert_eq!(
+                resolve_summary_export_field_value(
+                    SummaryLayoutFieldKey::ActivityCode,
+                    row,
+                    &engagements,
+                    &activities
+                ),
+                row.activity_code.clone().unwrap_or_default()
+            );
+            assert_eq!(
+                resolve_summary_export_field_value(
+                    SummaryLayoutFieldKey::ActivityName,
+                    row,
+                    &engagements,
+                    &activities
+                ),
+                ""
+            );
+        }
+        let blank_row = summary
+            .rows
+            .iter()
+            .find(|row| {
+                row.engagement_code.as_deref() == Some("E-001234") && row.activity_code.is_none()
+            })
+            .unwrap();
+        assert_eq!(blank_row.row_total_minutes, 60);
+        assert_eq!(
+            super::summary_export_row_key(blank_row),
+            r#"adHoc:["E-001234",""]"#
+        );
+        let free_text = super::SummaryExportFreeTextValue {
+            row_values: std::collections::HashMap::from([(
+                super::summary_export_row_key(blank_row),
+                "Review".to_string(),
+            )]),
+            repeat: false,
+            repeat_value: String::new(),
+        };
+        assert_eq!(
+            resolve_summary_export_free_text_value(&free_text, blank_row),
+            "Review"
+        );
+        let other_row = summary
+            .rows
+            .iter()
+            .find(|row| row.activity_code.as_deref() == Some("0124"))
+            .unwrap();
+        assert_eq!(
+            resolve_summary_export_free_text_value(&free_text, other_row),
+            ""
+        );
+        apply_timeline_preferences_to_weekly_summary(
+            &mut summary,
+            TimelinePreferenceValues {
+                exclude_uncategorized_from_totals: true,
+                show_uncategorized_total: false,
+                include_external_in_totals: true,
+                include_internal_in_totals: true,
+                separate_engagement_type_totals: false,
+                week_start_day: TimelineWeekStartDay::Saturday,
+            },
+        );
+        assert_eq!(summary.week_total_minutes, 150);
+    }
+
+    #[test]
+    fn ad_hoc_updates_preserve_codes_on_date_and_drag_changes_and_allow_blank_activity() {
+        let connection = test_connection();
+        let created = create_manual_timeline_entry(
+            &connection,
+            TimelineCreateInput {
+                ad_hoc: Some(crate::models::AdHocCodes {
+                    engagement_code: "E-1234".to_string(),
+                    activity_code: None,
+                }),
+                date: "2026-04-01".to_string(),
+                start_minute: 540,
+                end_minute: 570,
+                engagement_id: None,
+                activity_id: None,
+                description: None,
+            },
+        )
+        .unwrap();
+        let mut input = crate::models::TimelineUpdateInput {
+            id: created.id.clone(),
+            engagement_id: None,
+            activity_id: None,
+            ad_hoc: Some(crate::models::AdHocCodes {
+                engagement_code: " a-9876 ".to_string(),
+                activity_code: Some(" 0124 ".to_string()),
+            }),
+            mode: crate::models::TimelineUpdateMode::Manual,
+            date: "2026-04-02".to_string(),
+            start_minute: 600,
+            end_minute: 645,
+            description: "Updated".to_string(),
+        };
+        super::update_manual_timeline_entry(&connection, input.clone()).unwrap();
+        assert!(db::list_timeline_entries(&connection, "2026-04-01")
+            .unwrap()
+            .is_empty());
+        let saved = db::list_timeline_entries(&connection, "2026-04-02")
+            .unwrap()
+            .remove(0);
+        assert_eq!(saved.engagement_code.as_deref(), Some("A-9876"));
+        assert_eq!(saved.activity_code.as_deref(), Some("0124"));
+        assert_eq!(saved.engagement_type, Some(EngagementType::Internal));
+        input.mode = crate::models::TimelineUpdateMode::Drag;
+        input.start_minute = 660;
+        input.end_minute = 705;
+        super::update_manual_timeline_entry(&connection, input.clone()).unwrap();
+        let dragged = db::list_timeline_entries(&connection, "2026-04-02")
+            .unwrap()
+            .remove(0);
+        assert_eq!(dragged.start_minute, 660);
+        assert_eq!(dragged.activity_code.as_deref(), Some("0124"));
+        input.mode = crate::models::TimelineUpdateMode::Manual;
+        input.ad_hoc.as_mut().unwrap().activity_code = Some(" ".to_string());
+        super::update_manual_timeline_entry(&connection, input).unwrap();
+        let saved = db::list_timeline_entries(&connection, "2026-04-02")
+            .unwrap()
+            .remove(0);
+        assert!(saved.activity_code.is_none());
+        assert!(saved.ad_hoc.is_some());
+        assert!(!saved.warning_flags.contains(&WarningType::Unmatched));
+    }
+
+    #[test]
+    fn ad_hoc_validation_rejects_incomplete_codes_and_mixed_catalog_references() {
+        for code in ["E-", "B-1234", "E-1234 notes", "1234", "E-12.34"] {
+            assert!(super::normalize_ad_hoc_codes(
+                Some(&crate::models::AdHocCodes {
+                    engagement_code: code.to_string(),
+                    activity_code: None,
+                }),
+                None,
+                None
+            )
+            .is_err());
+        }
+        let codes = crate::models::AdHocCodes {
+            engagement_code: "I-1".to_string(),
+            activity_code: None,
+        };
+        assert!(
+            super::normalize_ad_hoc_codes(Some(&codes), Some("saved-engagement"), None).is_err()
+        );
+        assert!(super::normalize_ad_hoc_codes(Some(&codes), None, Some("saved-activity")).is_err());
+    }
+
+    #[test]
     fn manual_create_without_codes_adds_unmatched_warning() {
         let connection = test_connection();
 
         let result = create_manual_timeline_entry(
             &connection,
             TimelineCreateInput {
+                ad_hoc: None,
                 date: "2026-04-01".to_string(),
                 start_minute: 10 * 60,
                 end_minute: 10 * 60 + 30,
@@ -11412,6 +11710,7 @@ mod tests {
                 },
             ],
             rows: vec![TimelineWeeklySummaryRow {
+                is_ad_hoc: false,
                 engagement_id: Some("eng-1".to_string()),
                 activity_id: Some("act-1".to_string()),
                 engagement_code: Some("ENG-1".to_string()),
@@ -11910,6 +12209,7 @@ mod tests {
         );
 
         let uncategorized_row = TimelineWeeklySummaryRow {
+            is_ad_hoc: false,
             engagement_id: None,
             activity_id: None,
             engagement_code: None,

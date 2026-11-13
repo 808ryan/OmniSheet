@@ -769,7 +769,15 @@ pub struct Warning {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AdHocCodes {
+    pub engagement_code: String,
+    pub activity_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TimelineEntry {
+    pub ad_hoc: Option<AdHocCodes>,
     pub id: String,
     pub date: String,
     pub start_minute: i64,
@@ -831,6 +839,7 @@ pub struct TimelineWeeklySummaryDay {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineWeeklySummaryRow {
+    pub is_ad_hoc: bool,
     pub engagement_id: Option<String>,
     pub activity_id: Option<String>,
     pub engagement_code: Option<String>,
@@ -1056,6 +1065,7 @@ pub enum TimelineUpdateMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineUpdateInput {
+    pub ad_hoc: Option<AdHocCodes>,
     pub id: String,
     pub engagement_id: Option<String>,
     pub activity_id: Option<String>,
@@ -1069,6 +1079,7 @@ pub struct TimelineUpdateInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineCreateInput {
+    pub ad_hoc: Option<AdHocCodes>,
     pub date: String,
     pub start_minute: i64,
     pub end_minute: i64,

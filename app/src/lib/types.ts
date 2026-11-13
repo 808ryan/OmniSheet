@@ -177,7 +177,13 @@ export interface InterpretResult {
   llmDurationMs: number
 }
 
+export interface AdHocCodes {
+  engagementCode: string
+  activityCode: string | null
+}
+
 export interface TimelineEntry {
+  adHoc?: AdHocCodes | null
   id: string
   date: string
   startMinute: number
@@ -238,6 +244,7 @@ export interface TimelineWeeklySummaryDay {
 }
 
 export interface TimelineWeeklySummaryRow {
+  isAdHoc?: boolean
   engagementId: string | null
   activityId: string | null
   engagementCode: string | null
@@ -387,6 +394,7 @@ export interface ReportingState {
 }
 
 export interface TimelineUpdateInput {
+  adHoc?: AdHocCodes | null
   id: string
   engagementId: string | null
   activityId: string | null
@@ -398,6 +406,7 @@ export interface TimelineUpdateInput {
 }
 
 export interface TimelineCreateInput {
+  adHoc?: AdHocCodes | null
   date: string
   startMinute: number
   endMinute: number

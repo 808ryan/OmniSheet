@@ -59,6 +59,7 @@ implementation_status.md
 *.exe
 exports/
 OmniSheet-codes-*.json
+WhiteRabbit-codes-*.json
 personal-data/
 scratch/
 /cal*.png

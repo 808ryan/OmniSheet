@@ -10,6 +10,7 @@ import type {
 import { createPortal, flushSync } from 'react-dom'
 import { emit, listen } from '@tauri-apps/api/event'
 
+import { inferAdHocEngagementType, normalizeAdHocCodes, normalizeAdHocEngagementCode } from './lib/adHocCodes'
 import { ActivityCommandBar } from './ActivityCommandBar'
 import { CodeTransferSettings } from './CodeTransferSettings'
 import { PlusIcon, StopIcon, TimerIcon, TrashIcon } from './InterfaceIcons'
@@ -257,6 +258,7 @@ interface ActivityFormState {
 }
 
 interface EntryDraft {
+  adHoc: TimelineEntry['adHoc']
   id: string
   date: string
   engagementId: string
@@ -1110,6 +1112,8 @@ function App() {
   const [isTimelineDeleteBusy, setIsTimelineDeleteBusy] = useState(false)
   const [isEntryLiveConversionBusy, setIsEntryLiveConversionBusy] = useState(false)
   const [timelineDragState, setTimelineDragState] = useState<TimelineDragState | null>(null)
+  const adHocActivityInputRef = useRef<HTMLInputElement | null>(null)
+  const adHocActivityFocusEntryIdRef = useRef<string | null>(null)
   const [timelineCreateSelection, setTimelineCreateSelection] =
     useState<TimelineCreateSelection | null>(null)
   const [timelineCreateDragState, setTimelineCreateDragState] =
@@ -1228,6 +1232,13 @@ function App() {
       && window.matchMedia(WEEK_TIMELINE_COMPACT_MEDIA_QUERY).matches
     ),
   )
+  useLayoutEffect(() => {
+    if (entryDraft?.id === adHocActivityFocusEntryIdRef.current && adHocActivityInputRef.current) {
+      adHocActivityInputRef.current.focus()
+      adHocActivityFocusEntryIdRef.current = null
+    }
+  }, [entryDraft?.id])
+
   const updateEntryDraft = useCallback((
     updater: (previous: EntryDraft | null) => EntryDraft | null,
   ) => {
@@ -3926,6 +3937,7 @@ function App() {
         try {
           await timelineUpdateEntry({
             id: draggedEntry.id,
+            adHoc: draggedEntry.adHoc,
             engagementId: draggedEntry.engagementId,
             activityId: draggedEntry.activityId,
             mode: 'drag',
@@ -5789,6 +5801,7 @@ function App() {
       try {
         await timelineUpdateEntry({
           id: draft.id,
+          ...(draft.adHoc ? { adHoc: normalizeAdHocCodes(draft.adHoc) } : {}),
           engagementId: nextEngagementId,
           activityId: nextActivityId,
           mode: 'manual',
@@ -6865,7 +6878,7 @@ function App() {
   )
 
   const createTimelineEntryFromSelection = useCallback(
-    (engagement: Engagement | null, activity: Activity | null) => {
+    (engagement: Engagement | null, activity: Activity | null, adHocCode?: string) => {
       if (!timelineCreateSelection || timelineMutationInFlightRef.current) {
         return
       }
@@ -6879,6 +6892,7 @@ function App() {
           engagementId: engagement?.id ?? null,
           activityId: activity?.id ?? null,
           description: '',
+          ...(adHocCode ? { adHoc: { engagementCode: adHocCode, activityCode: null } } : {}),
         })
         setTimelineCreateSelection(null)
         updateSelectedDate(selection.date, { clearSelection: false })
@@ -6891,13 +6905,14 @@ function App() {
         invalidateMonthSummaries([monthKeyFromDate(selection.date)])
         const createdEntry = entries.find((entry) => entry.id === result.id) ?? null
         if (createdEntry) {
+          if (adHocCode) adHocActivityFocusEntryIdRef.current = createdEntry.id
           onSelectEntry(createdEntry)
           setHighlightedEntryId(createdEntry.id)
           if (selection.surface === 'day') {
             scrollDayTimelineToEntry(createdEntry)
           }
         }
-        setSuccessMessage(`Added ${formatEntityDisplayLabel(activity?.name, activity?.code)}.`)
+        setSuccessMessage(`Added ${adHocCode ?? formatEntityDisplayLabel(activity?.name, activity?.code)}.`)
       })
     },
     [
@@ -8670,52 +8685,85 @@ function App() {
           </label>
           <label>
             Engagement
-            <select
-              value={entryDraft.engagementId}
-              disabled={isEntryLiveConversionBusy}
-              onChange={(event) =>
-                updateEntryDraft((previous) =>
-                  previous
-                    ? {
-                        ...previous,
-                        engagementId: event.target.value,
-                        activityId: '',
-                      }
-                    : previous,
-                )
-              }
-            >
-              <option value="">Uncategorized</option>
-              {engagements.map((engagement) => (
-                <option key={engagement.id} value={engagement.id}>
-                  {formatEntityDisplayLabel(engagement.name, engagement.code)}
-                </option>
-              ))}
-            </select>
+            {entryDraft.adHoc ? (
+              <input
+                type="text"
+                aria-label="Engagement code"
+                value={entryDraft.adHoc.engagementCode ?? ''}
+                placeholder="Engagement Code (e.g. E-123456)"
+                disabled={isEntryLiveConversionBusy}
+                aria-invalid={!normalizeAdHocEngagementCode(entryDraft.adHoc.engagementCode)}
+                onChange={(event) => updateEntryDraft((previous) => previous?.adHoc
+                  ? { ...previous, adHoc: { ...previous.adHoc, engagementCode: event.target.value } }
+                  : previous)}
+              />
+            ) : (
+              <select
+                value={entryDraft.engagementId}
+                disabled={isEntryLiveConversionBusy}
+                onChange={(event) =>
+                  updateEntryDraft((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          engagementId: event.target.value,
+                          activityId: '',
+                        }
+                      : previous,
+                  )
+                }
+              >
+                <option value="">Uncategorized</option>
+                {engagements.map((engagement) => (
+                  <option key={engagement.id} value={engagement.id}>
+                    {formatEntityDisplayLabel(engagement.name, engagement.code)}
+                  </option>
+                ))}
+              </select>
+            )}
           </label>
           <label>
             Activity
-            <select
-              value={entryDraft.activityId}
-              disabled={isEntryLiveConversionBusy}
-              onChange={(event) =>
-                updateEntryDraft((previous) =>
-                  previous
-                    ? {
-                        ...previous,
-                        activityId: event.target.value,
-                      }
-                    : previous,
-                )
-              }
-            >
-              <option value="">Uncategorized</option>
-              {availableActivities.map((activity) => (
-                <option key={activity.id} value={activity.id}>
-                  {formatEntityDisplayLabel(activity.name, activity.code)}
-                </option>
-              ))}
-            </select>
+            {entryDraft.adHoc ? (
+              <input
+                ref={adHocActivityInputRef}
+                type="text"
+                aria-label="Activity code"
+                value={entryDraft.adHoc.activityCode ?? ''}
+                placeholder="Activity Code (e.g. 0124)"
+                disabled={isEntryLiveConversionBusy}
+                aria-invalid={!entryDraft.adHoc.activityCode?.trim()}
+                aria-describedby={!entryDraft.adHoc.activityCode?.trim() ? 'ad-hoc-activity-warning' : undefined}
+                onChange={(event) => updateEntryDraft((previous) => previous?.adHoc
+                  ? { ...previous, adHoc: { ...previous.adHoc, activityCode: event.target.value } }
+                  : previous)}
+              />
+            ) : (
+              <select
+                value={entryDraft.activityId}
+                disabled={isEntryLiveConversionBusy}
+                onChange={(event) =>
+                  updateEntryDraft((previous) =>
+                    previous
+                      ? {
+                          ...previous,
+                          activityId: event.target.value,
+                        }
+                      : previous,
+                  )
+                }
+              >
+                <option value="">Uncategorized</option>
+                {availableActivities.map((activity) => (
+                  <option key={activity.id} value={activity.id}>
+                    {formatEntityDisplayLabel(activity.name, activity.code)}
+                  </option>
+                ))}
+              </select>
+            )}
+            {entryDraft.adHoc && !entryDraft.adHoc.activityCode?.trim() ? (
+              <small className="ad-hoc-field-warning" id="ad-hoc-activity-warning">Activity code missing</small>
+            ) : null}
           </label>
           <label>
             Start
@@ -10016,7 +10064,7 @@ function App() {
                         positionedEntry.widthPercent,
                         positionedEntry.height,
                       )
-                      const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
+                      const reviewLabel = getTimelineBlockReviewLabel(entry)
                       const blockPalette = buildTimelineBlockPalette(blockColor)
                       const blockClassName = [
                         'timeline-block',
@@ -10389,7 +10437,7 @@ function App() {
   if (!appRuntime) {
     return (
       <div className="runtime-shell">
-        <h1>OmniSheet</h1>
+        <h1>WhiteRabbit</h1>
         <p>This application requires the Tauri runtime.</p>
         <p>Start it with `npm run tauri dev` after installing Rust toolchain.</p>
       </div>
@@ -10397,7 +10445,7 @@ function App() {
   }
 
   return (
-    <div className="app-shell" data-testid="omnisheet-app-shell">
+    <div className="app-shell" data-testid="whiterabbit-app-shell">
       <div className={`workspace-shell ${activeView === 'timeline' ? 'with-timeline' : 'without-timeline'}`}>
         <aside className="sidebar-panel">
           <section className={`sidebar-section sidebar-capture ${isLlmEntryCollapsed ? 'is-llm-collapsed' : ''}`}>
@@ -10818,7 +10866,7 @@ function App() {
                           draggedEntryOriginPosition.widthPercent,
                           draggedEntryOriginPosition.height,
                         )
-                        const ghostReviewLabel = getTimelineBlockReviewLabel(ghostEntry.warningFlags)
+                        const ghostReviewLabel = getTimelineBlockReviewLabel(ghostEntry)
                         const ghostPalette = buildTimelineBlockPalette(ghostColor)
                         const ghostNeedsReview = ghostReviewLabel !== null
 
@@ -10851,7 +10899,7 @@ function App() {
                         positionedEntry.widthPercent,
                         positionedEntry.height,
                       )
-                      const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
+                      const reviewLabel = getTimelineBlockReviewLabel(entry)
                       const needsReview = reviewLabel !== null
                       const isActiveTimerPreview = isActiveTimerPreviewEntry(entry)
                       const isTimerEntry = entry.source === 'timer'
@@ -10939,6 +10987,7 @@ function App() {
                         `tier-${blockLabel.tier}`,
                         isSelectedBlock ? 'selected' : '',
                         needsReview ? 'needs-review' : '',
+                        entry.adHoc && !entry.activityCode?.trim() ? 'missing-activity' : '',
                         shouldShowDurationBadge ? 'duration-active' : '',
                       ]
                         .filter((className) => className.length > 0)
@@ -11260,7 +11309,7 @@ function App() {
                             draggedWeekEntryOriginPosition.widthPercent,
                             draggedWeekEntryOriginPosition.height,
                           )
-                          const ghostReviewLabel = getTimelineBlockReviewLabel(ghostEntry.warningFlags)
+                          const ghostReviewLabel = getTimelineBlockReviewLabel(ghostEntry)
                           const ghostPalette = buildTimelineBlockPalette(ghostColor)
                           const ghostNeedsReview = ghostReviewLabel !== null
 
@@ -11293,7 +11342,7 @@ function App() {
                           positionedEntry.widthPercent,
                           positionedEntry.height,
                         )
-                        const reviewLabel = getTimelineBlockReviewLabel(entry.warningFlags)
+                        const reviewLabel = getTimelineBlockReviewLabel(entry)
                         const needsReview = reviewLabel !== null
                         const isActiveTimerPreview = isActiveTimerPreviewEntry(entry)
                         const isTimerEntry = entry.source === 'timer'
@@ -11381,6 +11430,7 @@ function App() {
                           `tier-${blockLabel.tier}`,
                           isSelectedBlock ? 'selected' : '',
                           needsReview ? 'needs-review' : '',
+                          entry.adHoc && !entry.activityCode?.trim() ? 'missing-activity' : '',
                           shouldShowDurationBadge ? 'duration-active' : '',
                         ]
                           .filter((className) => className.length > 0)
@@ -12645,7 +12695,7 @@ function App() {
             activities={activityCommandItems}
             disabled={isBusy}
             autoFocus
-            placeholder="Search activity"
+            placeholder="Search activity or engagement code"
             ariaLabel="Search activity for this timeline range"
             actionLabel="Create"
             actionIcon="plus"
@@ -12660,6 +12710,8 @@ function App() {
             onSubmit={(item) => {
               createTimelineEntryFromSelection(item.engagement, item.activity)
             }}
+            existingEngagementCodes={engagements.map((engagement) => engagement.code)}
+            onSubmitAdHoc={(code) => createTimelineEntryFromSelection(null, null, code)}
             onSubmitUncategorized={() => createTimelineEntryFromSelection(null, null)}
           />
         </div>,
@@ -13542,10 +13594,10 @@ function App() {
               {formatEntityDisplayLabel(
                 selectedSummaryNotesContext.row.engagementName,
                 selectedSummaryNotesContext.row.engagementCode,
-              )} / {formatEntityDisplayLabel(
+              )}{selectedSummaryNotesContext.row.isAdHoc && !selectedSummaryNotesContext.row.activityCode ? '' : ` / ${formatEntityDisplayLabel(
                 selectedSummaryNotesContext.row.activityName,
                 selectedSummaryNotesContext.row.activityCode,
-              )}
+              )}`}
               {' '}on {formatWeekdayName(selectedSummaryNotesContext.day.date)} ({formatMonthDay(selectedSummaryNotesContext.day.date)})
             </p>
             <div className="summary-notes-list">
@@ -13723,6 +13775,7 @@ function buildEntryDraft(entry: TimelineEntry): EntryDraft {
   return {
     id: entry.id,
     date: entry.date,
+    adHoc: entry.adHoc ? { ...entry.adHoc } : null,
     engagementId: entry.engagementId ?? '',
     activityId: entry.activityId ?? '',
     description: entry.description,
@@ -13787,6 +13840,7 @@ function serializeEntryDraft(entryDraft: EntryDraft): string {
     entryDraft.date,
     entryDraft.engagementId,
     entryDraft.activityId,
+    entryDraft.adHoc,
     entryDraft.description,
     entryDraft.startTime,
     entryDraft.endTime,
@@ -13795,6 +13849,9 @@ function serializeEntryDraft(entryDraft: EntryDraft): string {
 }
 
 function buildEntryDraftSavePlan(entryDraft: EntryDraft): EntryDraftSavePlan {
+  if (entryDraft.adHoc && !normalizeAdHocEngagementCode(entryDraft.adHoc.engagementCode)) {
+    return { ok: false, errorMessage: 'Enter an engagement code such as E-123456.' }
+  }
   if (entryDraft.date.trim().length === 0) {
     return {
       ok: false,
@@ -13868,6 +13925,13 @@ function resolveEntryLiveEligibility(
       eligible: false,
       title: savePlan.errorMessage,
       errorMessage: savePlan.errorMessage,
+    }
+  }
+  if (savePlan.normalizedDraft.adHoc) {
+    return {
+      eligible: false,
+      title: 'Live timers require saved engagement and activity codes',
+      errorMessage: 'Live timers require saved engagement and activity codes.',
     }
   }
   if (!savePlan.normalizedDraft.engagementId || !savePlan.normalizedDraft.activityId) {
@@ -14103,11 +14167,11 @@ function formatVoiceSupportUnavailableMessage(support: VoiceEnvironmentSupport):
     && support.platform === 'macos'
     && support.isTauriDev
   ) {
-    return 'Voice recording is unavailable in this macOS development runtime. Test voice from the packaged OmniSheet.app so macOS can grant microphone access.'
+    return 'Voice recording is unavailable in this macOS development runtime. Test voice from the packaged WhiteRabbit.app so macOS can grant microphone access.'
   }
 
   if (support.failureReasonCode === 'missing_media_recorder' && support.platform === 'macos') {
-    return 'This macOS WebKit runtime does not support voice recording yet. Test the packaged OmniSheet.app on a supported macOS version.'
+    return 'This macOS WebKit runtime does not support voice recording yet. Test the packaged WhiteRabbit.app on a supported macOS version.'
   }
 
   if (support.failureReasonCode === 'missing_media_devices') {
@@ -14135,7 +14199,7 @@ function mapVoiceRecordingError(error: unknown): VoiceRecordingErrorDetails {
   if (permissionErrorName === 'NotAllowedError' || permissionErrorName === 'SecurityError') {
     return {
       errorCategory: 'permission_denied',
-      message: 'Microphone access was denied. Enable OmniSheet in System Settings > Privacy & Security > Microphone, then try again.',
+      message: 'Microphone access was denied. Enable WhiteRabbit in System Settings > Privacy & Security > Microphone, then try again.',
       permissionErrorName,
       permissionOutcome: 'denied',
     }
@@ -14199,7 +14263,7 @@ function mapMacosNativeMicrophonePermissionStatus(
   if (status === 'denied') {
     return {
       errorCategory: 'permission_denied',
-      message: 'Microphone access was denied. Enable OmniSheet in System Settings > Privacy & Security > Microphone, then try again.',
+      message: 'Microphone access was denied. Enable WhiteRabbit in System Settings > Privacy & Security > Microphone, then try again.',
       permissionErrorName: null,
       permissionOutcome: 'denied',
     }
@@ -14208,7 +14272,7 @@ function mapMacosNativeMicrophonePermissionStatus(
   if (status === 'restricted') {
     return {
       errorCategory: 'permission_restricted',
-      message: 'Microphone access is restricted by macOS or an administrator policy, so OmniSheet cannot start voice recording on this Mac.',
+      message: 'Microphone access is restricted by macOS or an administrator policy, so WhiteRabbit cannot start voice recording on this Mac.',
       permissionErrorName: null,
       permissionOutcome: 'restricted',
     }
@@ -14216,7 +14280,7 @@ function mapMacosNativeMicrophonePermissionStatus(
 
   return {
     errorCategory: 'permission_request_failed',
-    message: 'OmniSheet could not confirm microphone access with macOS. Respond to the macOS permission prompt if it is open, then try again.',
+    message: 'WhiteRabbit could not confirm microphone access with macOS. Respond to the macOS permission prompt if it is open, then try again.',
     permissionErrorName: null,
     permissionOutcome: 'unknown',
   }
@@ -14227,7 +14291,7 @@ function buildMacosNativePermissionRequestFailedDetails(
 ): VoiceRecordingErrorDetails {
   return {
     errorCategory: 'permission_request_failed',
-    message: 'OmniSheet could not request microphone access from macOS. Close the app, reopen it from Finder, and try again.',
+    message: 'WhiteRabbit could not request microphone access from macOS. Close the app, reopen it from Finder, and try again.',
     permissionErrorName: getVoiceErrorName(error),
     permissionOutcome: 'unknown',
   }
@@ -14835,9 +14899,10 @@ function buildOptimisticTimelineEntryPreview(
   const activity = normalizedDraft.activityId
     ? activityById.get(normalizedDraft.activityId) ?? null
     : null
+  const adHoc = normalizedDraft.adHoc ? normalizeAdHocCodes(normalizedDraft.adHoc) : null
   const warningFlags: WarningType[] = []
 
-  if (!normalizedDraft.engagementId || !normalizedDraft.activityId) {
+  if (!adHoc && (!normalizedDraft.engagementId || !normalizedDraft.activityId)) {
     warningFlags.push('unmatched')
   }
 
@@ -14850,10 +14915,11 @@ function buildOptimisticTimelineEntryPreview(
     description: normalizedDraft.description.trim(),
     engagementId: normalizedDraft.engagementId || null,
     activityId: normalizedDraft.activityId || null,
-    engagementCode: engagement?.code ?? null,
+    adHoc,
+    engagementCode: adHoc?.engagementCode ?? engagement?.code ?? null,
     engagementName: engagement?.name ?? null,
-    engagementType: engagement?.engagementType ?? null,
-    activityCode: activity?.code ?? null,
+    engagementType: adHoc ? inferAdHocEngagementType(adHoc.engagementCode) : engagement?.engagementType ?? null,
+    activityCode: adHoc?.activityCode ?? activity?.code ?? null,
     activityName: activity?.name ?? null,
     warningFlags,
   }
@@ -15549,7 +15615,9 @@ function formatSummaryCodeValue(code: string | null | undefined, isUncategorized
   return normalizeDisplayText(code) ?? ''
 }
 
-function getTimelineBlockReviewLabel(warningFlags: WarningType[]): string | null {
+function getTimelineBlockReviewLabel(entry: TimelineEntry): string | null {
+  if (entry.adHoc && !entry.activityCode?.trim()) return 'Activity code missing'
+  const warningFlags = entry.warningFlags
   const hasLowConfidence = warningFlags.includes('low_confidence')
   const hasUnmatched = warningFlags.includes('unmatched')
 
@@ -15587,7 +15655,7 @@ function buildTimelineBlockAriaLabel(
 }
 
 function isTimelineEntryUncategorized(entry: TimelineEntry): boolean {
-  return !entry.engagementId || !entry.activityId
+  return !entry.adHoc && (!entry.engagementId || !entry.activityId)
 }
 
 function resolveTimelineLabelTier(
@@ -15611,6 +15679,13 @@ function buildTimelineBlockLabel(
   blockHeight: number,
 ): TimelineLabel {
   const tier = resolveTimelineLabelTier(widthPercent, blockHeight)
+
+  if (entry.adHoc) {
+    const engagement = entry.engagementCode ?? entry.adHoc.engagementCode
+    const activity = entry.activityCode?.trim()
+    const fullLabel = activity ? `${engagement} | ${activity}` : engagement
+    return { label: fullLabel, fullLabel, tier }
+  }
 
   if (isTimelineEntryUncategorized(entry)) {
     const description = normalizeDisplayText(entry.description)
@@ -15944,6 +16019,7 @@ function resolveSummaryFieldValue(
 }
 
 function formatSummaryRowLabel(row: TimelineWeeklySummary['rows'][number]): string {
+  if (row.isAdHoc) return [row.engagementCode, row.activityCode].filter(Boolean).join(' | ')
   if (row.isUncategorized) {
     return row.engagementId
       ? `${row.engagementName} uncategorized`
@@ -15954,6 +16030,9 @@ function formatSummaryRowLabel(row: TimelineWeeklySummary['rows'][number]): stri
 }
 
 function buildSummaryFreeTextRowKey(row: TimelineWeeklySummary['rows'][number]): string {
+  if (row.isAdHoc) {
+    return `adHoc:${JSON.stringify([row.engagementCode ?? '', row.activityCode ?? ''])}`
+  }
   const activityId = normalizeDisplayText(row.activityId)
   if (activityId) {
     return `activity:${activityId}`
@@ -16590,7 +16669,7 @@ function ReportingTableView({
                         return dayIndexes.map((dayIndex) => {
                           const cell = row.cells[dayIndex]
                           const hasHours = Boolean(cell && cell.totalMinutes > 0)
-                          const noteLabel = `Open notes for ${formatEntityDisplayLabel(row.activityName, row.activityCode)} on ${getSummaryDayName(summary, dayIndex)}`
+                          const noteLabel = `Open notes for ${formatSummaryRowLabel(row)} on ${getSummaryDayName(summary, dayIndex)}`
                           const columnStateClass = getColumnStateClass(column.id)
 
                           return (
@@ -16856,6 +16935,14 @@ function renderReportingDisplayFieldCell(
 
   switch (fieldKey) {
     case 'details': {
+      if (row.isAdHoc) {
+        return (
+          <span className="reporting-v2-details-cell">
+            <strong>{row.activityCode || row.engagementCode}</strong>
+            {row.activityCode ? <span>{row.engagementCode}</span> : null}
+          </span>
+        )
+      }
       const activityLabel = formatEntityPrimaryLabel(
         row.activityName,
         row.activityCode,
@@ -16877,6 +16964,7 @@ function renderReportingDisplayFieldCell(
     case 'engagement':
       return formatEntityPrimaryLabel(row.engagementName, row.engagementCode, 'Uncategorized')
     case 'activity':
+      if (row.isAdHoc) return row.activityCode ?? ''
       return formatEntityPrimaryLabel(row.activityName, row.activityCode, 'Uncategorized')
     case 'client':
       return normalizeDisplayText(row.clientName) ?? '-'

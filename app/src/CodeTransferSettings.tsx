@@ -47,7 +47,7 @@ export function CodeTransferSettings({ engagements, disabled, onImported, onView
         try {
           await onImported()
         } catch {
-          setError('The codes were saved, but the list could not refresh. Restart OmniSheet to see them.')
+          setError('The codes were saved, but the list could not refresh. Restart WhiteRabbit to see them.')
         }
       }
     } catch (caught) {

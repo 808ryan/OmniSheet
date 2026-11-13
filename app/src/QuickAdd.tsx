@@ -645,8 +645,8 @@ function QuickAdd() {
               className="quick-add-home-button"
               onClick={() => void openMainTimeline()}
               disabled={status === 'submitting'}
-              aria-label="Open OmniSheet timeline"
-              title="Open OmniSheet timeline"
+              aria-label="Open WhiteRabbit timeline"
+              title="Open WhiteRabbit timeline"
             >
               <svg
                 className="quick-add-home-icon"

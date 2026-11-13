@@ -1,6 +1,8 @@
 # Development
 
-OmniSheet uses Tauri, React, TypeScript, and Rust. The desktop app provides SQLite storage and native commands; running only the Vite frontend won't provide the full application.
+WhiteRabbit uses Tauri, React, TypeScript, and Rust. The desktop app provides SQLite storage and native commands; running only the Vite frontend won't provide the full application.
+
+The `com.omnisheet.desktop` bundle identifier, `omnisheet.db` database, and `OmniSheet` credential store service connect WhiteRabbit to data and permissions from existing installs.
 
 ## Setup
 

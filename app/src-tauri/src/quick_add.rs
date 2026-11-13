@@ -162,7 +162,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let show_main = MenuItem::with_id(
         app,
         TRAY_MENU_SHOW_MAIN_ID,
-        "Show OmniSheet",
+        "Show WhiteRabbit",
         true,
         None::<&str>,
     )?;

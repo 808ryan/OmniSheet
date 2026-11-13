@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>OmniSheet records short voice notes so it can transcribe them into timesheet entries.</string>
+  <string>WhiteRabbit records short voice notes so it can transcribe them into timesheet entries.</string>
 </dict>
 </plist>
